@@ -189,15 +189,16 @@ static void owner_drop(enum sword3_sdl_kind kind, void *pointer)
  *   B             -> back one level (tap 0x2495) only while draw_gate is
  *                    set. Root back leaves the host session once draw
  *                    falls to 0. Swallowed on the field; never opens.
- *   A             -> confirm only while the menu is painted; swallowed
- *                    on the field so walking A cannot open the menu.
+ *   A             -> confirm while the menu is painted (Return). On the
+ *                    field, Return as well (setting.lua KB_RETURN) so A
+ *                    can talk to NPCs. Not used to open the system menu.
  *   D-pad left/right in menu -> tap the on-screen tab strip
  *   D-pad up/down in menu    -> KB_UP / KB_DOWN
  *
  * In the field the physical pad is the pad:
  *   stick         -> SDL_CONTROLLERAXIS (UIGamePad mode 4 / virtual cross)
  *   D-pad         -> keyboard arrows (setting.lua KB_UP=82 etc.)
- *   A swallowed; B back-only; SELECT opens the system menu
+ *   A talks (Return); B back-only; SELECT opens the system menu
  *
  * Battle already consumes controller logical actions 1..6 (directions,
  * cancel, confirm). Keep those SDL_CONTROLLER events native. iOS 2022 has
@@ -379,6 +380,9 @@ static int g_fight_ncmd;
 static int g_a_down;
 static Uint32 g_a_edge_ms;
 static unsigned g_a_chatter;
+static int g_field_mode_saved;
+static int g_field_mode_held;
+static unsigned g_field_a_seen;
 static unsigned g_finger_seen;
 static unsigned g_pad_seen[GUEST_PAD_BUTTONS];
 static Uint32 g_cursor_ticks;
@@ -1428,22 +1432,12 @@ static void maybe_combo_exit(void)
 {
 	int start = g_btn_start;
 	int back = g_btn_back;
-	SDL_Joystick *joystick;
-	int nbuttons;
 
 	if (g_pad) {
 		start |= SDL_GameControllerGetButton(
 			g_pad, SDL_CONTROLLER_BUTTON_START);
 		back |= SDL_GameControllerGetButton(g_pad,
 						    SDL_CONTROLLER_BUTTON_BACK);
-		joystick = SDL_GameControllerGetJoystick(g_pad);
-		if (joystick) {
-			nbuttons = SDL_JoystickNumButtons(joystick);
-			if (nbuttons > 12)
-				back |= SDL_JoystickGetButton(joystick, 12);
-			if (nbuttons > 13)
-				start |= SDL_JoystickGetButton(joystick, 13);
-		}
 	}
 	if (start && back) {
 		fprintf(stderr, "sword3-sdl: SELECT+START -> exit\n");
@@ -1995,6 +1989,23 @@ static void guest_keyboard_key(SDL_Scancode scancode, int down)
 	}
 }
 
+static void field_talk_key(int down)
+{
+	uint8_t *pad;
+
+	if (down && guest_data_ok(GUEST_UIGAMEPAD)) {
+		pad = (uint8_t *)(uintptr_t)GUEST_UIGAMEPAD;
+		g_field_mode_saved = *(volatile int *)(pad + GUEST_INPUT_MODE);
+		g_field_mode_held = 1;
+	}
+	guest_keyboard_key(SDL_SCANCODE_RETURN, down);
+	if (!down && g_field_mode_held && guest_data_ok(GUEST_UIGAMEPAD)) {
+		pad = (uint8_t *)(uintptr_t)GUEST_UIGAMEPAD;
+		*(volatile int *)(pad + GUEST_INPUT_MODE) = g_field_mode_saved;
+		g_field_mode_held = 0;
+	}
+}
+
 static void menu_enter_session(void)
 {
 	if (g_menu_session)
@@ -2027,6 +2038,7 @@ static void menu_leave_session(void)
 	g_menu_gone_at = 0;
 	g_menu_back_until = 0;
 	g_menu_reenter_until = SDL_GetTicks() + MENU_BACK_GRACE_MS;
+	g_field_mode_held = 0;
 	menu_release_directions();
 	release_guest_walk();
 	if (guest_data_ok(GUEST_UIGAMEPAD)) {
@@ -3142,13 +3154,8 @@ static int rewrite_event(SDL_Event *event)
 		return 0;
 	}
 	if (button == SDL_CONTROLLER_BUTTON_A) {
-		if (g_menu_keys) {
+		if (g_menu_keys && menu_drawn()) {
 			Uint32 now = SDL_GetTicks();
-
-			if (!menu_drawn() && !menu_chrome_drawn()) {
-				event->type = SDL_FIRSTEVENT;
-				return 0;
-			}
 
 			if (!down && g_menu_action_a_up) {
 				g_menu_action_a_up = 0;
@@ -3201,9 +3208,19 @@ static int rewrite_event(SDL_Event *event)
 			return 1;
 		}
 		if (!g_pointer_ui && !g_title_keys && !g_save_ui) {
-			if (g_menu_key_seen < 8 && down)
+			if (!accept_a_edge(down)) {
+				if (!down && g_field_mode_held)
+					field_talk_key(0);
+				event->type = SDL_FIRSTEVENT;
+				return 0;
+			}
+			field_talk_key(down);
+			if (g_field_a_seen < 16) {
+				g_field_a_seen++;
 				fprintf(stderr,
-					"sword3-sdl: field A swallowed\n");
+					"sword3-sdl: field A -> Return %s\n",
+					down ? "down" : "up");
+			}
 			event->type = SDL_FIRSTEVENT;
 			return 0;
 		}
