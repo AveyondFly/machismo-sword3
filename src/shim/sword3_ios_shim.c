@@ -1451,13 +1451,43 @@ sword3_objc_id NSSearchPathForDirectoriesInDomains(
 )
 {
     struct proxy_array *array;
-    const char *path = getenv("SWORD3_DATA_DIR");
-    (void)directory;
+    const char *data = getenv("SWORD3_DATA_DIR");
+    const char *tmpdir = getenv("TMPDIR");
+    const char *path;
+    char transient_path[PATH_MAX];
+    int written;
+    static unsigned seen;
     (void)domain_mask;
     (void)expand_tilde;
 
-    if (!path || path[0] != '/')
-        path = "/tmp/sword3";
+    /*
+     * NSDocumentDirectory (9) is persistent game data. The old shim returned
+     * that same directory for NSCachesDirectory and every other query, so the
+     * game's startup cache cleanup enumerated and deleted CommonSave.lua and
+     * every *.sav file. Keep non-document searches in a separate transient
+     * tree.
+     */
+    if (directory == 9) {
+        path = data && data[0] == '/' ? data : "/tmp/sword3/documents";
+    } else {
+        if (!tmpdir || tmpdir[0] != '/')
+            tmpdir = "/tmp/sword3";
+        written = snprintf(transient_path, sizeof(transient_path),
+                           "%s/ns-search-%llu", tmpdir,
+                           (unsigned long long)directory);
+        if (written < 0 || (size_t)written >= sizeof(transient_path)) {
+            path = "/tmp/sword3/ns-search";
+        } else {
+            path = transient_path;
+        }
+    }
+    if (mkdir_parents(path) != 0 && errno != EEXIST)
+        fprintf(stderr, "sword3-ios-shim: cannot create search path %s: %s\n",
+                path, strerror(errno));
+    if (seen++ < 32)
+        fprintf(stderr,
+                "sword3-ios-shim: NSSearchPath directory=%llu -> %s\n",
+                (unsigned long long)directory, path);
     array = make_proxy_array(1);
     if (!array)
         return NULL;
