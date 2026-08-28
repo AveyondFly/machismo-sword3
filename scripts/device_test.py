@@ -43,7 +43,13 @@ def run(argv: list[str], **kwargs) -> subprocess.CompletedProcess:
     return subprocess.run(argv, check=kwargs.pop("check", True), **kwargs)
 
 
-def deploy(target: str, remote: str, package: Path, ipa: Path | None) -> None:
+def deploy(
+    target: str,
+    remote: str,
+    package: Path,
+    ipa: Path | None,
+    sync_ipa: bool = False,
+) -> None:
     run(ssh_cmd(target) + [f"mkdir -p '{remote}'"])
     print(f"+ tar -C {package} -cf - . | ssh {target} tar -C {remote} -xf -",
           flush=True)
@@ -61,24 +67,18 @@ def deploy(target: str, remote: str, package: Path, ipa: Path | None) -> None:
         raise SystemExit("failed to stream the ROCKNIX package over SSH")
     if not ipa or not ipa.is_file():
         return
-    expected = run(
-        ["sha256sum", str(ipa)],
-        capture_output=True,
-        text=True,
-    ).stdout.split()[0]
-    remote_hash = run(
-        ssh_cmd(target)
-        + [f"sha256sum '{remote}/sword3.ipa' 2>/dev/null | awk '{{print $1}}' || true"],
-        capture_output=True,
-        text=True,
-        check=False,
-    ).stdout.strip()
-    if remote_hash == expected:
-        print(f"remote IPA hash already {expected[:12]}…, skipping scp", flush=True)
-        return
+    remote_ipa = f"{remote}/sword3.ipa"
+    if not sync_ipa:
+        present = run(
+            ssh_cmd(target) + [f"test -f '{remote_ipa}'"],
+            check=False,
+        )
+        if present.returncode == 0:
+            print("remote IPA already present, skipping copy", flush=True)
+            return
     print(f"+ scp {ipa} ({ipa.stat().st_size} bytes)", flush=True)
     run(["scp", "-o", "BatchMode=yes", "-o", "ConnectTimeout=10",
-         str(ipa), f"{target}:{remote}/sword3.ipa"])
+         str(ipa), f"{target}:{remote_ipa}"])
 
 
 def smoke(target: str, remote: str, seconds: int) -> str:
@@ -139,12 +139,23 @@ def main() -> int:
     parser.add_argument("--ipa", type=Path, default=DEFAULT_IPA)
     parser.add_argument("--seconds", type=int, default=25)
     parser.add_argument("--skip-deploy", action="store_true")
+    parser.add_argument(
+        "--sync-ipa",
+        action="store_true",
+        help="copy sword3.ipa even if the remote file already exists",
+    )
     args = parser.parse_args()
 
     if not args.skip_deploy:
         if not args.package.is_dir():
             raise SystemExit(f"package directory missing: {args.package}")
-        deploy(args.target, args.remote_dir, args.package, args.ipa)
+        deploy(
+            args.target,
+            args.remote_dir,
+            args.package,
+            args.ipa,
+            sync_ipa=args.sync_ipa,
+        )
 
     output = smoke(args.target, args.remote_dir, args.seconds)
     lowered = output.lower()

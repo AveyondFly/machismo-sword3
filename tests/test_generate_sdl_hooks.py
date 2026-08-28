@@ -51,6 +51,7 @@ class GeneratedSdlHooksTest(unittest.TestCase):
         self.assertIn("SDL_LockAudioDevice", symbols)
         self.assertIn("SDL_UnlockAudioDevice", symbols)
         self.assertIn("SDL_CloseAudioDevice", symbols)
+        self.assertIn("SDL_IsGameController", symbols)
         self.assertNotIn("UIGamePad_Update", symbols)
         self.assertEqual(report["schema_version"], 2)
 

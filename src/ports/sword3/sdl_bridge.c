@@ -167,21 +167,44 @@ static void owner_drop(enum sword3_sdl_kind kind, void *pointer)
  * SDL_RenderSetLogicalSize letterboxes.
  *
  * Official iOS input is the touch screen. UIGamePad::Update(SDL_Event*)
- * dispatches SDL_FINGERDOWN/UP/MOTION into InputKeyDown / InputClick; it
- * also has reserved SDL2 mouse / keyboard / joystick / controller paths.
+ * dispatches SDL_FINGER* into InputKeyDown / InputClick, and also has
+ * real SDL2 keyboard (mode keys) and controller (mode 4) branches.
  * Do not stub that function.
  *
- * Menu and save screens are tap UIs, not host-style lists. On those screens
- * the pad is a virtual pointer:
- *   stick / D-pad -> move an on-screen cursor (MouseXY + input mode 3)
+ * Title and save are tap UIs. There the pad is a virtual pointer:
+ *   stick / D-pad -> on-screen cursor (MouseXY + input mode 3)
  *   A             -> SDL_FINGERDOWN/UP at the cursor
- *   B             -> mouse right (reserved RPG path)
+ *   B             -> mouse right
  *   START swallowed; SELECT -> Escape; SELECT+START exits
- * Raw controller axis/hat events are swallowed there so the guest cannot
- * switch to joystick mode 4 and ignore the pointer.
- * In the field the stick/D-pad write the virtual-cross slots instead.
+ *
+ * The in-game system menu is a list UI, not the field HUD:
+ *   SELECT opens it (Escape); D-pad moves the highlight; A is Return;
+ *   B / SELECT again closes (Escape). Stick is swallowed so the
+ *   character does not walk behind the menu.
+ *
+ * In the field the physical pad is the pad:
+ *   stick         -> SDL_CONTROLLERAXIS (UIGamePad mode 4 / virtual cross)
+ *   D-pad         -> keyboard arrows (setting.lua KB_UP=82 etc.)
+ *   A / B         -> native controller buttons (CONTROLLER_A / _B)
+ *
+ * Battle is a command grid, not a mouse cursor. iOS 2022 has no
+ * commButtonClass highlight, and the HUD overlay D-pad writes hat
+ * slots that Battle_Input does not poll. We drive the same state the
+ * keyboard handlers use (NowMenu / select index) and draw the yellow
+ * frame from the widget the layout just passed to 0x1001a8b84 — x/y
+ * at +0x20/+0x24, cell size at +0x94/+0x98 — keyed by select slot,
+ * not by a screenshot grid. Extra skills live in a second array and
+ * change with the actor. Stick is swallowed so the field walker does
+ * not run.
+ *
+ *   X / Y / L1 / R1 / stick-clicks are not delivered.
+ * After Continue, map 0 is no longer treated as the title so the
+ * first field does not keep the mouse cursor. Leaving a menu ignores
+ * the stick for a short time so leftover deflection does not walk.
  */
 #define STICK_DEADZONE 14000
+#define STICK_LATCH_MS 400
+#define A_CHATTER_MS 200
 #define CURSOR_PX_PER_SEC 380.0f
 #define MENU_ITEMS 2
 #define MENU_GAME_X 115
@@ -195,21 +218,72 @@ static void owner_drop(enum sword3_sdl_kind kind, void *pointer)
 #define GUEST_SCREEN 0x100319450ull
 #define GUEST_MAP_ID 0x1002a99d4ull
 #define GUEST_UI_FLAGS 0x1002a9a24ull
+#define GUEST_MENU_PAGE 0x1002a9a20ull
 #define GUEST_CONTINUE_WIDGET 0x1002a9418ull
 #define GUEST_MOUSE_X 0x2470
 #define GUEST_MOUSE_Y 0x2474
 #define GUEST_INPUT_MODE 0x23d4
+#define GUEST_KEY_SLOT 0x320
+#define GUEST_KEY_STRIDE 0x18
+#define GUEST_PAD_SLOT 0x20c0
+#define GUEST_PAD_BUTTONS 16
 #define GUEST_DPAD_SLOT 0x2404
 #define GUEST_DPAD_STRIDE 0x18
-#define GUEST_WIDGET_X 0x20
 #define GUEST_VIEW_ORIGIN 0x1c0
 #define GUEST_VIEW_SIZE 0x1c8
 #define GUEST_VIEW_SCALE 0x1c
 #define GUEST_FINGER_SIZE 0x19c
 #define GUEST_FINGER_SCALE 0x1b8
+#define GUEST_KEYSTATE 0x10031ca82ull
+#define GUEST_KEYSTATE_N 512
+#define GUEST_INPUT_KEY 1
 #define GUEST_INPUT_MOUSE 3
-#define GUEST_TITLE_MAP 0x1e
+#define GUEST_INPUT_PAD 4
+#define GUEST_INPUT_HAT 5
 #define GUEST_UI_SAVE 2
+#define GUEST_FIGHT_FLAG 0x1002f27f8ull
+#define GUEST_NOW_MENU 0x1002f1f0cull
+#define GUEST_CMD_SEL 0x1002a5308ull
+#define GUEST_CMD_ENABLE 0x1002f3568ull
+#define GUEST_CMD_BUTTONS 0x1002ab900ull
+#define GUEST_CMD_EXTRA 0x1002abe40ull
+#define GUEST_CMD_COUNT 0x1002f2a08ull
+#define GUEST_CMD_DIRTY 0x1002f2e68ull
+#define GUEST_CMD_HOVER 0x1002a540eull
+#define GUEST_CMD_STRIDE 0xc0u
+#define GUEST_CMD_IMG 8
+#define GUEST_CMD_X 0x20
+#define GUEST_CMD_Y 0x24
+#define GUEST_CMD_H 0x94
+#define GUEST_CMD_W 0x98
+#define GUEST_CMD_CLICKABLE 0x9f
+#define GUEST_CMD_ID 0xb0
+#define GUEST_IMG_W 0x6c
+#define GUEST_IMG_H 0x70
+#define GUEST_CMD_MAIN_N 5
+#define GUEST_CMD_EXTRA_N 4
+#define GUEST_FIGHT_UP 0x10003f13cull
+#define GUEST_FIGHT_DOWN 0x10003f28cull
+#define GUEST_FIGHT_LEFT 0x10003dff8ull
+#define GUEST_FIGHT_RIGHT 0x10003e668ull
+#define GUEST_FIGHT_OK 0x10003ddf8ull
+#define GUEST_FIGHT_CANCEL 0x10003f3ecull
+#define GUEST_FIGHT_TARGET 0x10003deb8ull
+#define GUEST_OVERLAY_KEY 0x1001c16ecull
+#define OVERLAY_KEY_UP 1
+#define OVERLAY_KEY_RIGHT 2
+#define OVERLAY_KEY_DOWN 3
+#define OVERLAY_KEY_LEFT 4
+#define OVERLAY_KEY_B 5
+#define OVERLAY_KEY_A 6
+#define FIGHT_REPEAT_FIRST_MS 380
+#define FIGHT_REPEAT_NEXT_MS 130
+#define FIGHT_DEST_MAX 16
+#define FIGHT_CMD_MAX 12
+#define FIGHT_DIR_UP 1
+#define FIGHT_DIR_RIGHT 2
+#define FIGHT_DIR_DOWN 3
+#define FIGHT_DIR_LEFT 4
 
 static SDL_Window *g_window;
 static SDL_Renderer *g_renderer;
@@ -226,7 +300,30 @@ static int g_menu_item;
 static int g_pointer_ui = 1;
 static int g_save_ui;
 static int g_after_continue;
-static int g_play_dir[4];
+static int g_menu_ui;
+static int g_menu_keys;
+static int g_force_menu;
+static int g_saw_menu_page;
+static int g_fight_ui;
+static int g_fight_stick_key;
+static int g_fight_repeat_dir;
+static int g_fight_repeat_n;
+static Uint32 g_fight_repeat_ms;
+static unsigned g_fight_seen;
+static SDL_FRect g_fight_dest_build[FIGHT_DEST_MAX];
+static int g_fight_ndest_build;
+static SDL_FRect g_fight_dests[FIGHT_DEST_MAX];
+static int g_fight_ndest;
+static SDL_FRect g_fight_cmds[8];
+static int g_fight_ncmd;
+static int g_dir_held[4];
+static int g_stick_latched;
+static Uint32 g_stick_latch_ms;
+static int g_a_down;
+static Uint32 g_a_edge_ms;
+static unsigned g_a_chatter;
+static unsigned g_finger_seen;
+static unsigned g_pad_seen[GUEST_PAD_BUTTONS];
 static Uint32 g_cursor_ticks;
 static int g_swallow_a_up;
 
@@ -390,8 +487,6 @@ static int guest_data_ok(uintptr_t addr)
 	return addr >= 0x100294000ull && addr < 0x100380000ull;
 }
 
-static void fill_key(SDL_Event *event, SDL_Scancode scancode, int down);
-
 static void maybe_init_guest_viewport(uint8_t *screen)
 {
 	static int logged;
@@ -403,14 +498,16 @@ static void maybe_init_guest_viewport(uint8_t *screen)
 	int lw = g_logical_w > 0 ? g_logical_w : 800;
 	int lh = g_logical_h > 0 ? g_logical_h : 600;
 
-	if (size[0] > 0 && size[1] > 0)
-		return;
-	origin[0] = 0;
-	origin[1] = 0;
-	size[0] = lw;
-	size[1] = lh;
-	scale[0] = (float)GAME_W / (float)lw;
-	scale[1] = (float)GAME_H / (float)lh;
+	if (size[0] <= 0 || size[1] <= 0) {
+		origin[0] = 0;
+		origin[1] = 0;
+		size[0] = lw;
+		size[1] = lh;
+	}
+	if (scale[0] == 0.0f && scale[1] == 0.0f) {
+		scale[0] = (float)GAME_W / (float)lw;
+		scale[1] = (float)GAME_H / (float)lh;
+	}
 	if (finger_size[0] <= 0 || finger_size[1] <= 0) {
 		finger_size[0] = lw;
 		finger_size[1] = lh;
@@ -422,9 +519,122 @@ static void maybe_init_guest_viewport(uint8_t *screen)
 	if (!logged) {
 		logged = 1;
 		fprintf(stderr,
-			"sword3-sdl: guest viewport %dx%d scale %.3f,%.3f\n",
-			lw, lh, scale[0], scale[1]);
+			"sword3-sdl: guest viewport %dx%d scale %.3f,%.3f finger %dx%d\n",
+			lw, lh, scale[0], scale[1], finger_size[0],
+			finger_size[1]);
 	}
+}
+
+static void try_init_guest_viewport(void)
+{
+	if (!guest_data_ok(GUEST_SCREEN))
+		return;
+	maybe_init_guest_viewport((uint8_t *)(uintptr_t)GUEST_SCREEN);
+}
+
+static void guest_clamp_rect(int *x, int *y, int w, int h, int fw, int fh)
+{
+	if (*x + w > fw)
+		*x = fw - w;
+	if (*y + h > fh)
+		*y = fh - h;
+	if (*x < 0)
+		*x = 0;
+	if (*y < 0)
+		*y = 0;
+}
+
+/*
+ * 0x1001f7b98 clamps every widget to (0,0) when Screen.finger_size is 0.
+ * If layout already ran that way, shove the HUD back to the landscape
+ * positions the loader would have used with a real 800×600 finger area.
+ */
+static void maybe_fix_overlay_widgets(uint8_t *screen)
+{
+	static int done;
+	uint8_t *pad;
+	int fw;
+	int fh;
+	int size;
+	int gap;
+	int portrait;
+	int x;
+	int y;
+	int w;
+	int dw;
+	float scale;
+	volatile int *confirm;
+	volatile int *config;
+	volatile int *undo;
+	volatile int *dpad;
+	volatile int *a_btn;
+
+	if (done)
+		return;
+	if (!guest_data_ok(GUEST_UIGAMEPAD))
+		return;
+	pad = (uint8_t *)(uintptr_t)GUEST_UIGAMEPAD;
+	fw = ((volatile int *)(screen + GUEST_FINGER_SIZE))[0];
+	fh = ((volatile int *)(screen + GUEST_FINGER_SIZE))[1];
+	size = *(volatile int *)(pad + 0x340);
+	if (fw <= 1 || fh <= 1 || size <= 0)
+		return;
+	confirm = (volatile int *)(pad + 0x138 + 0x70);
+	config = (volatile int *)(pad + 0x1c0 + 0x70);
+	undo = (volatile int *)(pad + 0x248 + 0x70);
+	if (confirm[0] != 0 || confirm[1] != 0 || config[0] != 0 ||
+	    config[1] != 0)
+		return;
+	done = 1;
+	scale = *(volatile float *)(pad + 0x334);
+	gap = (int)(scale * 0.2f);
+	portrait = *(volatile int *)(pad + 0x344);
+	x = portrait ? 0 : gap;
+	y = 0;
+	guest_clamp_rect(&x, &y, size, size, fw, fh);
+	confirm[0] = x;
+	confirm[1] = y;
+	confirm[2] = size;
+	confirm[3] = size;
+	x = confirm[0] + gap + size;
+	y = 0;
+	guest_clamp_rect(&x, &y, size, size, fw, fh);
+	config[0] = x;
+	config[1] = y;
+	config[2] = size;
+	config[3] = size;
+	x = config[0] + gap + size;
+	y = 0;
+	guest_clamp_rect(&x, &y, size, size, fw, fh);
+	undo[0] = x;
+	undo[1] = y;
+	undo[2] = size;
+	undo[3] = size;
+	w = *(volatile int *)(pad + 0x33c);
+	dw = *(volatile int *)(pad + 0x338);
+	dpad = (volatile int *)(pad + 0x9c);
+	a_btn = (volatile int *)(pad + 0xb0 + 0x70);
+	if (dpad[0] == 0 && dpad[1] == 0 && dw > 0) {
+		x = gap;
+		y = (fh / 2) - ((dw + 3) >> 2);
+		guest_clamp_rect(&x, &y, dw, dw, fw, fh);
+		dpad[0] = x;
+		dpad[1] = y;
+		dpad[2] = dw;
+		dpad[3] = dw;
+	}
+	if (a_btn[0] == 0 && a_btn[1] == 0 && w > 0) {
+		x = fw - gap - w;
+		y = (fh / 2) - (w / 3);
+		guest_clamp_rect(&x, &y, w, w, fw, fh);
+		a_btn[0] = x;
+		a_btn[1] = y;
+		a_btn[2] = w;
+		a_btn[3] = w;
+	}
+	fprintf(stderr,
+		"sword3-sdl: unstacked overlay widgets finger=%dx%d size=%d\n",
+		fw, fh, size);
 }
 
 static int guest_map_id(void)
@@ -438,14 +648,18 @@ static int guest_on_title(void)
 {
 	int map = guest_map_id();
 
+	/*
+	 * Map 0 is the boot/title value. Maps 0x1e+ are playable (the first
+	 * field used to be misclassified as title, which kept the pad in
+	 * pointer mode so walking never started).
+	 */
 	if (map < 0)
 		return 1;
-	if (map == 0)
-		return 1;
-	if (map >= GUEST_TITLE_MAP && map < GUEST_TITLE_MAP + 3)
-		return 1;
-	return 0;
+	return map == 0;
 }
+
+static void fill_key(SDL_Event *event, SDL_Scancode scancode, int down);
+static void fill_finger(SDL_Event *event, Uint32 type);
 
 static int guest_save_ui(void)
 {
@@ -454,100 +668,749 @@ static int guest_save_ui(void)
 	return (*(volatile int *)(uintptr_t)GUEST_UI_FLAGS & GUEST_UI_SAVE) != 0;
 }
 
-static void clear_play_dirs(void)
+static int guest_system_menu(void)
 {
-	memset(g_play_dir, 0, sizeof(g_play_dir));
+	int page;
+
+	if (!guest_data_ok(GUEST_MENU_PAGE))
+		return 0;
+	page = *(volatile int *)(uintptr_t)GUEST_MENU_PAGE;
+	return page != 0;
+}
+
+static int guest_read_i32(uintptr_t addr, int fallback)
+{
+	if (!guest_data_ok(addr))
+		return fallback;
+	return *(volatile int *)(uintptr_t)addr;
+}
+
+static void guest_write_i32(uintptr_t addr, int value)
+{
+	if (!guest_data_ok(addr))
+		return;
+	*(volatile int *)(uintptr_t)addr = value;
+}
+
+static int guest_now_menu(void)
+{
+	return guest_read_i32(GUEST_NOW_MENU, 0);
+}
+
+static int guest_cmd_sel(void)
+{
+	return guest_read_i32(GUEST_CMD_SEL, 0);
+}
+
+static int guest_in_fight(void)
+{
+	int flag;
+	int now;
+
+	/*
+	 * 0x100045510 is the game's inFight getter: FightFlag bit 1.
+	 * Other bits (observed 0x41) stay set outside battle, so flag!=0
+	 * falsely takes over the field: stick swallowed, D-pad rewritten.
+	 * NowMenu 1..0x3f is the command / target layer while a fight is
+	 * actually running.
+	 */
+	flag = guest_read_i32(GUEST_FIGHT_FLAG, 0);
+	if (flag & 2)
+		return 1;
+	now = guest_now_menu();
+	return now > 0 && now < 0x40;
+}
+
+static int guest_cmd_extra_count(void)
+{
+	int n;
+
+	if (!guest_data_ok(GUEST_CMD_COUNT))
+		return GUEST_CMD_EXTRA_N;
+	n = *(volatile uint16_t *)(uintptr_t)GUEST_CMD_COUNT;
+	if (n < 0)
+		return 0;
+	if (n > GUEST_CMD_EXTRA_N)
+		return GUEST_CMD_EXTRA_N;
+	return n;
+}
+
+static uint8_t *guest_cmd_for_sel(int sel)
+{
+	uintptr_t addr;
+
+	if (sel < 1 || sel > FIGHT_CMD_MAX)
+		return NULL;
+	if (sel <= GUEST_CMD_MAIN_N) {
+		addr = GUEST_CMD_BUTTONS +
+		       (uintptr_t)(sel - 1) * GUEST_CMD_STRIDE;
+	} else if (sel <= GUEST_CMD_MAIN_N + GUEST_CMD_EXTRA_N) {
+		addr = GUEST_CMD_EXTRA +
+		       (uintptr_t)(sel - GUEST_CMD_MAIN_N - 1) *
+			       GUEST_CMD_STRIDE;
+	} else {
+		return NULL;
+	}
+	if (!guest_data_ok(addr) || !guest_data_ok(addr + GUEST_CMD_ID + 4))
+		return NULL;
+	return (uint8_t *)addr;
+}
+
+static int guest_cmd_enabled(int index)
+{
+	uint8_t *flags;
+
+	if (index < 1 || index > FIGHT_CMD_MAX)
+		return 0;
+	if (!guest_data_ok(GUEST_CMD_ENABLE))
+		return 1;
+	flags = (uint8_t *)(uintptr_t)GUEST_CMD_ENABLE;
+	return flags[index - 1] != 0;
+}
+
+static int guest_cmd_rect(int index, int *x, int *y, int *w, int *h)
+{
+	uint8_t *btn;
+	uint8_t *img;
+	int bx;
+	int by;
+	int bw;
+	int bh;
+
+	btn = guest_cmd_for_sel(index);
+	if (!btn)
+		return 0;
+	bx = *(volatile int *)(btn + GUEST_CMD_X);
+	by = *(volatile int *)(btn + GUEST_CMD_Y);
+	if (bx == -1 || by == -1)
+		return 0;
+	if (bx <= 0 && by <= 0)
+		return 0;
+	bw = *(volatile int *)(btn + GUEST_CMD_W);
+	bh = *(volatile int *)(btn + GUEST_CMD_H);
+	if (bw < 24 || bw > 240 || bh < 24 || bh > 240) {
+		bw = 0;
+		bh = 0;
+		img = (uint8_t *)(uintptr_t)*(volatile uintptr_t *)(btn +
+								   GUEST_CMD_IMG);
+		if (img && guest_data_ok((uintptr_t)img) &&
+		    guest_data_ok((uintptr_t)img + GUEST_IMG_H + 4)) {
+			bw = *(volatile int *)(img + GUEST_IMG_W);
+			bh = *(volatile int *)(img + GUEST_IMG_H);
+		}
+	}
+	if (bw < 24 || bw > 240)
+		bw = 96;
+	if (bh < 24 || bh > 240)
+		bh = 96;
+	*x = bx;
+	*y = by;
+	*w = bw;
+	*h = bh;
+	return 1;
+}
+
+static int fight_cmd_visible(void)
+{
+	int x;
+	int y;
+	int w;
+	int h;
+	int i;
+	int last;
+
+	last = GUEST_CMD_MAIN_N + guest_cmd_extra_count();
+	for (i = 1; i <= last; i++) {
+		if (guest_cmd_rect(i, &x, &y, &w, &h))
+			return 1;
+	}
+	return 0;
+}
+
+static void fight_mark_dirty(void)
+{
+	if (guest_data_ok(GUEST_CMD_DIRTY))
+		*(volatile uint8_t *)(uintptr_t)GUEST_CMD_DIRTY = 1;
+}
+
+static void fight_ensure_command_layer(void)
+{
+	int now = guest_now_menu();
+	int sel;
+
+	if (now != 0)
+		return;
+	if (!(guest_read_i32(GUEST_FIGHT_FLAG, 0) & 2))
+		return;
+	if (!fight_cmd_visible())
+		return;
+	guest_write_i32(GUEST_NOW_MENU, 1);
+	sel = guest_cmd_sel();
+	if (sel < 1 || sel > FIGHT_CMD_MAX || !guest_cmd_enabled(sel))
+		guest_write_i32(GUEST_CMD_SEL, 1);
+	fight_mark_dirty();
+}
+
+static void fight_log(const char *what)
+{
+	uint8_t *btn;
+	int x = 0;
+	int y = 0;
+	int w = 0;
+	int h = 0;
+	int sel;
+	int id = 0;
+	int click = 0;
+	int i;
+	int sx;
+	int sy;
+	int sw;
+	int sh;
+
+	if (g_fight_seen >= 48)
+		return;
+	g_fight_seen++;
+	if (g_fight_seen == 1) {
+		for (i = 1; i <= GUEST_CMD_MAIN_N + GUEST_CMD_EXTRA_N; i++) {
+			btn = guest_cmd_for_sel(i);
+			sx = sy = sw = sh = 0;
+			id = 0;
+			click = 0;
+			if (btn) {
+				id = *(volatile int *)(btn + GUEST_CMD_ID);
+				click = btn[GUEST_CMD_CLICKABLE];
+				sx = *(volatile int *)(btn + GUEST_CMD_X);
+				sy = *(volatile int *)(btn + GUEST_CMD_Y);
+				sw = *(volatile int *)(btn + GUEST_CMD_W);
+				sh = *(volatile int *)(btn + GUEST_CMD_H);
+			}
+			fprintf(stderr,
+				"sword3-sdl: fight slot %d id=%d click=%d en=%d xy=%d,%d %dx%d\n",
+				i, id, click, guest_cmd_enabled(i), sx, sy, sw,
+				sh);
+		}
+	}
+	sel = guest_cmd_sel();
+	guest_cmd_rect(sel, &x, &y, &w, &h);
+	btn = guest_cmd_for_sel(sel);
+	id = 0;
+	click = 0;
+	if (btn) {
+		id = *(volatile int *)(btn + GUEST_CMD_ID);
+		click = btn[GUEST_CMD_CLICKABLE];
+	}
+	fprintf(stderr,
+		"sword3-sdl: fight %s flag=%d now=%d sel=%d extra=%d id=%d click=%d btn=%d,%d %dx%d\n",
+		what, guest_read_i32(GUEST_FIGHT_FLAG, -1), guest_now_menu(),
+		sel, guest_cmd_extra_count(), id, click, x, y, w, h);
+}
+
+static void guest_overlay_key(int key, int down)
+{
+	uint8_t *pad;
+	void (*enqueue)(void *, int, int, int);
+	int mode;
+
+	if (key < 1 || key > 6)
+		return;
+	if (!guest_data_ok(GUEST_UIGAMEPAD))
+		return;
+	pad = (uint8_t *)(uintptr_t)GUEST_UIGAMEPAD;
+	mode = *(volatile int *)(pad + GUEST_INPUT_MODE);
+	if (mode == GUEST_INPUT_MOUSE || mode == GUEST_INPUT_HAT)
+		mode = GUEST_INPUT_PAD;
+	enqueue = (void (*)(void *, int, int, int))(uintptr_t)GUEST_OVERLAY_KEY;
+	enqueue(pad, key, down, mode);
+}
+
+/*
+ * Overlay A/Undo become InputClick on key-up (slot type 2). Target
+ * confirm (NowMenu==3 / 请选择目标) polls that click via 0x1001c1208.
+ */
+static void guest_overlay_click(int key)
+{
+	guest_overlay_key(key, 1);
+	guest_overlay_key(key, 0);
+}
+
+static void fight_move(int dir)
+{
+	if (!dir)
+		return;
+	fight_ensure_command_layer();
+	if (dir == FIGHT_DIR_LEFT || dir == FIGHT_DIR_RIGHT) {
+		if (guest_now_menu() == 0)
+			((void (*)(void))(uintptr_t)GUEST_FIGHT_TARGET)();
+	}
+	switch (dir) {
+	case FIGHT_DIR_UP:
+		((void (*)(void))(uintptr_t)GUEST_FIGHT_UP)();
+		break;
+	case FIGHT_DIR_RIGHT:
+		((void (*)(void))(uintptr_t)GUEST_FIGHT_RIGHT)();
+		break;
+	case FIGHT_DIR_DOWN:
+		((void (*)(void))(uintptr_t)GUEST_FIGHT_DOWN)();
+		break;
+	case FIGHT_DIR_LEFT:
+		((void (*)(void))(uintptr_t)GUEST_FIGHT_LEFT)();
+		break;
+	default:
+		return;
+	}
+	fight_mark_dirty();
+	fight_log(dir == FIGHT_DIR_UP ? "up" :
+		  dir == FIGHT_DIR_RIGHT ? "right" :
+		  dir == FIGHT_DIR_DOWN ? "down" : "left");
+}
+
+static void fight_confirm(void)
+{
+	int now = guest_now_menu();
+
+	if (now == 0)
+		fight_ensure_command_layer();
+	if (guest_data_ok(GUEST_CMD_HOVER))
+		*(volatile int16_t *)(uintptr_t)GUEST_CMD_HOVER = -1;
+	fight_mark_dirty();
+	if (now >= 3) {
+		if (guest_data_ok(GUEST_UIGAMEPAD))
+			((void (*)(void *))(uintptr_t)0x1001c18d4ull)(
+				(void *)(uintptr_t)GUEST_UIGAMEPAD);
+		guest_overlay_click(OVERLAY_KEY_A);
+		fight_mark_dirty();
+	}
+	((void (*)(int))(uintptr_t)GUEST_FIGHT_OK)(0);
+	fight_log("A");
+}
+
+static void fight_cancel(void)
+{
+	((void (*)(void))(uintptr_t)GUEST_FIGHT_CANCEL)();
+	fight_mark_dirty();
+	fight_log("B");
+}
+
+static int fight_dir_from_button(int button)
+{
+	switch (button) {
+	case SDL_CONTROLLER_BUTTON_DPAD_UP:
+		return FIGHT_DIR_UP;
+	case SDL_CONTROLLER_BUTTON_DPAD_RIGHT:
+		return FIGHT_DIR_RIGHT;
+	case SDL_CONTROLLER_BUTTON_DPAD_DOWN:
+		return FIGHT_DIR_DOWN;
+	case SDL_CONTROLLER_BUTTON_DPAD_LEFT:
+		return FIGHT_DIR_LEFT;
+	default:
+		return 0;
+	}
+}
+
+static int fight_held_dir(void)
+{
+	int i;
+	static const int held_to_dir[4] = {
+		FIGHT_DIR_UP,
+		FIGHT_DIR_DOWN,
+		FIGHT_DIR_LEFT,
+		FIGHT_DIR_RIGHT,
+	};
+
+	for (i = 0; i < 4; i++) {
+		if (g_dir_held[i])
+			return held_to_dir[i];
+	}
+	return 0;
+}
+
+static int cmp_fight_dest(const void *a, const void *b)
+{
+	const SDL_FRect *pa = a;
+	const SDL_FRect *pb = b;
+
+	if (pa->y + 8.0f < pb->y)
+		return -1;
+	if (pa->y > pb->y + 8.0f)
+		return 1;
+	if (pa->x < pb->x)
+		return -1;
+	if (pa->x > pb->x)
+		return 1;
+	return 0;
+}
+
+static int fight_dest_candidate(SDL_Renderer *renderer, const SDL_FRect *dst)
+{
+	float lw;
+	float lh;
+
+	if (!g_fight_ui || !dst || !renderer)
+		return 0;
+	if (SDL_GetRenderTarget(renderer) != NULL)
+		return 0;
+	lw = g_logical_w > 0 ? (float)g_logical_w : (float)GAME_W;
+	lh = g_logical_h > 0 ? (float)g_logical_h : (float)GAME_H;
+	if (dst->w < 12.0f || dst->w > 160.0f)
+		return 0;
+	if (dst->h < 12.0f || dst->h > 110.0f)
+		return 0;
+	if (dst->x < lw * 0.22f)
+		return 0;
+	if (dst->y < lh * 0.06f || dst->y > lh * 0.62f)
+		return 0;
+	return 1;
+}
+
+static void fight_note_dest(SDL_Renderer *renderer, const SDL_FRect *dst)
+{
+	if (!fight_dest_candidate(renderer, dst))
+		return;
+	if (g_fight_ndest_build >= FIGHT_DEST_MAX)
+		return;
+	g_fight_dest_build[g_fight_ndest_build++] = *dst;
+}
+
+static int fight_rects_near(const SDL_FRect *a, const SDL_FRect *b, float gap)
+{
+	return a->x < b->x + b->w + gap && a->x + a->w + gap > b->x &&
+	       a->y < b->y + b->h + gap && a->y + a->h + gap > b->y;
+}
+
+static void fight_union_rect(SDL_FRect *dst, const SDL_FRect *src)
+{
+	float x2;
+	float y2;
+
+	x2 = dst->x + dst->w;
+	y2 = dst->y + dst->h;
+	if (src->x < dst->x)
+		dst->x = src->x;
+	if (src->y < dst->y)
+		dst->y = src->y;
+	if (src->x + src->w > x2)
+		x2 = src->x + src->w;
+	if (src->y + src->h > y2)
+		y2 = src->y + src->h;
+	dst->w = x2 - dst->x;
+	dst->h = y2 - dst->y;
+}
+
+static void fight_inflate_cmd(SDL_FRect *r)
+{
+	float cx;
+	float bottom;
+
+	cx = r->x + r->w * 0.5f;
+	bottom = r->y + r->h;
+	if (r->w < 92.0f)
+		r->w = 92.0f;
+	if (r->h < 96.0f)
+		r->h = 96.0f;
+	r->x = cx - r->w * 0.5f;
+	r->y = bottom - r->h + 8.0f;
+}
+
+static void fight_cluster_dests(void)
+{
+	int used[FIGHT_DEST_MAX];
+	int i;
+	int j;
+	int merged;
+	SDL_FRect u;
+
+	memset(used, 0, sizeof(used));
+	g_fight_ncmd = 0;
+	for (i = 0; i < g_fight_ndest; i++) {
+		if (used[i])
+			continue;
+		u = g_fight_dests[i];
+		used[i] = 1;
+		do {
+			merged = 0;
+			for (j = 0; j < g_fight_ndest; j++) {
+				if (used[j])
+					continue;
+				if (!fight_rects_near(&u, &g_fight_dests[j], 20.0f))
+					continue;
+				fight_union_rect(&u, &g_fight_dests[j]);
+				used[j] = 1;
+				merged = 1;
+			}
+		} while (merged);
+		if (u.w < 20.0f || u.h < 14.0f)
+			continue;
+		if (g_fight_ncmd >= 8)
+			break;
+		fight_inflate_cmd(&u);
+		g_fight_cmds[g_fight_ncmd++] = u;
+	}
+	if (g_fight_ncmd > 1)
+		qsort(g_fight_cmds, (size_t)g_fight_ncmd, sizeof(g_fight_cmds[0]),
+		      cmp_fight_dest);
+}
+
+static void fight_commit_dests(void)
+{
+	g_fight_ndest = g_fight_ndest_build;
+	if (g_fight_ndest > 0) {
+		memcpy(g_fight_dests, g_fight_dest_build,
+		       (size_t)g_fight_ndest * sizeof(g_fight_dests[0]));
+		qsort(g_fight_dests, (size_t)g_fight_ndest, sizeof(g_fight_dests[0]),
+		      cmp_fight_dest);
+	}
+	g_fight_ndest_build = 0;
+	fight_cluster_dests();
+}
+
+static int fight_select_rect(int *x, int *y, int *w, int *h)
+{
+	int sel;
+	int gx;
+	int gy;
+	int gw;
+	int gh;
+	int lw;
+	int lh;
+	int now;
+
+	now = guest_now_menu();
+	if (now != 1)
+		return 0;
+	sel = guest_cmd_sel();
+	if (sel < 1 || sel > FIGHT_CMD_MAX)
+		sel = 1;
+	if (!guest_cmd_rect(sel, &gx, &gy, &gw, &gh))
+		return 0;
+	lw = g_logical_w > 0 ? g_logical_w : GAME_W;
+	lh = g_logical_h > 0 ? g_logical_h : GAME_H;
+	*x = gx * lw / GAME_W;
+	*y = gy * lh / GAME_H;
+	*w = gw * lw / GAME_W;
+	*h = gh * lh / GAME_H;
+	return 1;
+}
+
+static void draw_select_frame(SDL_Renderer *renderer, int x, int y, int w,
+			      int h)
+{
+	SDL_Rect arm[4];
+	Uint8 r;
+	Uint8 g;
+	Uint8 b;
+	Uint8 a;
+	SDL_BlendMode blend;
+	int t = 3;
+	int i;
+
+	if (w < 12)
+		w = 12;
+	if (h < 12)
+		h = 12;
+	SDL_GetRenderDrawColor(renderer, &r, &g, &b, &a);
+	SDL_GetRenderDrawBlendMode(renderer, &blend);
+	SDL_SetRenderDrawBlendMode(renderer, SDL_BLENDMODE_BLEND);
+	SDL_SetRenderDrawColor(renderer, 0, 0, 0, 200);
+	arm[0].x = x - 1;
+	arm[0].y = y - 1;
+	arm[0].w = w + 2;
+	arm[0].h = t + 1;
+	arm[1].x = x - 1;
+	arm[1].y = y + h - t;
+	arm[1].w = w + 2;
+	arm[1].h = t + 1;
+	arm[2].x = x - 1;
+	arm[2].y = y - 1;
+	arm[2].w = t + 1;
+	arm[2].h = h + 2;
+	arm[3].x = x + w - t;
+	arm[3].y = y - 1;
+	arm[3].w = t + 1;
+	arm[3].h = h + 2;
+	for (i = 0; i < 4; i++)
+		SDL_RenderFillRect(renderer, &arm[i]);
+	SDL_SetRenderDrawColor(renderer, 255, 220, 64, 255);
+	arm[0].x = x;
+	arm[0].y = y;
+	arm[0].w = w;
+	arm[0].h = t;
+	arm[1].x = x;
+	arm[1].y = y + h - t;
+	arm[1].w = w;
+	arm[1].h = t;
+	arm[2].x = x;
+	arm[2].y = y;
+	arm[2].w = t;
+	arm[2].h = h;
+	arm[3].x = x + w - t;
+	arm[3].y = y;
+	arm[3].w = t;
+	arm[3].h = h;
+	for (i = 0; i < 4; i++)
+		SDL_RenderFillRect(renderer, &arm[i]);
+	SDL_SetRenderDrawColor(renderer, r, g, b, a);
+	SDL_SetRenderDrawBlendMode(renderer, blend);
+}
+
+static void release_overlay_keys(void)
+{
+	int i;
+
+	if (g_fight_stick_key) {
+		guest_overlay_key(g_fight_stick_key, 0);
+		g_fight_stick_key = 0;
+	}
+	if (!g_fight_ui)
+		return;
+	for (i = 1; i <= 6; i++)
+		guest_overlay_key(i, 0);
+}
+
+static void clear_input_slot(uint8_t *slot)
+{
+	slot[0] = 0;
+	slot[8] = 0;
+}
+
+static void push_key(SDL_Scancode scancode, int down)
+{
+	SDL_Event event;
+
+	fill_key(&event, scancode, down);
+	SDL_PushEvent(&event);
+}
+
+static void release_guest_walk(void)
+{
+	static const SDL_Scancode dirs[4] = {
+		SDL_SCANCODE_UP,
+		SDL_SCANCODE_DOWN,
+		SDL_SCANCODE_LEFT,
+		SDL_SCANCODE_RIGHT,
+	};
+	uint8_t *pad;
+	int i;
+
+	if (!guest_data_ok(GUEST_UIGAMEPAD))
+		return;
+	pad = (uint8_t *)(uintptr_t)GUEST_UIGAMEPAD;
+	clear_input_slot(pad + GUEST_KEY_SLOT +
+			 SDL_SCANCODE_UP * GUEST_KEY_STRIDE);
+	clear_input_slot(pad + GUEST_KEY_SLOT +
+			 SDL_SCANCODE_DOWN * GUEST_KEY_STRIDE);
+	clear_input_slot(pad + GUEST_KEY_SLOT +
+			 SDL_SCANCODE_LEFT * GUEST_KEY_STRIDE);
+	clear_input_slot(pad + GUEST_KEY_SLOT +
+			 SDL_SCANCODE_RIGHT * GUEST_KEY_STRIDE);
+	clear_input_slot(pad + GUEST_KEY_SLOT +
+			 SDL_SCANCODE_RETURN * GUEST_KEY_STRIDE);
+	clear_input_slot(pad + GUEST_KEY_SLOT +
+			 SDL_SCANCODE_ESCAPE * GUEST_KEY_STRIDE);
+	for (i = 0; i < 4; i++)
+		clear_input_slot(pad + GUEST_DPAD_SLOT + i * GUEST_DPAD_STRIDE);
+	for (i = 0; i < GUEST_PAD_BUTTONS; i++)
+		clear_input_slot(pad + GUEST_PAD_SLOT + i * GUEST_KEY_STRIDE);
+	release_overlay_keys();
+	for (i = 0; i < 4; i++) {
+		if (!g_dir_held[i])
+			continue;
+		g_dir_held[i] = 0;
+		push_key(dirs[i], 0);
+	}
+}
+
+static void warp_screen_center(void)
+{
+	if (g_logical_w <= 0 || g_logical_h <= 0)
+		return;
+	g_cursor_x = (float)g_logical_w * 0.5f;
+	g_cursor_y = (float)g_logical_h * 0.5f;
+	clamp_cursor();
+	g_cursor_ready = 1;
 }
 
 static void sync_ui_mode(void)
 {
 	int on_title = guest_on_title();
+	int title_ui = on_title && !g_after_continue;
 	int save_ui = guest_save_ui();
+	int menu_ui = guest_system_menu();
 	int pointer_ui;
+	int menu_keys;
+	int fight_ui;
+	uint8_t *pad;
 
 	if (!on_title && !save_ui)
 		g_after_continue = 0;
-	pointer_ui = on_title || save_ui || g_after_continue;
-	if (pointer_ui == g_pointer_ui && save_ui == g_save_ui)
+	if (g_force_menu && menu_ui)
+		g_saw_menu_page = 1;
+	if (g_force_menu && g_saw_menu_page && !menu_ui) {
+		g_force_menu = 0;
+		g_saw_menu_page = 0;
+	}
+	pointer_ui = title_ui || save_ui;
+	menu_keys = !title_ui && !save_ui && (menu_ui || g_force_menu);
+	fight_ui = !pointer_ui && !menu_keys && guest_in_fight();
+	if (pointer_ui == g_pointer_ui && save_ui == g_save_ui &&
+	    menu_ui == g_menu_ui && menu_keys == g_menu_keys &&
+	    fight_ui == g_fight_ui)
 		return;
+	if ((pointer_ui && !g_pointer_ui) || (menu_keys && !g_menu_keys) ||
+	    (fight_ui && !g_fight_ui)) {
+		release_guest_walk();
+		g_a_down = 0;
+		if (pointer_ui && !title_ui)
+			warp_screen_center();
+		g_cursor_ticks = 0;
+		if (fight_ui) {
+			g_fight_repeat_dir = 0;
+			g_fight_repeat_n = 0;
+			g_fight_seen = 0;
+			fight_ensure_command_layer();
+			if (guest_cmd_sel() < 1)
+				guest_write_i32(GUEST_CMD_SEL, 1);
+		}
+	}
+	if ((g_pointer_ui || g_menu_keys || g_fight_ui) && !pointer_ui &&
+	    !menu_keys && !fight_ui) {
+		if (g_finger_down) {
+			SDL_Event event;
+
+			memset(&event, 0, sizeof(event));
+			fill_finger(&event, SDL_FINGERUP);
+			SDL_PushEvent(&event);
+			g_finger_down = 0;
+		}
+		release_guest_walk();
+		g_stick_latched = 1;
+		g_stick_latch_ms = SDL_GetTicks();
+		g_a_down = 0;
+		g_finger_down = 0;
+		if (guest_data_ok(GUEST_UIGAMEPAD)) {
+			pad = (uint8_t *)(uintptr_t)GUEST_UIGAMEPAD;
+			*(volatile int *)(pad + GUEST_INPUT_MODE) =
+				GUEST_INPUT_PAD;
+		}
+	}
 	g_save_ui = save_ui;
+	g_menu_ui = menu_ui;
 	g_pointer_ui = pointer_ui;
+	g_menu_keys = menu_keys;
+	g_fight_ui = fight_ui;
+	g_fight_repeat_dir = 0;
+	g_fight_stick_key = 0;
 	fprintf(stderr,
-		"sword3-sdl: ui pointer=%d save=%d after=%d map=%d flags=%d cursor=%.0f,%.0f\n",
-		pointer_ui, save_ui, g_after_continue, guest_map_id(),
+		"sword3-sdl: ui pointer=%d keys=%d fight=%d save=%d menu=%d page=%d now=%d sel=%d after=%d force=%d map=%d flags=%d cursor=%.0f,%.0f\n",
+		pointer_ui, menu_keys, fight_ui, save_ui, menu_ui,
+		guest_data_ok(GUEST_MENU_PAGE)
+			? *(volatile int *)(uintptr_t)GUEST_MENU_PAGE
+			: -1,
+		guest_now_menu(), guest_cmd_sel(), g_after_continue,
+		g_force_menu, guest_map_id(),
 		guest_data_ok(GUEST_UI_FLAGS)
 			? *(volatile int *)(uintptr_t)GUEST_UI_FLAGS
 			: -1,
 		g_cursor_x, g_cursor_y);
-	if (pointer_ui)
-		clear_play_dirs();
-}
-
-static void write_dir_slot(uint8_t *pad, int dir, int held)
-{
-	uint8_t *slot;
-
-	if (dir < 1 || dir > 4)
-		return;
-	slot = pad + GUEST_DPAD_SLOT + (dir - 1) * GUEST_DPAD_STRIDE;
-	if (*(volatile int *)(slot + 0x14) == 5)
-		return;
-	slot[0] = held ? 1 : 0;
-	slot[8] = held ? 1 : 0;
-}
-
-static void emit_dir_key(int index, SDL_Scancode scancode, int held)
-{
-	SDL_Event event;
-
-	if (held == g_play_dir[index])
-		return;
-	g_play_dir[index] = held;
-	memset(&event, 0, sizeof(event));
-	fill_key(&event, scancode, held);
-	SDL_PushEvent(&event);
-}
-
-static void sync_play_dirs(void)
-{
-	uint8_t *pad;
-	int up = 0;
-	int down = 0;
-	int left = 0;
-	int right = 0;
-	Sint16 lx;
-	Sint16 ly;
-
-	if (g_pointer_ui || !g_pad)
-		return;
-	if (!guest_data_ok(GUEST_UIGAMEPAD))
-		return;
-	pad = (uint8_t *)(uintptr_t)GUEST_UIGAMEPAD;
-	up = SDL_GameControllerGetButton(g_pad, SDL_CONTROLLER_BUTTON_DPAD_UP);
-	down = SDL_GameControllerGetButton(g_pad,
-					   SDL_CONTROLLER_BUTTON_DPAD_DOWN);
-	left = SDL_GameControllerGetButton(g_pad,
-					    SDL_CONTROLLER_BUTTON_DPAD_LEFT);
-	right = SDL_GameControllerGetButton(g_pad,
-					     SDL_CONTROLLER_BUTTON_DPAD_RIGHT);
-	lx = SDL_GameControllerGetAxis(g_pad, SDL_CONTROLLER_AXIS_LEFTX);
-	ly = SDL_GameControllerGetAxis(g_pad, SDL_CONTROLLER_AXIS_LEFTY);
-	if (ly < -STICK_DEADZONE)
-		up = 1;
-	if (ly > STICK_DEADZONE)
-		down = 1;
-	if (lx < -STICK_DEADZONE)
-		left = 1;
-	if (lx > STICK_DEADZONE)
-		right = 1;
-	write_dir_slot(pad, 1, up);
-	write_dir_slot(pad, 2, down);
-	write_dir_slot(pad, 3, left);
-	write_dir_slot(pad, 4, right);
-	emit_dir_key(0, SDL_SCANCODE_UP, up);
-	emit_dir_key(1, SDL_SCANCODE_DOWN, down);
-	emit_dir_key(2, SDL_SCANCODE_LEFT, left);
-	emit_dir_key(3, SDL_SCANCODE_RIGHT, right);
 }
 
 static void sync_game_pointer(void)
@@ -565,7 +1428,20 @@ static void sync_game_pointer(void)
 	pad = (uint8_t *)(uintptr_t)GUEST_UIGAMEPAD;
 	screen = (uint8_t *)(uintptr_t)GUEST_SCREEN;
 	maybe_init_guest_viewport(screen);
-	if (!g_pointer_ui || !g_cursor_ready)
+	maybe_fix_overlay_widgets(screen);
+	if (g_menu_keys) {
+		*(volatile int *)(pad + GUEST_INPUT_MODE) = GUEST_INPUT_KEY;
+		return;
+	}
+	if (g_fight_ui) {
+		*(volatile int *)(pad + GUEST_INPUT_MODE) = GUEST_INPUT_PAD;
+		return;
+	}
+	if (!g_pointer_ui) {
+		*(volatile int *)(pad + GUEST_INPUT_MODE) = GUEST_INPUT_PAD;
+		return;
+	}
+	if (!g_cursor_ready)
 		return;
 	lw = g_logical_w > 0 ? g_logical_w : GAME_W;
 	lh = g_logical_h > 0 ? g_logical_h : GAME_H;
@@ -651,8 +1527,27 @@ static void fill_finger(SDL_Event *event, Uint32 type)
 	event->tfinger.pressure = (type == SDL_FINGERUP) ? 0.0f : 1.0f;
 }
 
+static void set_scancode_state(SDL_Scancode scancode, int down)
+{
+	Uint8 *host;
+	uint8_t *guest;
+	int n = (int)scancode;
+
+	if (n < 0 || n >= GUEST_KEYSTATE_N)
+		return;
+	host = (Uint8 *)SDL_GetKeyboardState(NULL);
+	if (host)
+		host[n] = down ? 1 : 0;
+	if (guest_data_ok(GUEST_KEYSTATE) &&
+	    guest_data_ok(GUEST_KEYSTATE + (uintptr_t)GUEST_KEYSTATE_N - 1)) {
+		guest = (uint8_t *)(uintptr_t)GUEST_KEYSTATE;
+		guest[n] = down ? 1 : 0;
+	}
+}
+
 static void fill_key(SDL_Event *event, SDL_Scancode scancode, int down)
 {
+	memset(event, 0, sizeof(*event));
 	event->type = down ? SDL_KEYDOWN : SDL_KEYUP;
 	event->key.timestamp = SDL_GetTicks();
 	event->key.windowID = window_id();
@@ -661,6 +1556,23 @@ static void fill_key(SDL_Event *event, SDL_Scancode scancode, int down)
 	event->key.keysym.scancode = scancode;
 	event->key.keysym.sym = SDL_GetKeyFromScancode(scancode);
 	event->key.keysym.mod = 0;
+	set_scancode_state(scancode, down);
+}
+
+static SDL_Scancode dpad_scancode(int button)
+{
+	switch (button) {
+	case SDL_CONTROLLER_BUTTON_DPAD_UP:
+		return SDL_SCANCODE_UP;
+	case SDL_CONTROLLER_BUTTON_DPAD_DOWN:
+		return SDL_SCANCODE_DOWN;
+	case SDL_CONTROLLER_BUTTON_DPAD_LEFT:
+		return SDL_SCANCODE_LEFT;
+	case SDL_CONTROLLER_BUTTON_DPAD_RIGHT:
+		return SDL_SCANCODE_RIGHT;
+	default:
+		return SDL_SCANCODE_UNKNOWN;
+	}
 }
 
 static void emit_finger_motion(void)
@@ -795,40 +1707,192 @@ static void apply_cursor_move(void)
 	}
 }
 
+static void apply_fight_stick(void)
+{
+	Sint16 lx;
+	Sint16 ly;
+	int dir;
+	int ax;
+	int ay;
+	Uint32 now;
+	Uint32 wait;
+
+	if (!g_fight_ui)
+		return;
+	dir = fight_held_dir();
+	if (!dir && g_pad) {
+		lx = SDL_GameControllerGetAxis(g_pad, SDL_CONTROLLER_AXIS_LEFTX);
+		ly = SDL_GameControllerGetAxis(g_pad, SDL_CONTROLLER_AXIS_LEFTY);
+		ax = lx;
+		if (ax < 0)
+			ax = -ax;
+		ay = ly;
+		if (ay < 0)
+			ay = -ay;
+		if (ax >= STICK_DEADZONE || ay >= STICK_DEADZONE) {
+			if (ax >= ay)
+				dir = (lx < 0) ? FIGHT_DIR_LEFT : FIGHT_DIR_RIGHT;
+			else
+				dir = (ly < 0) ? FIGHT_DIR_UP : FIGHT_DIR_DOWN;
+		}
+	}
+	now = SDL_GetTicks();
+	if (!dir) {
+		g_fight_stick_key = 0;
+		g_fight_repeat_dir = 0;
+		return;
+	}
+	if (dir != g_fight_repeat_dir) {
+		g_fight_repeat_dir = dir;
+		g_fight_repeat_ms = now;
+		g_fight_repeat_n = 0;
+		g_fight_stick_key = dir;
+		fight_move(dir);
+		return;
+	}
+	wait = g_fight_repeat_n == 0 ? FIGHT_REPEAT_FIRST_MS
+				     : FIGHT_REPEAT_NEXT_MS;
+	if (now - g_fight_repeat_ms < wait)
+		return;
+	g_fight_repeat_ms = now;
+	g_fight_repeat_n++;
+	g_fight_stick_key = dir;
+	fight_move(dir);
+}
+
 static void apply_pad_pointer(void)
 {
 	sync_ui_mode();
 	ensure_cursor();
 	apply_cursor_move();
+	apply_fight_stick();
 	sync_game_pointer();
-	if (!g_pointer_ui)
-		sync_play_dirs();
+}
+
+static int accept_a_edge(int down)
+{
+	Uint32 now = SDL_GetTicks();
+
+	if (down) {
+		if (g_a_down)
+			return 0;
+		if (g_a_edge_ms != 0 && now - g_a_edge_ms < A_CHATTER_MS)
+			return 0;
+		g_a_down = 1;
+		g_a_edge_ms = now;
+		return 1;
+	}
+	if (!g_a_down)
+		return 0;
+	g_a_down = 0;
+	return 1;
+}
+
+static const char *pad_button_name(int button)
+{
+	switch (button) {
+	case SDL_CONTROLLER_BUTTON_A:
+		return "A";
+	case SDL_CONTROLLER_BUTTON_B:
+		return "B";
+	case SDL_CONTROLLER_BUTTON_X:
+		return "X";
+	case SDL_CONTROLLER_BUTTON_Y:
+		return "Y";
+	case SDL_CONTROLLER_BUTTON_BACK:
+		return "SELECT";
+	case SDL_CONTROLLER_BUTTON_START:
+		return "START";
+	case SDL_CONTROLLER_BUTTON_LEFTSHOULDER:
+		return "L1";
+	case SDL_CONTROLLER_BUTTON_RIGHTSHOULDER:
+		return "R1";
+	case SDL_CONTROLLER_BUTTON_LEFTSTICK:
+		return "L3";
+	case SDL_CONTROLLER_BUTTON_RIGHTSTICK:
+		return "R3";
+	case SDL_CONTROLLER_BUTTON_GUIDE:
+		return "GUIDE";
+	default:
+		return "?";
+	}
+}
+
+static void drop_guest_pad_button(int button)
+{
+	uint8_t *pad;
+
+	if (!guest_data_ok(GUEST_UIGAMEPAD) || button < 0 ||
+	    button >= GUEST_PAD_BUTTONS)
+		return;
+	pad = (uint8_t *)(uintptr_t)GUEST_UIGAMEPAD;
+	clear_input_slot(pad + GUEST_PAD_SLOT + button * GUEST_KEY_STRIDE);
+}
+
+static void log_pad_button(int button, int down)
+{
+	unsigned cap;
+
+	if (button < 0 || button >= GUEST_PAD_BUTTONS)
+		return;
+	if (button == SDL_CONTROLLER_BUTTON_A ||
+	    button == SDL_CONTROLLER_BUTTON_B ||
+	    button == SDL_CONTROLLER_BUTTON_BACK ||
+	    button == SDL_CONTROLLER_BUTTON_START)
+		cap = 8;
+	else
+		cap = 40;
+	if (g_pad_seen[button] >= cap)
+		return;
+	g_pad_seen[button]++;
+	fprintf(stderr, "sword3-sdl: pad %s (%d) %s pointer=%d fight=%d\n",
+		pad_button_name(button), button, down ? "down" : "up",
+		g_pointer_ui, g_fight_ui);
 }
 
 static int rewrite_event(SDL_Event *event)
 {
-	static unsigned seen;
 	int down;
 	int button;
 
 	if (!event)
 		return 0;
 	scale_pointer_event(event);
-	if (event->type == SDL_CONTROLLERAXISMOTION ||
-	    event->type == SDL_JOYAXISMOTION ||
+	if (event->type == SDL_JOYAXISMOTION ||
 	    event->type == SDL_JOYHATMOTION ||
-	    event->type == SDL_JOYBALLMOTION) {
-		if (g_pointer_ui) {
+	    event->type == SDL_JOYBALLMOTION ||
+	    event->type == SDL_JOYBUTTONDOWN ||
+	    event->type == SDL_JOYBUTTONUP) {
+		event->type = SDL_FIRSTEVENT;
+		return 0;
+	}
+	if (event->type == SDL_CONTROLLERAXISMOTION) {
+		Sint16 lx;
+		Sint16 ly;
+
+		if (g_pointer_ui || g_menu_keys || g_fight_ui) {
 			event->type = SDL_FIRSTEVENT;
 			return 0;
 		}
-		return 1;
-	}
-	if (event->type == SDL_JOYBUTTONDOWN ||
-	    event->type == SDL_JOYBUTTONUP) {
-		if (g_pointer_ui) {
-			event->type = SDL_FIRSTEVENT;
-			return 0;
+		if (g_stick_latched) {
+			if (g_stick_latch_ms != 0 &&
+			    SDL_GetTicks() - g_stick_latch_ms > STICK_LATCH_MS)
+				g_stick_latched = 0;
+			lx = g_pad ? SDL_GameControllerGetAxis(
+					     g_pad, SDL_CONTROLLER_AXIS_LEFTX) :
+				     0;
+			ly = g_pad ? SDL_GameControllerGetAxis(
+					     g_pad, SDL_CONTROLLER_AXIS_LEFTY) :
+				     0;
+			if (lx > -STICK_DEADZONE && lx < STICK_DEADZONE &&
+			    ly > -STICK_DEADZONE && ly < STICK_DEADZONE)
+				g_stick_latched = 0;
+			if (g_stick_latched &&
+			    (event->caxis.value > STICK_DEADZONE ||
+			     event->caxis.value < -STICK_DEADZONE)) {
+				event->type = SDL_FIRSTEVENT;
+				return 0;
+			}
 		}
 		return 1;
 	}
@@ -863,11 +1927,7 @@ static int rewrite_event(SDL_Event *event)
 
 	down = event->type == SDL_CONTROLLERBUTTONDOWN;
 	button = event->cbutton.button;
-	if (seen < 24) {
-		seen++;
-		fprintf(stderr, "sword3-sdl: pad button %d %s\n", button,
-			down ? "down" : "up");
-	}
+	log_pad_button(button, down);
 	if (movie_consume_skip(button, down)) {
 		event->type = SDL_FIRSTEVENT;
 		return 0;
@@ -875,9 +1935,12 @@ static int rewrite_event(SDL_Event *event)
 	if (button == SDL_CONTROLLER_BUTTON_BACK) {
 		g_btn_back = down;
 		if (down) {
-			g_after_continue = 0;
-			if (guest_on_title())
+			if (guest_on_title() && !g_after_continue)
 				warp_menu_item(0);
+			else if (g_menu_keys)
+				g_force_menu = 0;
+			else
+				g_force_menu = 1;
 		}
 		maybe_combo_exit();
 		fill_key(event, SDL_SCANCODE_ESCAPE, down);
@@ -890,17 +1953,54 @@ static int rewrite_event(SDL_Event *event)
 		return 0;
 	}
 	if (button == SDL_CONTROLLER_BUTTON_B) {
-		fill_mouse_button(event, SDL_BUTTON_RIGHT, down);
+		if (g_pointer_ui) {
+			fill_mouse_button(event, SDL_BUTTON_RIGHT, down);
+			return 1;
+		}
+		if (g_menu_keys) {
+			if (down)
+				g_force_menu = 0;
+			fill_key(event, SDL_SCANCODE_ESCAPE, down);
+			return 1;
+		}
+		if (g_fight_ui) {
+			if (down)
+				fight_cancel();
+			event->type = SDL_FIRSTEVENT;
+			return 0;
+		}
 		return 1;
 	}
 	if (button == SDL_CONTROLLER_BUTTON_A) {
+		if (!accept_a_edge(down)) {
+			if (g_a_chatter < 8) {
+				g_a_chatter++;
+				fprintf(stderr,
+					"sword3-sdl: swallow A chatter %s\n",
+					down ? "down" : "up");
+			}
+			event->type = SDL_FIRSTEVENT;
+			return 0;
+		}
+		if (g_menu_keys) {
+			fill_key(event, SDL_SCANCODE_RETURN, down);
+			return 1;
+		}
+		if (g_fight_ui) {
+			if (down)
+				fight_confirm();
+			event->type = SDL_FIRSTEVENT;
+			return 0;
+		}
+		if (!g_pointer_ui)
+			return 1;
 		ensure_cursor();
 		g_finger_down = down;
 		fill_finger(event, down ? SDL_FINGERDOWN : SDL_FINGERUP);
-		if (!down && g_pointer_ui && guest_on_title() &&
-		    !g_after_continue)
+		if (!down && guest_on_title() && !g_after_continue)
 			g_after_continue = 1;
-		if (seen <= 24) {
+		if (g_finger_seen < 16) {
+			g_finger_seen++;
 			fprintf(stderr,
 				"sword3-sdl: finger %s at %.3f,%.3f (cursor %.0f,%.0f)\n",
 				down ? "down" : "up", event->tfinger.x,
@@ -912,14 +2012,51 @@ static int rewrite_event(SDL_Event *event)
 	    button == SDL_CONTROLLER_BUTTON_DPAD_DOWN ||
 	    button == SDL_CONTROLLER_BUTTON_DPAD_LEFT ||
 	    button == SDL_CONTROLLER_BUTTON_DPAD_RIGHT) {
-		event->type = SDL_FIRSTEVENT;
-		return 0;
+		int index;
+
+		if (button == SDL_CONTROLLER_BUTTON_DPAD_UP)
+			index = 0;
+		else if (button == SDL_CONTROLLER_BUTTON_DPAD_DOWN)
+			index = 1;
+		else if (button == SDL_CONTROLLER_BUTTON_DPAD_LEFT)
+			index = 2;
+		else
+			index = 3;
+		if (g_pointer_ui) {
+			if (g_dir_held[index]) {
+				g_dir_held[index] = 0;
+				fill_key(event, dpad_scancode(button), 0);
+				return 1;
+			}
+			event->type = SDL_FIRSTEVENT;
+			return 0;
+		}
+		if (g_fight_ui) {
+			int dir = fight_dir_from_button(button);
+
+			g_dir_held[index] = down;
+			if (down) {
+				g_fight_repeat_dir = dir;
+				g_fight_repeat_ms = SDL_GetTicks();
+				g_fight_repeat_n = 0;
+				g_fight_stick_key = dir;
+				fight_move(dir);
+			}
+			event->type = SDL_FIRSTEVENT;
+			return 0;
+		}
+		g_dir_held[index] = down;
+		fill_key(event, dpad_scancode(button), down);
+		return 1;
 	}
-	if (g_pointer_ui) {
-		event->type = SDL_FIRSTEVENT;
-		return 0;
-	}
-	return 1;
+	/*
+	 * Every controller button writes UIGamePad+0x20c0+n*0x18. A missed
+	 * UP leaves the slot held, so the game auto-repeats. A/B/D-pad/
+	 * SELECT are handled above; drop X/Y/L1/R1/L3/R3/etc.
+	 */
+	drop_guest_pad_button(button);
+	event->type = SDL_FIRSTEVENT;
+	return 0;
 }
 
 static int next_translated_event(SDL_Event *event, int timeout)
@@ -943,8 +2080,6 @@ static int next_translated_event(SDL_Event *event, int timeout)
 
 			if (left <= 0) {
 				sync_game_pointer();
-				if (!g_pointer_ui)
-					sync_play_dirs();
 				return 0;
 			}
 			slice = left > 16 ? 16 : left;
@@ -955,16 +2090,12 @@ static int next_translated_event(SDL_Event *event, int timeout)
 			    (!blocking &&
 			     (int)(SDL_GetTicks() - start) >= timeout)) {
 				sync_game_pointer();
-				if (!g_pointer_ui)
-					sync_play_dirs();
 				return 0;
 			}
 			continue;
 		}
 		if (rewrite_event(event) && event->type != SDL_FIRSTEVENT) {
 			sync_game_pointer();
-			if (!g_pointer_ui)
-				sync_play_dirs();
 			return 1;
 		}
 	}
@@ -1092,6 +2223,7 @@ SDL_Window *sword3_SDL_CreateWindow(const char *title, int x, int y, int w,
 	g_window = window;
 	if (!g_cursor_ready && g_logical_w > 0 && g_logical_h > 0)
 		warp_menu_item(0);
+	try_init_guest_viewport();
 	owner_register(KIND_WINDOW, window);
 	return window;
 }
@@ -1109,6 +2241,7 @@ void sword3_SDL_SetWindowSize(SDL_Window *window, int w, int h)
 	g_logical_h = h;
 	parse_logical_override(&g_logical_w, &g_logical_h);
 	apply_logical_size(g_renderer);
+	try_init_guest_viewport();
 	fprintf(stderr, "sword3-sdl: SetWindowSize %dx%d -> logical %dx%d\n",
 		w, h, g_logical_w, g_logical_h);
 }
@@ -1177,6 +2310,7 @@ SDL_Renderer *sword3_SDL_CreateRenderer(SDL_Window *window, int index,
 		renderer ? "" : SDL_GetError());
 	g_renderer = renderer;
 	apply_logical_size(renderer);
+	try_init_guest_viewport();
 	owner_register(KIND_RENDERER, renderer);
 	return renderer;
 }
@@ -1245,8 +2379,17 @@ int sword3_SDL_RenderClear(SDL_Renderer *renderer)
 int sword3_SDL_RenderCopy(SDL_Renderer *renderer, SDL_Texture *texture,
 			  const SDL_Rect *srcrect, const SDL_Rect *dstrect)
 {
+	SDL_FRect dstf;
+
 	owner_check("SDL_RenderCopy", KIND_RENDERER, renderer);
 	owner_check("SDL_RenderCopy", KIND_TEXTURE, texture);
+	if (dstrect) {
+		dstf.x = (float)dstrect->x;
+		dstf.y = (float)dstrect->y;
+		dstf.w = (float)dstrect->w;
+		dstf.h = (float)dstrect->h;
+		fight_note_dest(renderer, &dstf);
+	}
 	return SDL_RenderCopy(renderer, texture, srcrect, dstrect);
 }
 
@@ -1258,6 +2401,7 @@ int sword3_SDL_RenderCopyF(SDL_Renderer *renderer, SDL_Texture *texture,
 
 	owner_check("SDL_RenderCopyF", KIND_RENDERER, renderer);
 	owner_check("SDL_RenderCopyF", KIND_TEXTURE, texture);
+	fight_note_dest(renderer, dstrect);
 	result = SDL_RenderCopyF(renderer, texture, srcrect, dstrect);
 	if (seen < 12 || result != 0) {
 		if (seen < 12)
@@ -1324,10 +2468,13 @@ void sword3_SDL_RenderPresent(SDL_Renderer *renderer)
 	SDL_BlendMode blend;
 	int x;
 	int y;
+	int bw;
+	int bh;
 
 	owner_check("SDL_RenderPresent", KIND_RENDERER, renderer);
 	ensure_gamecontroller();
 	apply_pad_pointer();
+	fight_commit_dests();
 	seen++;
 	if (seen <= 8 || (seen % 120) == 0)
 		fprintf(stderr, "sword3-sdl: RenderPresent #%u\n", seen);
@@ -1335,6 +2482,9 @@ void sword3_SDL_RenderPresent(SDL_Renderer *renderer)
 	g_last_present_ms = SDL_GetTicks();
 	if (movie_is_playing() && SDL_GetRenderTarget(renderer) == NULL) {
 		movie_present(renderer);
+	} else if (g_fight_ui && SDL_GetRenderTarget(renderer) == NULL &&
+		   fight_select_rect(&x, &y, &bw, &bh)) {
+		draw_select_frame(renderer, x, y, bw, bh);
 	} else if (g_pointer_ui && g_cursor_ready && g_logical_w > 0 &&
 	    SDL_GetRenderTarget(renderer) == NULL) {
 		x = (int)g_cursor_x;
@@ -1713,6 +2863,32 @@ int sword3_SDL_PollEvent(SDL_Event *event)
 int sword3_SDL_WaitEventTimeout(SDL_Event *event, int timeout)
 {
 	return next_translated_event(event, timeout);
+}
+
+SDL_bool sword3_SDL_IsGameController(int joystick_index)
+{
+	static unsigned seen;
+	SDL_Joystick *js;
+	SDL_JoystickID id;
+	SDL_bool known = SDL_FALSE;
+
+	if (joystick_index >= 0 && joystick_index < SDL_NumJoysticks() &&
+	    SDL_IsGameController(joystick_index))
+		known = SDL_TRUE;
+	else if (g_pad) {
+		js = SDL_GameControllerGetJoystick(g_pad);
+		if (js) {
+			id = SDL_JoystickInstanceID(js);
+			if (joystick_index == (int)id)
+				known = SDL_TRUE;
+		}
+	}
+	if (seen < 8) {
+		seen++;
+		fprintf(stderr, "sword3-sdl: IsGameController(%d) -> %d pad=%p\n",
+			joystick_index, (int)known, (void *)g_pad);
+	}
+	return known;
 }
 
 SDL_AudioDeviceID sword3_SDL_OpenAudioDevice(const char *device, int iscapture,

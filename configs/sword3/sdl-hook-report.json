@@ -1,7 +1,7 @@
 {
   "binary_sha256": "268d6f40eac47718ee2cac6acd34912421546eb8a58056d310c0b42d2655e36b",
   "coverage": "partial",
-  "hook_count": 52,
+  "hook_count": 53,
   "hooks": [
     {
       "address": "0x1000abef8",
@@ -730,6 +730,27 @@
       "library": "./libsword3_host.so",
       "method": "unique parent string + ordered direct BL index",
       "symbol": "SDL_FreeSurface"
+    },
+    {
+      "address": "0x100114bc4",
+      "anchor": "via There are %d joysticks attached bl[9]",
+      "end_address": "0x100114be0",
+      "evidence": [
+        {
+          "bl_index": 9,
+          "call_site": "0x1001dd268",
+          "parent_address": "0x1001dd158",
+          "parent_string": "There are %d joysticks attached\n",
+          "type": "parent-bl-index"
+        }
+      ],
+      "expected_hex": "fd7bbfa9fd030091050000941f0000f1",
+      "fingerprint": "676e36c67ee3ddabad1c163b8ddb6bc30c54f489839d2572c5db6bf8e182a70c",
+      "group": "joystick",
+      "host_symbol": "sword3_SDL_IsGameController",
+      "library": "./libsword3_host.so",
+      "method": "unique parent string + ordered direct BL index",
+      "symbol": "SDL_IsGameController"
     },
     {
       "address": "0x100116d98",

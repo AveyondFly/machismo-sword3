@@ -95,6 +95,7 @@ int sword3_SDL_PeepEvents(SDL_Event *events, int numevents,
 void sword3_SDL_PumpEvents(void);
 int sword3_SDL_PollEvent(SDL_Event *event);
 int sword3_SDL_WaitEventTimeout(SDL_Event *event, int timeout);
+SDL_bool sword3_SDL_IsGameController(int joystick_index);
 SDL_AudioDeviceID sword3_SDL_OpenAudioDevice(const char *device, int iscapture,
 					     const SDL_AudioSpec *desired,
 					     SDL_AudioSpec *obtained,

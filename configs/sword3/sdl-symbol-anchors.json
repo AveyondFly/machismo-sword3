@@ -368,6 +368,15 @@
       "group": "audio"
     },
     {
+      "symbol": "SDL_IsGameController",
+      "via": {
+        "parent_string": "There are %d joysticks attached\n",
+        "bl_index": 9
+      },
+      "expected_address": "0x100114bc4",
+      "group": "joystick"
+    },
+    {
       "symbol": "IMG_Load",
       "via": {
         "parent_string": "SS2D_LoadIconFile",
