@@ -32,6 +32,95 @@
 #include <dirent.h>
 #include <stdarg.h>
 
+/*
+ * Machismo resolves every lazy pointer eagerly, so dyld_stub_binder must
+ * never execute.  Exporting a fail-fast implementation keeps the bind table
+ * complete without hiding a broken lazy binding path.
+ */
+__attribute__((noreturn))
+void dyld_stub_binder(void)
+{
+	static const char message[] =
+		"libsystem_shim: unexpected dyld_stub_binder call\n";
+	(void)write(STDERR_FILENO, message, sizeof(message) - 1);
+	abort();
+}
+
+void _dyld_register_func_for_add_image(void (*callback)(const void*, intptr_t))
+{
+	static int warned;
+	(void)callback;
+	if (!warned) {
+		static const char message[] =
+			"libsystem_shim: add-image callback registration ignored\n";
+		(void)write(STDERR_FILENO, message, sizeof(message) - 1);
+		warned = 1;
+	}
+}
+
+/*
+ * Private Darwin string cache used by the bundled C runtime code.  Sword3
+ * calls hash_create() with no arguments, then hash_search(table,key,NULL,0)
+ * to look up and hash_search(table,key,value,0) to insert.
+ */
+struct sword3_hash_entry {
+	struct sword3_hash_entry* next;
+	char* key;
+	void* value;
+};
+
+struct sword3_hash_table {
+	pthread_mutex_t lock;
+	struct sword3_hash_entry* entries;
+};
+
+void* hash_create(void)
+{
+	struct sword3_hash_table* table = calloc(1, sizeof(*table));
+	if (!table)
+		return NULL;
+	if (pthread_mutex_init(&table->lock, NULL) != 0) {
+		free(table);
+		return NULL;
+	}
+	return table;
+}
+
+void* hash_search(void* opaque_table, const char* key, void* value, int flags)
+{
+	struct sword3_hash_table* table = opaque_table;
+	struct sword3_hash_entry* entry;
+	(void)flags;
+
+	if (!table || !key)
+		return NULL;
+	pthread_mutex_lock(&table->lock);
+	for (entry = table->entries; entry; entry = entry->next) {
+		if (strcmp(entry->key, key) == 0) {
+			void* found = entry->value;
+			pthread_mutex_unlock(&table->lock);
+			return found;
+		}
+	}
+	if (!value) {
+		pthread_mutex_unlock(&table->lock);
+		return NULL;
+	}
+	entry = calloc(1, sizeof(*entry));
+	if (entry)
+		entry->key = strdup(key);
+	if (!entry || !entry->key) {
+		free(entry);
+		pthread_mutex_unlock(&table->lock);
+		return NULL;
+	}
+	entry->value = value;
+	entry->next = table->entries;
+	table->entries = entry;
+	pthread_mutex_unlock(&table->lock);
+	return value;
+}
+
 /* ===== Mach time ===== */
 
 /* mach_absolute_time returns nanoseconds on arm64 (timebase is always 1:1) */

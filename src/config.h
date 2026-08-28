@@ -5,6 +5,9 @@
  *   [general]
  *   dylib_map = dylib_map.conf
  *   patches = patches/necrodancer.conf
+ *   address_hooks = configs/sword3/address-hooks.conf
+ *   entry_override = 0x100001000
+ *   audit_only = true
  *
  *   [trampoline.sdl2]
  *   lib = libSDL2-2.0.so.0
@@ -20,6 +23,8 @@
 
 #ifndef CONFIG_H
 #define CONFIG_H
+
+#include <stdint.h>
 
 #define CONFIG_MAX_TRAMPOLINES 8
 #define CONFIG_MAX_PREFIXES    8
@@ -39,6 +44,13 @@ typedef struct {
 	char* dylib_map;
 	char* patches;
 	char* splash_image;                      /* early KMS load splash PNG (relative to CWD) */
+	char* address_hooks;                     /* stripped Mach-O address hook list */
+	uintptr_t entry_override;                /* optional unslid guest entry vmaddr */
+	char* entry_expected;                    /* expected bytes at entry_override */
+	char* entry_prepare_lib;                 /* optional host pre-entry DSO */
+	char* entry_prepare_symbol;              /* int prepare(void), must return 0 */
+	int has_entry_override;
+	int audit_only;                          /* validate/report without applying runtime changes */
 	machismo_trampoline_config_t trampolines[CONFIG_MAX_TRAMPOLINES];
 	int num_trampolines;
 } machismo_config_t;

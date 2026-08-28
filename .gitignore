@@ -6,6 +6,9 @@ libsystem_shim.so
 
 # CMake
 build/
+build-aarch64/
+build-rocknix/
+build-libcxx-rocknix/
 CMakeCache.txt
 CMakeFiles/
 cmake_install.cmake
@@ -34,6 +37,7 @@ tests/test_bgfx_gles
 userdata/
 test_lse_emul
 test_necrolevel_rng
+dist/
 
 # Claude agent instruction files — kept local, never tracked (matches in any dir)
 CLAUDE.md
@@ -45,3 +49,5 @@ clang_major.cpp
 clang_c_major
 clang_cpp_major
 src/include/
+__pycache__/
+*.pyc

@@ -681,10 +681,13 @@ static const struct variadic_info variadic_functions[] = {
 	{"fprintf",         "vfprintf",         2, 0, 0},
 	{"sprintf",         "vsprintf",         2, 0, 0},
 	{"snprintf",        "vsnprintf",        3, 0, 0},
+	{"asprintf",        "vasprintf",        2, 0, 0},
+	{"fscanf",          "vfscanf",          2, 0, 0},
 	{"sscanf",          "vsscanf",          2, 0, 0},
 	{"__sprintf_chk",   "__vsprintf_chk",   4, 0, 0},
 	/* va_list passthrough — same glibc function, converted va_list.
 	 * source_reg = register holding macOS va_list (char*) */
+	{"vsprintf",        "vsprintf",         2, 1, 2},
 	{"vsnprintf",       "vsnprintf",        3, 1, 3},
 	{"vsscanf",         "vsscanf",          2, 1, 2},
 	{"__vsnprintf_chk", "__vsnprintf_chk",  5, 1, 5},
@@ -1041,6 +1044,34 @@ static int walk_chain(struct resolver_state* rs, uint64_t* chain_start, uint16_t
 static void close_dylibs(struct resolver_state* rs);
 static const char* basename_from_path(const char* path);
 
+static const char* linux_lookup_name(const char* macho_name,
+                                     char* storage, size_t storage_size)
+{
+	static const char* suffixes[] = {
+		"$DARWIN_EXTSN",
+		"$UNIX2003",
+		"$NOCANCEL",
+		"$INODE64",
+		NULL,
+	};
+	const char* lookup = macho_name;
+
+	if (lookup[0] == '_')
+		lookup++;
+	for (int i = 0; suffixes[i]; i++) {
+		size_t name_len = strlen(lookup);
+		size_t suffix_len = strlen(suffixes[i]);
+		if (name_len > suffix_len &&
+		    strcmp(lookup + name_len - suffix_len, suffixes[i]) == 0 &&
+		    name_len - suffix_len < storage_size) {
+			memcpy(storage, lookup, name_len - suffix_len);
+			storage[name_len - suffix_len] = '\0';
+			return storage;
+		}
+	}
+	return lookup;
+}
+
 /* ---- Implementation ---- */
 
 int resolver_resolve_fixups(void* mh, uintptr_t slide, const char* map_file)
@@ -1128,6 +1159,17 @@ int resolver_resolve_fixups(void* mh, uintptr_t slide, const char* map_file)
 		g_deferred.ndylibs = rs.ndylibs;
 		fprintf(stderr, "resolver: %d deferred binds recorded, waiting for SDL_GL_CreateContext\n",
 				g_deferred.count);
+	}
+
+	/* Port bring-up needs a deterministic fail-closed mode.  Historical
+	 * Machismo configurations deliberately SKIP framework symbols and rely on
+	 * paths that never call them, so keep the old fail-soft behavior unless
+	 * explicitly requested. */
+	if (rs.binds_failed > 0 && getenv("MACHISMO_STRICT_BINDS")) {
+		fprintf(stderr,
+		        "resolver: strict bind mode rejects %d unresolved strong binds\n",
+		        rs.binds_failed);
+		goto out;
 	}
 
 	ret = 0;
@@ -1524,17 +1566,9 @@ static void resolver_complete_deferred(void)
 		struct dylib_entry* de = &g_deferred.dylibs[db->lib_ordinal - 1];
 		if (!de->handle) continue;
 
-		const char* lookup = db->sym_name;
-		if (lookup[0] == '_') lookup++;
-
-		/* Strip $ suffixes */
 		char stripped[256];
-		const char* dollar = strchr(lookup, '$');
-		if (dollar && (size_t)(dollar - lookup) < sizeof(stripped)) {
-			memcpy(stripped, lookup, dollar - lookup);
-			stripped[dollar - lookup] = '\0';
-			lookup = stripped;
-		}
+		const char* lookup =
+			linux_lookup_name(db->sym_name, stripped, sizeof(stripped));
 
 		void* addr = dlsym(de->handle, lookup);
 		if (!addr && strncmp(lookup, "_ZN", 3) == 0)
@@ -1620,25 +1654,10 @@ static uintptr_t resolve_import(struct resolver_state* rs,
 
 	const char* sym_name = symbols_base + name_offset;
 
-	/* Strip leading underscore (Mach-O convention) */
-	const char* lookup_name = sym_name;
-	if (lookup_name[0] == '_')
-		lookup_name++;
-
-	/* Strip Apple $ suffixes ($DARWIN_EXTSN, $UNIX2003, $NOCANCEL).
-	 * On Linux, glibc provides the modern behavior by default. */
 	char dollar_stripped[256];
-	{
-		const char* dollar = strchr(lookup_name, '$');
-		if (dollar) {
-			size_t len = dollar - lookup_name;
-			if (len < sizeof(dollar_stripped)) {
-				memcpy(dollar_stripped, lookup_name, len);
-				dollar_stripped[len] = '\0';
-				lookup_name = dollar_stripped;
-			}
-		}
-	}
+	const char* lookup_name =
+		linux_lookup_name(sym_name, dollar_stripped,
+		                  sizeof(dollar_stripped));
 
 	if (strstr(sym_name, "registr") && strstr(sym_name, "s_instance") && !strstr(sym_name, "ZGV"))
 		fprintf(stderr, "resolver: TRACE s_instance: ordinal=%u lib_ordinal=%d weak=%d name='%s'\n",
@@ -1956,24 +1975,10 @@ static uintptr_t resolve_bind_by_name(struct resolver_state* rs,
                                       int lib_ordinal, const char* sym_name,
                                       int weak, int64_t addend)
 {
-	/* Strip leading underscore (Mach-O convention) */
-	const char* lookup_name = sym_name;
-	if (lookup_name[0] == '_')
-		lookup_name++;
-
-	/* Strip Apple $ suffixes ($DARWIN_EXTSN, $UNIX2003, $NOCANCEL) */
 	char dollar_stripped[256];
-	{
-		const char* dollar = strchr(lookup_name, '$');
-		if (dollar) {
-			size_t len = dollar - lookup_name;
-			if (len < sizeof(dollar_stripped)) {
-				memcpy(dollar_stripped, lookup_name, len);
-				dollar_stripped[len] = '\0';
-				lookup_name = dollar_stripped;
-			}
-		}
-	}
+	const char* lookup_name =
+		linux_lookup_name(sym_name, dollar_stripped,
+		                  sizeof(dollar_stripped));
 
 	/* Hook operator new/new[]/delete/delete[] for macOS malloc compat */
 	if (strcmp(sym_name, "__Znwm") == 0 || strcmp(sym_name, "__Znam") == 0) {

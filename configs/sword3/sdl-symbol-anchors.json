@@ -1,0 +1,359 @@
+{
+  "binary_sha256": "268d6f40eac47718ee2cac6acd34912421546eb8a58056d310c0b42d2655e36b",
+  "library": "./libsword3_host.so",
+  "symbols": [
+    {
+      "symbol": "SDL_InitSubSystem",
+      "string": "Application didn't initialize properly, did you include SDL_main.h in the file containing your main() function?",
+      "group": "init"
+    },
+    {
+      "symbol": "SDL_VideoInit",
+      "string": "The video driver did not add any displays",
+      "expected_address": "0x1000e132c",
+      "group": "init"
+    },
+    {
+      "symbol": "SDL_VideoQuit",
+      "nth_after": {
+        "after_symbol": "SDL_VideoInit",
+        "n": 0
+      },
+      "expected_address": "0x1000e15d8",
+      "group": "init"
+    },
+    {
+      "symbol": "SDL_AudioInit",
+      "string": "No available audio device",
+      "expected_address": "0x1000a03cc",
+      "group": "init"
+    },
+    {
+      "symbol": "SDL_AudioQuit",
+      "nth_after": {
+        "after_symbol": "SDL_AudioInit",
+        "n": 0
+      },
+      "expected_address": "0x1000a06d8",
+      "group": "init"
+    },
+    {
+      "symbol": "SDL_RWFromFile",
+      "string": "SDL_RWFromFile(): No file or no mode specified",
+      "group": "rwops"
+    },
+    {
+      "symbol": "SDL_GetError",
+      "via": {
+        "parent_string": "Couldn't create renderer: %s\n",
+        "bl_index": 6
+      },
+      "expected_address": "0x1000abe8c",
+      "group": "error"
+    },
+    {
+      "symbol": "SDL_GetTicks",
+      "via": {
+        "parent_string": "Couldn't create renderer: %s\n",
+        "bl_index": 5
+      },
+      "expected_address": "0x10009f518",
+      "group": "timer"
+    },
+    {
+      "symbol": "SDL_CreateWindow",
+      "string": "SDL_VIDEO_HIGHDPI_DISABLED",
+      "group": "window"
+    },
+    {
+      "symbol": "SDL_DestroyWindow",
+      "via": {
+        "parent_string": "SDL_VIDEO_HIGHDPI_DISABLED",
+        "bl_index": 14
+      },
+      "expected_address": "0x1000e2ec8",
+      "group": "window"
+    },
+    {
+      "symbol": "SDL_SetWindowSize",
+      "via": {
+        "parent_string": "Couldn't create window: %s\n",
+        "bl_index": 4
+      },
+      "expected_address": "0x1000e3b4c",
+      "group": "window"
+    },
+    {
+      "symbol": "SDL_GetWindowSize",
+      "nth_after": {
+        "after_symbol": "SDL_SetWindowSize",
+        "n": 1
+      },
+      "expected_address": "0x1000e3cdc",
+      "group": "window"
+    },
+    {
+      "symbol": "SDL_ShowWindow",
+      "via": {
+        "parent_string": "Couldn't create window: %s\n",
+        "bl_index": 18
+      },
+      "expected_address": "0x1000e3d30",
+      "group": "window"
+    },
+    {
+      "symbol": "SDL_SetWindowDisplayMode",
+      "string": "SDL video driver doesn't support changing display mode",
+      "group": "window"
+    },
+    {
+      "symbol": "SDL_CreateRenderer",
+      "string": "SDL_RENDER_VSYNC",
+      "group": "renderer"
+    },
+    {
+      "symbol": "SDL_RenderSetLogicalSize",
+      "via": {
+        "parent_string": "Couldn't create renderer: %s\n",
+        "bl_index": 1
+      },
+      "expected_address": "0x1000f717c",
+      "group": "renderer"
+    },
+    {
+      "symbol": "SDL_RenderSetScale",
+      "via": {
+        "parent_string": "Couldn't create renderer: %s\n",
+        "bl_index": 2
+      },
+      "expected_address": "0x1000f7224",
+      "group": "renderer"
+    },
+    {
+      "symbol": "SDL_SetRenderDrawBlendMode",
+      "via": {
+        "parent_string": "Couldn't create renderer: %s\n",
+        "bl_index": 3
+      },
+      "expected_address": "0x1000f759c",
+      "group": "renderer"
+    },
+    {
+      "symbol": "SDL_SetRenderDrawColor",
+      "via": {
+        "parent_string": "Couldn't create renderer: %s\n",
+        "bl_index": 4
+      },
+      "expected_address": "0x1000f7548",
+      "group": "renderer"
+    },
+    {
+      "symbol": "SDL_RenderClear",
+      "nth_after": {
+        "after_symbol": "SDL_SetRenderDrawBlendMode",
+        "n": 0
+      },
+      "expected_address": "0x1000f7628",
+      "group": "renderer"
+    },
+    {
+      "symbol": "SDL_RenderCopyF",
+      "string": "Texture was not created with this renderer",
+      "exclude_strings": [
+        "Texture not created with SDL_TEXTUREACCESS_TARGET",
+        "Renderer does not support RenderCopyEx"
+      ],
+      "expected_address": "0x1000f82ec",
+      "group": "renderer"
+    },
+    {
+      "symbol": "SDL_RenderCopyExF",
+      "string": "Renderer does not support RenderCopyEx",
+      "expected_address": "0x1000f8544",
+      "group": "renderer"
+    },
+    {
+      "symbol": "SDL_RenderPresent",
+      "nth_after": {
+        "after_symbol": "SDL_RenderCopyExF",
+        "n": 0
+      },
+      "expected_address": "0x1000f8784",
+      "group": "renderer"
+    },
+    {
+      "symbol": "SDL_DestroyRenderer",
+      "nth_after": {
+        "after_symbol": "SDL_RenderCopyExF",
+        "n": 1
+      },
+      "expected_address": "0x1000f87f0",
+      "group": "renderer"
+    },
+    {
+      "symbol": "SDL_RenderDrawPointsF",
+      "string": "SDL_RenderDrawFPoints(): Passed NULL points",
+      "group": "renderer"
+    },
+    {
+      "symbol": "SDL_RenderFillRectsF",
+      "string": "SDL_RenderFillFRects(): Passed NULL rects",
+      "group": "renderer"
+    },
+    {
+      "symbol": "SDL_SetRenderTarget",
+      "string": "Texture not created with SDL_TEXTUREACCESS_TARGET",
+      "group": "renderer"
+    },
+    {
+      "symbol": "SDL_GetRendererOutputSize",
+      "string": "Renderer doesn't support querying output size",
+      "group": "renderer"
+    },
+    {
+      "symbol": "SDL_CreateTexture",
+      "string": "Texture dimensions can't be 0",
+      "group": "texture"
+    },
+    {
+      "symbol": "SDL_DestroyTexture",
+      "nth_after": {
+        "after_symbol": "SDL_CreateTexture",
+        "n": 0
+      },
+      "expected_address": "0x1000f6118",
+      "group": "texture"
+    },
+    {
+      "symbol": "SDL_CreateTextureFromSurface",
+      "string": "SDL_CreateTextureFromSurface() passed NULL surface",
+      "group": "texture"
+    },
+    {
+      "symbol": "SDL_UpdateTexture",
+      "nth_after": {
+        "after_symbol": "SDL_CreateTextureFromSurface",
+        "n": 0
+      },
+      "expected_address": "0x1000f65d4",
+      "group": "texture"
+    },
+    {
+      "symbol": "SDL_SetTextureBlendMode",
+      "via": {
+        "parent_string": "Couldn't create Texture: %s\n",
+        "bl_index": 4
+      },
+      "expected_address": "0x1000f6a08",
+      "group": "texture"
+    },
+    {
+      "symbol": "SDL_LockTexture",
+      "string": "SDL_LockTexture(): texture must be streaming",
+      "group": "texture"
+    },
+    {
+      "symbol": "SDL_UnlockTexture",
+      "nth_after": {
+        "after_symbol": "SDL_LockTexture",
+        "n": 0
+      },
+      "expected_address": "0x1000f6c58",
+      "group": "texture"
+    },
+    {
+      "symbol": "SDL_SetSurfacePalette",
+      "string": "SDL_SetSurfacePalette() passed a NULL surface",
+      "group": "surface"
+    },
+    {
+      "symbol": "SDL_UpperBlit",
+      "string": "SDL_UpperBlit: passed a NULL surface",
+      "group": "surface"
+    },
+    {
+      "symbol": "SDL_UpperBlitScaled",
+      "string": "SDL_UpperBlitScaled: passed a NULL surface",
+      "group": "surface"
+    },
+    {
+      "symbol": "SDL_CreateRGBSurfaceWithFormat",
+      "via": {
+        "parent_string": "Couldn't create window: %s\n",
+        "bl_index": 12
+      },
+      "expected_address": "0x1000df9d4",
+      "group": "surface"
+    },
+    {
+      "symbol": "SDL_FreeSurface",
+      "via": {
+        "parent_string": "Couldn't create window: %s\n",
+        "bl_index": 14
+      },
+      "expected_address": "0x1000dfc00",
+      "group": "surface"
+    },
+    {
+      "symbol": "SDL_PeepEvents",
+      "string": "Couldn't lock event queue",
+      "group": "event"
+    },
+    {
+      "symbol": "SDL_PumpEvents",
+      "nth_after": {
+        "after_symbol": "SDL_PeepEvents",
+        "n": 3
+      },
+      "expected_address": "0x1000a8700",
+      "group": "event"
+    },
+    {
+      "symbol": "SDL_PollEvent",
+      "nth_after": {
+        "after_symbol": "SDL_PeepEvents",
+        "n": 4
+      },
+      "expected_address": "0x1000a874c",
+      "group": "event"
+    },
+    {
+      "symbol": "SDL_WaitEventTimeout",
+      "nth_after": {
+        "after_symbol": "SDL_PeepEvents",
+        "n": 5
+      },
+      "expected_address": "0x1000a8754",
+      "group": "event"
+    },
+    {
+      "symbol": "SDL_OpenAudioDevice",
+      "string": "Couldn't create mixer lock",
+      "group": "audio"
+    },
+    {
+      "symbol": "IMG_Load",
+      "via": {
+        "parent_string": "SS2D_LoadIconFile",
+        "bl_index": 0
+      },
+      "expected_address": "0x100116d98",
+      "group": "image"
+    },
+    {
+      "symbol": "IMG_Load_RW",
+      "via": {
+        "parent_string": "LoadImageFile",
+        "bl_index": 3
+      },
+      "expected_address": "0x10011963c",
+      "group": "image"
+    },
+    {
+      "symbol": "IMG_LoadTyped_RW",
+      "string": "Passed a NULL data source",
+      "expected_address": "0x100119644",
+      "group": "image"
+    }
+  ]
+}

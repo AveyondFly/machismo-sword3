@@ -23,6 +23,8 @@
 #include <stdlib.h>
 #include <unistd.h>
 #include <signal.h>
+#include <ctype.h>
+#include <inttypes.h>
 
 /* arm64 trampoline island approach:
  *
@@ -343,6 +345,528 @@ static int write_trampoline(uintptr_t func_addr, uintptr_t native_addr)
 	__builtin___clear_cache((char*)func_addr, (char*)(func_addr + 4));
 
 	return 0;
+}
+
+/* LC_FUNCTION_STARTS is a linkedit_data_command containing a sequence of
+ * ULEB128 deltas from the beginning of __TEXT. */
+#define LC_FUNCTION_STARTS_LOCAL 0x26
+
+struct linkedit_data_command_local {
+	uint32_t cmd;
+	uint32_t cmdsize;
+	uint32_t dataoff;
+	uint32_t datasize;
+};
+
+struct address_hook {
+	uintptr_t vmaddr;
+	char* lib_path;
+	char* symbol;
+	uint8_t* expected;
+	size_t expected_len;
+	void* lib_handle;
+	void* target;
+	uintptr_t runtime_addr;
+	uint32_t original_insn;
+};
+
+static void free_address_hooks(struct address_hook* hooks, size_t count,
+                               int close_handles)
+{
+	if (!hooks) return;
+	for (size_t i = 0; i < count; i++) {
+		if (close_handles && hooks[i].lib_handle)
+			dlclose(hooks[i].lib_handle);
+		free(hooks[i].lib_path);
+		free(hooks[i].symbol);
+		free(hooks[i].expected);
+	}
+	free(hooks);
+}
+
+static int hex_nibble(char c)
+{
+	if (c >= '0' && c <= '9') return c - '0';
+	c = (char)tolower((unsigned char)c);
+	if (c >= 'a' && c <= 'f') return c - 'a' + 10;
+	return -1;
+}
+
+static int parse_expected_bytes(const char* text, uint8_t** bytes,
+                                size_t* byte_count)
+{
+	size_t length = strlen(text);
+	if (length < 8 || (length & 1) != 0)
+		return -1;
+
+	size_t count = length / 2;
+	uint8_t* parsed = malloc(count);
+	if (!parsed) return -1;
+
+	for (size_t i = 0; i < count; i++) {
+		int high = hex_nibble(text[i * 2]);
+		int low = hex_nibble(text[i * 2 + 1]);
+		if (high < 0 || low < 0) {
+			free(parsed);
+			return -1;
+		}
+		parsed[i] = (uint8_t)((high << 4) | low);
+	}
+
+	*bytes = parsed;
+	*byte_count = count;
+	return 0;
+}
+
+static int parse_address_hook_line(char* line, unsigned int line_number,
+                                   struct address_hook* hook)
+{
+	char* comment = strchr(line, '#');
+	if (comment) *comment = '\0';
+
+	char* save = NULL;
+	char* address = strtok_r(line, " \t\r\n", &save);
+	if (!address) return 0;
+	char* lib_path = strtok_r(NULL, " \t\r\n", &save);
+	char* symbol = strtok_r(NULL, " \t\r\n", &save);
+	char* expected = strtok_r(NULL, " \t\r\n", &save);
+	char* extra = strtok_r(NULL, " \t\r\n", &save);
+	if (!lib_path || !symbol || !expected || extra) {
+		fprintf(stderr, "trampoline: address hooks line %u: expected 4 fields\n",
+		        line_number);
+		return -1;
+	}
+
+	char* end = NULL;
+	errno = 0;
+	unsigned long long parsed_address = strtoull(address, &end, 16);
+	if (errno != 0 || end == address || *end != '\0' ||
+	    parsed_address > (unsigned long long)UINTPTR_MAX) {
+		fprintf(stderr, "trampoline: address hooks line %u: invalid vmaddr '%s'\n",
+		        line_number, address);
+		return -1;
+	}
+
+	hook->vmaddr = (uintptr_t)parsed_address;
+	hook->lib_path = strdup(lib_path);
+	hook->symbol = strdup(symbol);
+	if (!hook->lib_path || !hook->symbol ||
+	    parse_expected_bytes(expected, &hook->expected,
+	                         &hook->expected_len) < 0) {
+		fprintf(stderr,
+		        "trampoline: address hooks line %u: invalid expected bytes "
+		        "(use an even hex string of at least 4 bytes)\n",
+		        line_number);
+		return -1;
+	}
+	return 1;
+}
+
+static int load_address_hooks(const char* path, struct address_hook** result,
+                              size_t* result_count)
+{
+	FILE* file = fopen(path, "r");
+	if (!file) {
+		fprintf(stderr, "trampoline: cannot open address hooks %s: %s\n",
+		        path, strerror(errno));
+		return -1;
+	}
+
+	struct address_hook* hooks = NULL;
+	size_t count = 0;
+	size_t capacity = 0;
+	char* line = NULL;
+	size_t line_capacity = 0;
+	unsigned int line_number = 0;
+	int status = 0;
+
+	while (getline(&line, &line_capacity, file) >= 0) {
+		line_number++;
+		if (count == capacity) {
+			size_t new_capacity = capacity ? capacity * 2 : 8;
+			struct address_hook* grown =
+				realloc(hooks, new_capacity * sizeof(*hooks));
+			if (!grown) {
+				status = -1;
+				break;
+			}
+			hooks = grown;
+			memset(hooks + capacity, 0,
+			       (new_capacity - capacity) * sizeof(*hooks));
+			capacity = new_capacity;
+		}
+
+		int parsed = parse_address_hook_line(line, line_number, &hooks[count]);
+		if (parsed < 0) {
+			status = -1;
+			break;
+		}
+		if (parsed > 0) count++;
+	}
+
+	if (ferror(file)) {
+		fprintf(stderr, "trampoline: error reading address hooks %s\n", path);
+		status = -1;
+	}
+	free(line);
+	fclose(file);
+
+	if (status < 0) {
+		/* Include the partially initialized current slot in cleanup. */
+		free_address_hooks(hooks, count + (count < capacity), 1);
+		return -1;
+	}
+	if (count == 0) {
+		fprintf(stderr, "trampoline: address hooks %s contains no hooks\n", path);
+		free(hooks);
+		return -1;
+	}
+
+	*result = hooks;
+	*result_count = count;
+	return 0;
+}
+
+static void* file_range_to_mem(void* mh, uintptr_t slide,
+                               uint32_t fileoff, uint32_t size)
+{
+	struct mach_header_64* header = (struct mach_header_64*)mh;
+	uint8_t* cmd_ptr = (uint8_t*)(header + 1);
+	uint64_t range_end = (uint64_t)fileoff + size;
+
+	for (uint32_t i = 0; i < header->ncmds; i++) {
+		struct load_command* lc = (struct load_command*)cmd_ptr;
+		if (lc->cmd == LC_SEGMENT_64) {
+			struct segment_command_64* seg = (struct segment_command_64*)lc;
+			uint64_t seg_end = seg->fileoff + seg->filesize;
+			if (fileoff >= seg->fileoff && range_end <= seg_end)
+				return (void*)(seg->vmaddr + slide +
+				              ((uint64_t)fileoff - seg->fileoff));
+		}
+		cmd_ptr += lc->cmdsize;
+	}
+	return NULL;
+}
+
+static int decode_function_starts(void* mh, uintptr_t slide,
+                                  uintptr_t** starts_out,
+                                  size_t* count_out)
+{
+	struct mach_header_64* header = (struct mach_header_64*)mh;
+	uint8_t* cmd_ptr = (uint8_t*)(header + 1);
+	struct linkedit_data_command_local* starts_cmd = NULL;
+	uintptr_t text_vmaddr = 0;
+
+	for (uint32_t i = 0; i < header->ncmds; i++) {
+		struct load_command* lc = (struct load_command*)cmd_ptr;
+		if (lc->cmd == LC_SEGMENT_64) {
+			struct segment_command_64* seg = (struct segment_command_64*)lc;
+			if (strncmp(seg->segname, "__TEXT", sizeof(seg->segname)) == 0)
+				text_vmaddr = (uintptr_t)seg->vmaddr;
+		} else if (lc->cmd == LC_FUNCTION_STARTS_LOCAL) {
+			starts_cmd = (struct linkedit_data_command_local*)lc;
+		}
+		cmd_ptr += lc->cmdsize;
+	}
+
+	if (!text_vmaddr || !starts_cmd || starts_cmd->datasize == 0) {
+		fprintf(stderr,
+		        "trampoline: address hooks require __TEXT and LC_FUNCTION_STARTS\n");
+		return -1;
+	}
+
+	const uint8_t* data = file_range_to_mem(mh, slide, starts_cmd->dataoff,
+	                                        starts_cmd->datasize);
+	if (!data) {
+		fprintf(stderr, "trampoline: cannot locate LC_FUNCTION_STARTS data\n");
+		return -1;
+	}
+
+	uintptr_t* starts = NULL;
+	size_t count = 0;
+	size_t capacity = 0;
+	uintptr_t current = text_vmaddr;
+	size_t offset = 0;
+
+	while (offset < starts_cmd->datasize) {
+		uint64_t delta = 0;
+		unsigned int shift = 0;
+		uint8_t byte;
+		do {
+			if (offset >= starts_cmd->datasize || shift >= 64) {
+				fprintf(stderr, "trampoline: malformed LC_FUNCTION_STARTS\n");
+				free(starts);
+				return -1;
+			}
+			byte = data[offset++];
+			delta |= (uint64_t)(byte & 0x7f) << shift;
+			shift += 7;
+		} while (byte & 0x80);
+
+		if (delta == 0) break;
+		if (delta > UINTPTR_MAX - current) {
+			fprintf(stderr, "trampoline: LC_FUNCTION_STARTS address overflow\n");
+			free(starts);
+			return -1;
+		}
+		current += (uintptr_t)delta;
+
+		if (count == capacity) {
+			size_t new_capacity = capacity ? capacity * 2 : 64;
+			uintptr_t* grown = realloc(starts, new_capacity * sizeof(*starts));
+			if (!grown) {
+				free(starts);
+				return -1;
+			}
+			starts = grown;
+			capacity = new_capacity;
+		}
+		starts[count++] = current;
+	}
+
+	if (count == 0) {
+		fprintf(stderr, "trampoline: LC_FUNCTION_STARTS contains no functions\n");
+		free(starts);
+		return -1;
+	}
+
+	*starts_out = starts;
+	*count_out = count;
+	return 0;
+}
+
+static int executable_function_end(void* mh, uintptr_t vmaddr,
+                                   const uintptr_t* starts, size_t start_count,
+                                   uintptr_t* function_end)
+{
+	struct mach_header_64* header = (struct mach_header_64*)mh;
+	uint8_t* cmd_ptr = (uint8_t*)(header + 1);
+	uintptr_t section_end = 0;
+
+	for (uint32_t i = 0; i < header->ncmds; i++) {
+		struct load_command* lc = (struct load_command*)cmd_ptr;
+		if (lc->cmd == LC_SEGMENT_64) {
+			struct segment_command_64* seg = (struct segment_command_64*)lc;
+			if (strncmp(seg->segname, "__TEXT", sizeof(seg->segname)) == 0 &&
+			    (seg->initprot & VM_PROT_EXECUTE)) {
+				struct section_64* sections = (struct section_64*)(seg + 1);
+				for (uint32_t j = 0; j < seg->nsects; j++) {
+					struct section_64* section = &sections[j];
+					uint64_t end = section->addr + section->size;
+					int instructions =
+						(section->flags & (S_ATTR_PURE_INSTRUCTIONS |
+						                   S_ATTR_SOME_INSTRUCTIONS)) != 0;
+					if (instructions && vmaddr >= section->addr &&
+					    vmaddr < end && end <= UINTPTR_MAX) {
+						section_end = (uintptr_t)end;
+						break;
+					}
+				}
+			}
+		}
+		cmd_ptr += lc->cmdsize;
+	}
+
+	if (!section_end) return -1;
+
+	for (size_t i = 0; i < start_count; i++) {
+		if (starts[i] != vmaddr) continue;
+		uintptr_t end = section_end;
+		if (i + 1 < start_count && starts[i + 1] > vmaddr &&
+		    starts[i + 1] < section_end)
+			end = starts[i + 1];
+		*function_end = end;
+		return 0;
+	}
+	return -1;
+}
+
+int trampoline_validate_function(void* mh, uintptr_t slide, uintptr_t vmaddr,
+                                 const char* expected_hex)
+{
+	uint8_t* expected = NULL;
+	size_t expected_len = 0;
+	uintptr_t* starts = NULL;
+	size_t start_count = 0;
+	uintptr_t function_end = 0;
+	int result = -1;
+
+	if (!mh || !expected_hex ||
+	    ((struct mach_header_64*)mh)->magic != MH_MAGIC_64) {
+		fprintf(stderr, "trampoline: invalid entry validation request\n");
+		return -1;
+	}
+	if (parse_expected_bytes(expected_hex, &expected, &expected_len) < 0) {
+		fprintf(stderr,
+		        "trampoline: entry expected bytes must be even hex (at least 4 bytes)\n");
+		return -1;
+	}
+	if (decode_function_starts(mh, slide, &starts, &start_count) < 0)
+		goto done;
+	if (executable_function_end(mh, vmaddr, starts, start_count,
+	                            &function_end) < 0) {
+		fprintf(stderr,
+		        "trampoline: entry 0x%" PRIxPTR
+		        " is not an executable LC_FUNCTION_STARTS address\n",
+		        vmaddr);
+		goto done;
+	}
+	if (expected_len > function_end - vmaddr ||
+	    vmaddr > UINTPTR_MAX - slide) {
+		fprintf(stderr, "trampoline: entry validation range is invalid\n");
+		goto done;
+	}
+	if (memcmp((void*)(vmaddr + slide), expected, expected_len) != 0) {
+		fprintf(stderr,
+		        "trampoline: entry bytes mismatch at 0x%" PRIxPTR "\n",
+		        vmaddr);
+		goto done;
+	}
+	fprintf(stderr,
+	        "trampoline: validated entry 0x%" PRIxPTR " (%zu signature bytes)\n",
+	        vmaddr, expected_len);
+	result = 0;
+
+done:
+	free(starts);
+	free(expected);
+	return result;
+}
+
+int trampoline_patch_addresses(void* mh, uintptr_t slide,
+                               const char* config_path)
+{
+	if (!mh || !config_path ||
+	    ((struct mach_header_64*)mh)->magic != MH_MAGIC_64) {
+		fprintf(stderr, "trampoline: invalid Mach-O or address hooks path\n");
+		return -1;
+	}
+
+	struct address_hook* hooks = NULL;
+	size_t hook_count = 0;
+	uintptr_t* function_starts = NULL;
+	size_t function_count = 0;
+	int result = -1;
+
+	if (load_address_hooks(config_path, &hooks, &hook_count) < 0)
+		return -1;
+	if (decode_function_starts(mh, slide, &function_starts, &function_count) < 0)
+		goto done;
+
+	for (size_t i = 0; i < hook_count; i++) {
+		struct address_hook* hook = &hooks[i];
+		uintptr_t function_end = 0;
+
+		for (size_t j = 0; j < i; j++) {
+			if (hooks[j].vmaddr == hook->vmaddr) {
+				fprintf(stderr,
+				        "trampoline: duplicate address hook at 0x%" PRIxPTR "\n",
+				        hook->vmaddr);
+				goto done;
+			}
+		}
+
+		if (executable_function_end(mh, hook->vmaddr, function_starts,
+		                            function_count, &function_end) < 0) {
+			fprintf(stderr,
+			        "trampoline: address 0x%" PRIxPTR
+			        " is not a function start in executable __TEXT\n",
+			        hook->vmaddr);
+			goto done;
+		}
+		if (hook->expected_len > function_end - hook->vmaddr) {
+			fprintf(stderr,
+			        "trampoline: expected bytes at 0x%" PRIxPTR
+			        " cross the function boundary\n", hook->vmaddr);
+			goto done;
+		}
+		if (hook->vmaddr > UINTPTR_MAX - slide) {
+			fprintf(stderr, "trampoline: runtime address overflow\n");
+			goto done;
+		}
+		hook->runtime_addr = hook->vmaddr + slide;
+		if (memcmp((void*)hook->runtime_addr, hook->expected,
+		           hook->expected_len) != 0) {
+			fprintf(stderr,
+			        "trampoline: expected bytes mismatch at 0x%" PRIxPTR "\n",
+			        hook->vmaddr);
+			goto done;
+		}
+		memcpy(&hook->original_insn, (void*)hook->runtime_addr,
+		       sizeof(hook->original_insn));
+
+		hook->lib_handle = dlopen(hook->lib_path, RTLD_NOW | RTLD_GLOBAL);
+		if (!hook->lib_handle) {
+			fprintf(stderr, "trampoline: cannot load %s: %s\n",
+			        hook->lib_path, dlerror());
+			goto done;
+		}
+		dlerror();
+		hook->target = dlsym(hook->lib_handle, hook->symbol);
+		const char* symbol_error = dlerror();
+		if (symbol_error || !hook->target) {
+			fprintf(stderr, "trampoline: symbol %s not found in %s: %s\n",
+			        hook->symbol, hook->lib_path,
+			        symbol_error ? symbol_error : "null symbol address");
+			goto done;
+		}
+	}
+
+	if (!island_pool || island_pool_used > island_pool_size ||
+	    hook_count > (island_pool_size - island_pool_used) / ISLAND_SIZE) {
+		fprintf(stderr, "trampoline: address hooks exceed island pool capacity\n");
+		goto done;
+	}
+	for (size_t i = 0; i < hook_count; i++) {
+		uintptr_t island_addr = (uintptr_t)island_pool + island_pool_used +
+		                        i * ISLAND_SIZE;
+		int64_t offset = (int64_t)island_addr -
+		                 (int64_t)hooks[i].runtime_addr;
+		if (offset < -128 * 1024 * 1024 || offset >= 128 * 1024 * 1024 ||
+		    (offset & 3) != 0) {
+			fprintf(stderr,
+			        "trampoline: island for 0x%" PRIxPTR " is out of branch range\n",
+			        hooks[i].vmaddr);
+			goto done;
+		}
+	}
+
+	if (make_text_writable(mh, slide) < 0) {
+		restore_text_protection();
+		goto done;
+	}
+
+	size_t pool_start = island_pool_used;
+	size_t patched = 0;
+	for (; patched < hook_count; patched++) {
+		if (write_trampoline(hooks[patched].runtime_addr,
+		                     (uintptr_t)hooks[patched].target) < 0)
+			break;
+	}
+	if (patched != hook_count) {
+		for (size_t i = 0; i < patched; i++) {
+			memcpy((void*)hooks[i].runtime_addr, &hooks[i].original_insn,
+			       sizeof(hooks[i].original_insn));
+			__builtin___clear_cache((char*)hooks[i].runtime_addr,
+			                        (char*)(hooks[i].runtime_addr + 4));
+		}
+		island_pool_used = pool_start;
+		restore_text_protection();
+		fprintf(stderr,
+		        "trampoline: address hook write failed; all writes rolled back\n");
+		goto done;
+	}
+
+	restore_text_protection();
+	fprintf(stderr, "trampoline: address hooks: %zu patched from %s\n",
+	        hook_count, config_path);
+	result = (int)hook_count;
+
+done:
+	free(function_starts);
+	/* Successful patches need their libraries to remain loaded. */
+	free_address_hooks(hooks, hook_count, result < 0);
+	return result;
 }
 
 /* Check if a symbol name matches any of the given prefixes */

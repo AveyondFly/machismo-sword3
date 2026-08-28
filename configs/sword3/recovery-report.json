@@ -1,0 +1,457 @@
+{
+  "anchor_search": {
+    "candidates": [],
+    "matched_strings": [],
+    "patterns": []
+  },
+  "candidates": [
+    {
+      "address": "0x10002c3b0",
+      "call_targets": [
+        {
+          "kind": "import-stub",
+          "site": "0x10002c3f4",
+          "symbol": "_strcmp",
+          "target": "0x1002401a4"
+        },
+        {
+          "kind": "import-stub",
+          "site": "0x10002c408",
+          "symbol": "_strcmp",
+          "target": "0x1002401a4"
+        },
+        {
+          "kind": "import-stub",
+          "site": "0x10002c41c",
+          "symbol": "_strcmp",
+          "target": "0x1002401a4"
+        },
+        {
+          "kind": "import-stub",
+          "site": "0x10002c430",
+          "symbol": "_strcmp",
+          "target": "0x1002401a4"
+        },
+        {
+          "kind": "direct",
+          "site": "0x10002c490",
+          "target": "0x10010ed7c"
+        },
+        {
+          "kind": "direct",
+          "site": "0x10002c4f8",
+          "target": "0x1001cc87c"
+        },
+        {
+          "kind": "direct",
+          "site": "0x10002c508",
+          "target": "0x10002ca74"
+        },
+        {
+          "kind": "import-stub",
+          "site": "0x10002c510",
+          "symbol": "__ZNSt3__16thread6detachEv",
+          "target": "0x10023f79c"
+        },
+        {
+          "kind": "direct",
+          "site": "0x10002c528",
+          "target": "0x1001b5b50"
+        },
+        {
+          "kind": "direct",
+          "site": "0x10002c52c",
+          "target": "0x10006c0e0"
+        },
+        {
+          "kind": "direct",
+          "site": "0x10002c54c",
+          "target": "0x100044b2c"
+        },
+        {
+          "kind": "direct",
+          "site": "0x10002c554",
+          "target": "0x10001c358"
+        },
+        {
+          "kind": "direct",
+          "site": "0x10002c558",
+          "target": "0x10002fa6c"
+        },
+        {
+          "kind": "direct",
+          "site": "0x10002c55c",
+          "target": "0x10001f0d8"
+        },
+        {
+          "kind": "direct",
+          "site": "0x10002c560",
+          "target": "0x10005620c"
+        },
+        {
+          "kind": "direct",
+          "site": "0x10002c564",
+          "target": "0x100034904"
+        },
+        {
+          "kind": "direct",
+          "site": "0x10002c568",
+          "target": "0x100022a98"
+        },
+        {
+          "kind": "direct",
+          "site": "0x10002c56c",
+          "target": "0x100004290"
+        },
+        {
+          "kind": "direct",
+          "site": "0x10002c570",
+          "target": "0x100015b40"
+        },
+        {
+          "kind": "direct",
+          "site": "0x10002c574",
+          "target": "0x1001ccbc4"
+        },
+        {
+          "kind": "import-stub",
+          "site": "0x10002c57c",
+          "symbol": "__ZNSt3__16threadD1Ev",
+          "target": "0x10023f7a8"
+        },
+        {
+          "kind": "direct",
+          "site": "0x10002c5c0",
+          "target": "0x1001bf2c8"
+        },
+        {
+          "kind": "import-stub",
+          "site": "0x10002c5d4",
+          "symbol": "___stack_chk_fail",
+          "target": "0x10023f898"
+        },
+        {
+          "kind": "import-stub",
+          "site": "0x10002c5e8",
+          "symbol": "__ZNSt3__16threadD1Ev",
+          "target": "0x10023f7a8"
+        },
+        {
+          "kind": "import-stub",
+          "site": "0x10002c5f0",
+          "symbol": "__Unwind_Resume",
+          "target": "0x10023f718"
+        }
+      ],
+      "cfg_call_summary": {
+        "basic_block_count": 21,
+        "direct_call_count": 25,
+        "edge_count": 23,
+        "indirect_call_count": 0
+      },
+      "confidence": "high",
+      "end_address": "0x10002c5f8",
+      "evidence": [
+        "LC_MAIN first instruction materializes 0x10002c3b0 in x2",
+        "0x10002c3b0 is an LC_FUNCTION_STARTS entry"
+      ],
+      "expected_hex": "ff0302d1f65705a9f44f06a9fd7b07a9",
+      "fingerprint": {
+        "algorithm": "sha256(normalized-arm64-v1)",
+        "instruction_count": 146,
+        "normalized_instructions": [
+          "sub sp, sp, #0x80",
+          "stp x22, x21, [sp, #0x50]",
+          "stp x20, x19, [sp, #0x60]",
+          "stp x29, x30, [sp, #0x70]",
+          "add x29, sp, #0x70",
+          "adrp x8, <pcrel>",
+          "ldr x8, [x8, #0x200]",
+          "ldr x8, [x8]",
+          "stur x8, [x29, #-0x28]",
+          "cmp w0, #2",
+          "b.lt <branch>",
+          "mov x19, x1",
+          "mov x20, x0",
+          "ldr x21, [x1, #8]",
+          "adrp x1, <pcrel>",
+          "add x1, x1, <pcrel-lo>",
+          "mov x0, x21",
+          "bl <branch>",
+          "cbz w0, <branch>",
+          "adrp x1, <pcrel>",
+          "add x1, x1, <pcrel-lo>",
+          "mov x0, x21",
+          "bl <branch>",
+          "cbz w0, <branch>",
+          "adrp x1, <pcrel>",
+          "add x1, x1, <pcrel-lo>",
+          "mov x0, x21",
+          "bl <branch>",
+          "cbz w0, <branch>",
+          "adrp x1, <pcrel>",
+          "add x1, x1, <pcrel-lo>",
+          "mov x0, x21",
+          "bl <branch>",
+          "cbz w0, <branch>",
+          "mov w19, #1",
+          "b <branch>",
+          "mov w19, #0",
+          "b <branch>",
+          "mov w19, #2",
+          "mov w21, #0x320",
+          "mov x8, #0",
+          "mov w9, #0xff00",
+          "strh w9, [sp, #0x40]",
+          "mov x9, #-0xff0f",
+          "movk x9, #0xf2, lsl #16",
+          "movk x9, #0xff00, lsl #32",
+          "str x9, [sp, #0x38]",
+          "add x9, sp, #0x38",
+          "orr x9, x9, #2",
+          "ldrsh w10, [x9, x8, lsl #1]",
+          "add x8, x8, #1",
+          "cmn w10, #0x100",
+          "b.ne <branch>",
+          "str x8, [sp]",
+          "adrp x0, <pcrel>",
+          "add x0, x0, <pcrel-lo>",
+          "bl <branch>",
+          "adrp x8, <pcrel>",
+          "ldr d0, [x8, #0x640]",
+          "adrp x8, <pcrel>",
+          "add x8, x8, <pcrel-lo>",
+          "str d0, [x8, #0xb0]",
+          "str wzr, [sp, #0x20]",
+          "mov x8, #0x2e",
+          "movk x8, #0xbf, lsl #32",
+          "str x8, [sp, #0x18]",
+          "mov w8, #0x400",
+          "strh w8, [sp, #0x14]",
+          "str wzr, [sp, #0x10]",
+          "adrp x8, <pcrel>",
+          "add x8, x8, <pcrel-lo>",
+          "str x8, [sp, #8]",
+          "adrp x3, <pcrel>",
+          "add x3, x3, <pcrel-lo>",
+          "stp w19, w21, [sp]",
+          "mov w0, #1",
+          "mov w1, #1",
+          "mov w2, #1",
+          "mov w4, #3",
+          "mov w5, #2",
+          "mov w6, #0x150",
+          "mov w7, #-1",
+          "bl <branch>",
+          "adr x1, <pcrel>",
+          "nop",
+          "add x0, sp, #0x30",
+          "bl <branch>",
+          "add x0, sp, #0x30",
+          "bl <branch>",
+          "adrp x0, <pcrel>",
+          "add x0, x0, <pcrel-lo>",
+          "mov w1, #1",
+          "mov w2, #1",
+          "mov w3, #0x10",
+          "bl <branch>",
+          "bl <branch>",
+          "adrp x19, <pcrel>",
+          "add x19, x19, <pcrel-lo>",
+          "mov w20, #1",
+          "adrp x21, <pcrel>",
+          "add x21, x21, <pcrel-lo>",
+          "strb w20, [x19]",
+          "strb wzr, [x21]",
+          "bl <branch>",
+          "cbz w0, <branch>",
+          "bl <branch>",
+          "bl <branch>",
+          "bl <branch>",
+          "bl <branch>",
+          "bl <branch>",
+          "bl <branch>",
+          "bl <branch>",
+          "bl <branch>",
+          "bl <branch>",
+          "add x0, sp, #0x30",
+          "bl <branch>",
+          "ldur x8, [x29, #-0x28]",
+          "adrp x9, <pcrel>",
+          "ldr x9, [x9, #0x200]",
+          "ldr x9, [x9]",
+          "cmp x9, x8",
+          "b.ne <branch>",
+          "mov w0, #0",
+          "ldp x29, x30, [sp, #0x70]",
+          "ldp x20, x19, [sp, #0x60]",
+          "ldp x22, x21, [sp, #0x50]",
+          "add sp, sp, #0x80",
+          "ret",
+          "mov w21, #0x320",
+          "cmp w20, #3",
+          "b.lt <branch>",
+          "ldr x0, [x19, #0x10]",
+          "bl <branch>",
+          "cmp w0, #0x320",
+          "csel w21, w0, w21, gt",
+          "mov w19, #3",
+          "b <branch>",
+          "bl <branch>",
+          "b <branch>",
+          "b <branch>",
+          "mov x19, x0",
+          "add x0, sp, #0x30",
+          "bl <branch>",
+          "mov x0, x19",
+          "bl <branch>",
+          "brk #1"
+        ],
+        "sha256": "bb0cade859706dc82d008085f40cff0d20880fc81a2f40f2a4595d476491a9ce"
+      },
+      "role": "entry-callback-candidate",
+      "size": 584,
+      "string_references": [
+        {
+          "address": "0x100273f61",
+          "instruction": "0x10002c3ec",
+          "section": "__TEXT,__cstring",
+          "string": "/F"
+        },
+        {
+          "address": "0x100273f64",
+          "instruction": "0x10002c400",
+          "section": "__TEXT,__cstring",
+          "string": "/WC"
+        },
+        {
+          "address": "0x100273f68",
+          "instruction": "0x10002c414",
+          "section": "__TEXT,__cstring",
+          "string": "/WM"
+        },
+        {
+          "address": "0x100273f6c",
+          "instruction": "0x10002c428",
+          "section": "__TEXT,__cstring",
+          "string": "/w"
+        },
+        {
+          "address": "0x100273f6f",
+          "instruction": "0x10002c48c",
+          "section": "__TEXT,__cstring",
+          "string": "count is %d"
+        },
+        {
+          "address": "0x100273f7b",
+          "instruction": "0x10002c4c8",
+          "section": "__TEXT,__cstring",
+          "string": "9198.png"
+        },
+        {
+          "address": "0x1002736a2",
+          "instruction": "0x10002c4d4",
+          "section": "__TEXT,__cstring",
+          "string": "SWD3"
+        }
+      ]
+    }
+  ],
+  "entry_validation": {
+    "first_instruction": {
+      "address": "0x1000f17cc",
+      "destination_register": "x2",
+      "mnemonic": "adr",
+      "operands": "x2, #0x10002c3b0",
+      "passed": true,
+      "resolved_address": "0x10002c3b0"
+    },
+    "lc_main": {
+      "address": "0x1000f17cc",
+      "entryoff": "0xf17cc"
+    },
+    "passed": true,
+    "uiapplicationmain": {
+      "call_site": "0x1000f18d8",
+      "control_flow_path": [
+        "0x1000f17cc",
+        "0x1000f17d8"
+      ],
+      "reached": true,
+      "searched_function_count": 2,
+      "stub_address": "0x10023f6dc",
+      "stub_proof": {
+        "evidence": [
+          "indirect symbol table maps the stub to _UIApplicationMain",
+          "stub literal/ADRP LDR resolves to the recorded lazy-bind pointer",
+          "LC_DYLD_INFO_ONLY lazy-bind stream maps that pointer to _UIApplicationMain"
+        ],
+        "indirect_symbol": {
+          "indirect_index": 57,
+          "symbol": "_UIApplicationMain",
+          "symbol_index": 177
+        },
+        "lazy_bind": {
+          "address": "0x1002947b0",
+          "dylib_ordinal": 16,
+          "symbol": "_UIApplicationMain"
+        },
+        "lazy_pointer_address": "0x1002947b0",
+        "stub_instructions": [
+          {
+            "address": "0x10023f6dc",
+            "mnemonic": "nop",
+            "operands": ""
+          },
+          {
+            "address": "0x10023f6e0",
+            "mnemonic": "ldr",
+            "operands": "x16, #0x1002947b0"
+          },
+          {
+            "address": "0x10023f6e4",
+            "mnemonic": "br",
+            "operands": "x16"
+          }
+        ]
+      },
+      "symbol": "_UIApplicationMain"
+    }
+  },
+  "function_index": {
+    "count": 6293,
+    "source": "LC_FUNCTION_STARTS",
+    "text_address": "0x100004290",
+    "text_end_address": "0x10023f430"
+  },
+  "inputs": {
+    "binary": "SWD3",
+    "binary_sha256": "268d6f40eac47718ee2cac6acd34912421546eb8a58056d310c0b42d2655e36b",
+    "binary_size": 2955152,
+    "manifest": "configs/sword3/binary-manifest.json"
+  },
+  "macho": {
+    "architecture": "arm64",
+    "format": "Mach-O 64-bit little-endian",
+    "uuid": "7C40879F-22A3-3F14-8486-F37FA0AA96F3"
+  },
+  "manifest_validation": {
+    "checks": {
+      "function_starts": true,
+      "lc_main_entryoff": true,
+      "sha256": true,
+      "uuid": true
+    },
+    "manifest_sha256": "8c2edd6bc71e8454adc733701a33693e7533e15ee229f5c5516e4ffcc7dadbe2",
+    "matched": true
+  },
+  "mode": "static-recovery",
+  "recovery_method": {
+    "cfg_calls": "direct branch targets, basic-block starts, BL targets, and unresolved BLR counts",
+    "fingerprint": "ARM64 instruction text with PC-relative immediates and branch targets masked before SHA-256",
+    "function_boundaries": "LC_FUNCTION_STARTS ULEB128 deltas",
+    "naming_policy": "No SDL function name is assigned without independent symbol or semantic evidence; results are candidates with confidence and explicit evidence.",
+    "string_anchors": "S_CSTRING_LITERALS addresses plus ARM64 ADR/ADRP xrefs"
+  },
+  "schema_version": 1
+}

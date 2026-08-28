@@ -8,6 +8,8 @@
 #include <stdlib.h>
 #include <string.h>
 #include <ctype.h>
+#include <errno.h>
+#include <stdint.h>
 
 static char* strip(char* s)
 {
@@ -16,6 +18,18 @@ static char* strip(char* s)
 	while (end > s && isspace((unsigned char)end[-1])) end--;
 	*end = '\0';
 	return s;
+}
+
+static int parse_hex_address(const char* value, uintptr_t* result)
+{
+	char* end = NULL;
+	errno = 0;
+	unsigned long long parsed = strtoull(value, &end, 16);
+	if (errno != 0 || end == value || *end != '\0' ||
+	    parsed > (unsigned long long)UINTPTR_MAX)
+		return -1;
+	*result = (uintptr_t)parsed;
+	return 0;
 }
 
 int config_load(const char* path, machismo_config_t* cfg)
@@ -93,6 +107,28 @@ int config_load(const char* path, machismo_config_t* cfg)
 			} else if (strcmp(key, "splash_image") == 0) {
 				free(cfg->splash_image);
 				cfg->splash_image = strdup(val);
+			} else if (strcmp(key, "address_hooks") == 0) {
+				free(cfg->address_hooks);
+				cfg->address_hooks = strdup(val);
+			} else if (strcmp(key, "entry_override") == 0) {
+				if (parse_hex_address(val, &cfg->entry_override) < 0) {
+					fprintf(stderr, "config: invalid hexadecimal entry_override: %s\n", val);
+					fclose(f);
+					config_free(cfg);
+					return -1;
+				}
+				cfg->has_entry_override = 1;
+			} else if (strcmp(key, "entry_expected") == 0) {
+				free(cfg->entry_expected);
+				cfg->entry_expected = strdup(val);
+			} else if (strcmp(key, "entry_prepare_lib") == 0) {
+				free(cfg->entry_prepare_lib);
+				cfg->entry_prepare_lib = strdup(val);
+			} else if (strcmp(key, "entry_prepare_symbol") == 0) {
+				free(cfg->entry_prepare_symbol);
+				cfg->entry_prepare_symbol = strdup(val);
+			} else if (strcmp(key, "audit_only") == 0) {
+				cfg->audit_only = (strcmp(val, "true") == 0 || strcmp(val, "1") == 0);
 			}
 		}
 	}
@@ -105,6 +141,11 @@ void config_free(machismo_config_t* cfg)
 {
 	free(cfg->dylib_map);
 	free(cfg->patches);
+	free(cfg->splash_image);
+	free(cfg->address_hooks);
+	free(cfg->entry_expected);
+	free(cfg->entry_prepare_lib);
+	free(cfg->entry_prepare_symbol);
 	for (int i = 0; i < cfg->num_trampolines; i++) {
 		free(cfg->trampolines[i].name);
 		free(cfg->trampolines[i].lib);
