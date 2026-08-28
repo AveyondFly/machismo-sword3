@@ -1,5 +1,7 @@
+#define _GNU_SOURCE
 #include "sword3_objc_shim.h"
 
+#include <dlfcn.h>
 #include <stdatomic.h>
 #include <stdlib.h>
 #include <string.h>
@@ -33,6 +35,7 @@ static atomic_flag selector_lock = ATOMIC_FLAG_INIT;
 static atomic_flag storage_lock = ATOMIC_FLAG_INIT;
 static atomic_flag class_lock = ATOMIC_FLAG_INIT;
 static atomic_flag method_cache_lock = ATOMIC_FLAG_INIT;
+static void write_diagnostic(const char *prefix, const char *detail);
 static struct selector_node *selectors;
 static struct cached_method *cached_methods;
 static sword3_objc_Class observed_classes[256];
@@ -53,13 +56,463 @@ static sword3_objc_id nsobject_init_with_frame(sword3_objc_id self,
     return self;
 }
 
-static void nsobject_set_background_color(sword3_objc_id self,
-                                          sword3_objc_sel selector,
-                                          sword3_objc_id color)
+static void nsobject_ignore(sword3_objc_id self, sword3_objc_sel selector)
 {
     (void)self;
     (void)selector;
-    (void)color;
+}
+
+struct audio_blob {
+    sword3_objc_Class isa;
+    char *path;
+    void *bytes;
+    size_t length;
+    int loops;
+};
+
+static sword3_objc_id movie_observer;
+static sword3_objc_sel movie_callback;
+static sword3_objc_id g_av_player;
+static char *g_pending_video_path;
+
+static int is_movie_finish_selector(sword3_objc_sel selector)
+{
+    if (selector == NULL)
+        return 0;
+    if (strcmp(selector, "moviePlayBackDidFinish:") == 0)
+        return 1;
+    return strstr(selector, "DidPlayToEnd") != NULL;
+}
+
+static void fire_movie_finish(void)
+{
+    sword3_objc_id observer = movie_observer;
+    sword3_objc_sel callback = movie_callback;
+    sword3_objc_imp imp;
+
+    movie_observer = NULL;
+    movie_callback = NULL;
+    if (observer == NULL || callback == NULL)
+        return;
+    write_diagnostic("[sword3-objc-shim] movie finished via ", callback);
+    imp = sword3_objc_lookup_imp(observer, callback, NULL);
+    if (imp == NULL || imp == (sword3_objc_imp)nsobject_init)
+        return;
+    ((void (*)(sword3_objc_id, sword3_objc_sel, sword3_objc_id))imp)(
+        observer, callback, NULL
+    );
+}
+
+static void nsobject_add_observer(sword3_objc_id self,
+                                 sword3_objc_sel selector,
+                                 sword3_objc_id observer,
+                                 sword3_objc_sel callback,
+                                 sword3_objc_id name,
+                                 sword3_objc_id object)
+{
+    (void)self;
+    (void)selector;
+    (void)name;
+    (void)object;
+    if (!is_movie_finish_selector(callback))
+        return;
+    movie_observer = observer;
+    movie_callback = callback;
+    write_diagnostic("[sword3-objc-shim] movie finish observer: ", callback);
+}
+
+static int ascii_lower(unsigned char c)
+{
+    if (c >= 'A' && c <= 'Z')
+        return c + ('a' - 'A');
+    return c;
+}
+
+static int path_has_extension(const char *path, const char *ext)
+{
+    size_t path_len;
+    size_t ext_len;
+    size_t index;
+
+    if (path == NULL || ext == NULL)
+        return 0;
+    path_len = strlen(path);
+    ext_len = strlen(ext);
+    if (path_len < ext_len)
+        return 0;
+    for (index = 0; index < ext_len; ++index) {
+        if (ascii_lower((unsigned char)path[path_len - ext_len + index]) !=
+            ascii_lower((unsigned char)ext[index]))
+            return 0;
+    }
+    return 1;
+}
+
+static int is_audio_path(const char *path)
+{
+    return path_has_extension(path, ".mp3") ||
+           path_has_extension(path, ".ogg") ||
+           path_has_extension(path, ".wav") ||
+           path_has_extension(path, ".m4a") ||
+           path_has_extension(path, ".aac") ||
+           path_has_extension(path, ".caf") ||
+           path_has_extension(path, ".mp2") ||
+           path_has_extension(path, ".mid") ||
+           path_has_extension(path, ".midi");
+}
+
+static int play_blob(struct audio_blob *blob)
+{
+    typedef int (*host_play_file_fn)(const char *, int);
+    typedef int (*host_play_data_fn)(const void *, size_t, int);
+    static host_play_file_fn host_play_file;
+    static host_play_data_fn host_play_data;
+    static int resolved;
+
+    if (blob == NULL)
+        return 0;
+    if (!resolved) {
+        resolved = 1;
+        host_play_file = (host_play_file_fn)dlsym(
+            RTLD_DEFAULT, "sword3_host_play_music_file"
+        );
+        host_play_data = (host_play_data_fn)dlsym(
+            RTLD_DEFAULT, "sword3_host_play_music_data"
+        );
+    }
+    if (blob->path != NULL && blob->path[0] != '\0' && is_audio_path(blob->path)) {
+        if (host_play_file)
+            return host_play_file(blob->path, blob->loops) == 0;
+        write_diagnostic(
+            "[sword3-objc-shim] no host music player for ",
+            blob->path
+        );
+        return 0;
+    }
+    if (blob->bytes != NULL && blob->length > 0) {
+        if (host_play_data)
+            return host_play_data(blob->bytes, blob->length, blob->loops) == 0;
+        write_diagnostic(
+            "[sword3-objc-shim] no host music decoder for in-memory audio",
+            ""
+        );
+        return 0;
+    }
+    return 0;
+}
+
+static int is_video_path(const char *path)
+{
+    return path_has_extension(path, ".mp4") ||
+           path_has_extension(path, ".m4v") ||
+           path_has_extension(path, ".mov") ||
+           path_has_extension(path, ".mpv");
+}
+
+static int play_video_path(const char *path)
+{
+    typedef int (*host_play_video_fn)(const char *, void (*)(void));
+    static host_play_video_fn host_play_video;
+    static int resolved;
+
+    if (path == NULL || !is_video_path(path))
+        return 0;
+    if (!resolved) {
+        resolved = 1;
+        host_play_video = (host_play_video_fn)dlsym(
+            RTLD_DEFAULT, "sword3_host_play_video_file"
+        );
+    }
+    if (!host_play_video) {
+        write_diagnostic(
+            "[sword3-objc-shim] no host video player for ",
+            path
+        );
+        return 0;
+    }
+    if (host_play_video(path, fire_movie_finish) != 0) {
+        write_diagnostic(
+            "[sword3-objc-shim] host video failed for ",
+            path
+        );
+        return 0;
+    }
+    return 1;
+}
+
+static int play_video_blob(struct audio_blob *blob)
+{
+    const char *path = NULL;
+
+    if (blob != NULL)
+        path = blob->path;
+    if (play_video_path(path))
+        return 1;
+    return play_video_path(g_pending_video_path);
+}
+
+static sword3_objc_id nsobject_play(sword3_objc_id self,
+                                   sword3_objc_sel selector)
+{
+    (void)selector;
+    if (play_blob((struct audio_blob *)self))
+        return (sword3_objc_id)(uintptr_t)1;
+    if (play_video_blob((struct audio_blob *)self))
+        return (sword3_objc_id)(uintptr_t)1;
+    fire_movie_finish();
+    return (sword3_objc_id)(uintptr_t)1;
+}
+
+static void host_skip_video(void)
+{
+    typedef void (*host_stop_video_fn)(void);
+    static host_stop_video_fn host_stop_video;
+    static int resolved;
+
+    if (!resolved) {
+        resolved = 1;
+        host_stop_video = (host_stop_video_fn)dlsym(
+            RTLD_DEFAULT, "sword3_host_stop_video"
+        );
+    }
+    if (host_stop_video)
+        host_stop_video();
+}
+
+static void nsobject_stop(sword3_objc_id self, sword3_objc_sel selector)
+{
+    typedef void (*host_stop_fn)(void);
+    static host_stop_fn host_stop;
+    static int resolved;
+
+    (void)self;
+    (void)selector;
+    if (!resolved) {
+        resolved = 1;
+        host_stop = (host_stop_fn)dlsym(RTLD_DEFAULT, "sword3_host_stop_music");
+    }
+    if (host_stop)
+        host_stop();
+}
+
+static void nsobject_pause(sword3_objc_id self, sword3_objc_sel selector)
+{
+    (void)self;
+    (void)selector;
+    host_skip_video();
+}
+
+static void nsobject_set_player(sword3_objc_id self,
+                               sword3_objc_sel selector,
+                               sword3_objc_id player)
+{
+    (void)self;
+    (void)selector;
+    g_av_player = player;
+}
+
+static sword3_objc_id nsobject_player(sword3_objc_id self,
+                                     sword3_objc_sel selector)
+{
+    (void)selector;
+    return g_av_player != NULL ? g_av_player : self;
+}
+
+static sword3_objc_id nsobject_default_center(sword3_objc_id self,
+                                             sword3_objc_sel selector)
+{
+    (void)selector;
+    return self;
+}
+
+static int looks_like_path(const char *path)
+{
+    uintptr_t address = (uintptr_t)path;
+    size_t index;
+
+    if (path == NULL || address < 4096)
+        return 0;
+    if (path[0] == '/')
+        return 1;
+    for (index = 0; index < 4096; ++index) {
+        unsigned char c = (unsigned char)path[index];
+        if (c == '\0')
+            return index > 0;
+        if (c < 32 || c == 127)
+            return 0;
+    }
+    return 0;
+}
+
+static const char *object_path(sword3_objc_id object)
+{
+    sword3_objc_imp imp;
+    const char *path;
+    struct constant_string {
+        void *isa;
+        uint32_t flags;
+        uint32_t reserved;
+        const char *bytes;
+    };
+    struct audio_blob *blob;
+
+    if (object == NULL)
+        return NULL;
+    imp = sword3_objc_lookup_imp(object, "UTF8String", NULL);
+    if (imp != NULL && imp != (sword3_objc_imp)nsobject_init) {
+        path = ((const char *(*)(sword3_objc_id, sword3_objc_sel))imp)(
+            object, "UTF8String"
+        );
+        if (looks_like_path(path))
+            return path;
+    }
+    imp = sword3_objc_lookup_imp(object, "fileSystemRepresentation", NULL);
+    if (imp != NULL && imp != (sword3_objc_imp)nsobject_init) {
+        path = ((const char *(*)(sword3_objc_id, sword3_objc_sel))imp)(
+            object, "fileSystemRepresentation"
+        );
+        if (looks_like_path(path))
+            return path;
+    }
+    blob = (struct audio_blob *)object;
+    if (looks_like_path(blob->path))
+        return blob->path;
+    path = ((const struct constant_string *)object)->bytes;
+    if (looks_like_path(path) && path[0] == '/')
+        return path;
+    return NULL;
+}
+
+static void blob_set_path(struct audio_blob *blob, const char *path)
+{
+    char *copy;
+    size_t length;
+
+    if (blob == NULL || path == NULL)
+        return;
+    length = strlen(path);
+    copy = malloc(length + 1);
+    if (copy == NULL)
+        return;
+    memcpy(copy, path, length + 1);
+    free(blob->path);
+    blob->path = copy;
+    free(blob->bytes);
+    blob->bytes = NULL;
+    blob->length = 0;
+    if (is_video_path(copy)) {
+        free(g_pending_video_path);
+        g_pending_video_path = malloc(length + 1);
+        if (g_pending_video_path != NULL)
+            memcpy(g_pending_video_path, copy, length + 1);
+    }
+}
+
+static sword3_objc_id nsobject_file_url(sword3_objc_id self,
+                                       sword3_objc_sel selector,
+                                       sword3_objc_id path)
+{
+    (void)self;
+    (void)selector;
+    return path;
+}
+
+static sword3_objc_id nsobject_init_with_url(sword3_objc_id self,
+                                            sword3_objc_sel selector,
+                                            sword3_objc_id url)
+{
+    const char *path;
+
+    (void)selector;
+    if (self == NULL)
+        return NULL;
+    path = object_path(url);
+    if (path == NULL)
+        return self;
+    blob_set_path((struct audio_blob *)self, path);
+    write_diagnostic("[sword3-objc-shim] audio URL ", path);
+    return self;
+}
+
+static sword3_objc_id nsobject_set_url(sword3_objc_id self,
+                                      sword3_objc_sel selector,
+                                      sword3_objc_id url)
+{
+    const char *path;
+
+    (void)selector;
+    path = object_path(url);
+    if (path == NULL)
+        return NULL;
+    blob_set_path((struct audio_blob *)self, path);
+    write_diagnostic("[sword3-objc-shim] AVAudioPlayer Set: ", path);
+    /* Guest tests BOOL bit 0; a pointer return looks like NO. */
+    return (sword3_objc_id)(uintptr_t)1;
+}
+
+static sword3_objc_id nsobject_init_with_data(sword3_objc_id self,
+                                             sword3_objc_sel selector,
+                                             sword3_objc_id data)
+{
+    struct audio_blob *blob = (struct audio_blob *)self;
+    struct audio_blob *source = (struct audio_blob *)data;
+
+    (void)selector;
+    if (blob == NULL || source == NULL)
+        return self;
+    if (looks_like_path(source->path))
+        blob_set_path(blob, source->path);
+    else if (source->bytes != NULL && source->length > 0) {
+        void *copy = malloc(source->length);
+        if (copy == NULL)
+            return self;
+        memcpy(copy, source->bytes, source->length);
+        free(blob->bytes);
+        free(blob->path);
+        blob->path = NULL;
+        blob->bytes = copy;
+        blob->length = source->length;
+        write_diagnostic(
+            "[sword3-objc-shim] AVAudioPlayer initWithData bytes",
+            ""
+        );
+    }
+    return self;
+}
+
+static sword3_objc_id nsobject_data_with_bytes(sword3_objc_id cls,
+                                              sword3_objc_sel selector,
+                                              const void *bytes,
+                                              intptr_t length)
+{
+    struct audio_blob *blob;
+    void *copy;
+
+    (void)selector;
+    if (cls == NULL || bytes == NULL || length <= 0)
+        return NULL;
+    blob = calloc(1, 64);
+    if (blob == NULL)
+        return NULL;
+    copy = malloc((size_t)length);
+    if (copy == NULL) {
+        free(blob);
+        return NULL;
+    }
+    memcpy(copy, bytes, (size_t)length);
+    blob->isa = (sword3_objc_Class)cls;
+    blob->bytes = copy;
+    blob->length = (size_t)length;
+    return blob;
+}
+
+static void nsobject_set_loops(sword3_objc_id self,
+                              sword3_objc_sel selector,
+                              intptr_t loops)
+{
+    (void)selector;
+    if (self != NULL)
+        ((struct audio_blob *)self)->loops = (int)loops;
 }
 
 static bool nsobject_responds(sword3_objc_id self,
@@ -87,7 +540,7 @@ static bool nsobject_instances_respond(sword3_objc_Class cls,
 struct nsobject_method_list {
     uint32_t entsize_and_flags;
     uint32_t count;
-    struct sword3_objc_method methods[4];
+    struct sword3_objc_method methods[32];
 };
 
 struct nsobject_class_method_list {
@@ -98,7 +551,7 @@ struct nsobject_class_method_list {
 
 static const struct nsobject_method_list nsobject_methods = {
     .entsize_and_flags = sizeof(struct sword3_objc_method),
-    .count = 4,
+    .count = 29,
     .methods = {
         {
             .name = "init",
@@ -113,12 +566,137 @@ static const struct nsobject_method_list nsobject_methods = {
         {
             .name = "setBackgroundColor:",
             .types = "v24@0:8@16",
-            .imp = (sword3_objc_imp)nsobject_set_background_color,
+            .imp = (sword3_objc_imp)nsobject_ignore,
         },
         {
             .name = "respondsToSelector:",
             .types = "B24@0:8:16",
             .imp = (sword3_objc_imp)nsobject_responds,
+        },
+        {
+            .name = "clearColor",
+            .types = "@16@0:8",
+            .imp = (sword3_objc_imp)nsobject_init,
+        },
+        {
+            .name = "whiteColor",
+            .types = "@16@0:8",
+            .imp = (sword3_objc_imp)nsobject_init,
+        },
+        {
+            .name = "colorWithAlphaComponent:",
+            .types = "@24@0:8d16",
+            .imp = (sword3_objc_imp)nsobject_init,
+        },
+        {
+            .name = "setTextColor:",
+            .types = "v24@0:8@16",
+            .imp = (sword3_objc_imp)nsobject_ignore,
+        },
+        {
+            .name = "textColor",
+            .types = "@16@0:8",
+            .imp = (sword3_objc_imp)nsobject_init,
+        },
+        {
+            .name = "systemFontOfSize:",
+            .types = "@24@0:8d16",
+            .imp = (sword3_objc_imp)nsobject_init,
+        },
+        {
+            .name = "setText:",
+            .types = "v24@0:8@16",
+            .imp = (sword3_objc_imp)nsobject_ignore,
+        },
+        {
+            .name = "addSubview:",
+            .types = "v24@0:8@16",
+            .imp = (sword3_objc_imp)nsobject_ignore,
+        },
+        {
+            .name = "addObserver:selector:name:object:",
+            .types = "v40@0:8@16:24@32@40",
+            .imp = (sword3_objc_imp)nsobject_add_observer,
+        },
+        {
+            .name = "play",
+            .types = "v16@0:8",
+            .imp = (sword3_objc_imp)nsobject_play,
+        },
+        {
+            .name = "defaultCenter",
+            .types = "@16@0:8",
+            .imp = (sword3_objc_imp)nsobject_default_center,
+        },
+        {
+            .name = "initWithURL:",
+            .types = "@24@0:8@16",
+            .imp = (sword3_objc_imp)nsobject_init_with_url,
+        },
+        {
+            .name = "fileURLWithPath:",
+            .types = "@24@0:8@16",
+            .imp = (sword3_objc_imp)nsobject_file_url,
+        },
+        {
+            .name = "initWithContentsOfURL:options:error:",
+            .types = "@40@0:8@16Q24^@32",
+            .imp = (sword3_objc_imp)nsobject_init_with_url,
+        },
+        {
+            .name = "setNumberOfLoops:",
+            .types = "v24@0:8q16",
+            .imp = (sword3_objc_imp)nsobject_set_loops,
+        },
+        {
+            .name = "initFileURLWithPath:",
+            .types = "@24@0:8@16",
+            .imp = (sword3_objc_imp)nsobject_init_with_url,
+        },
+        {
+            .name = "Set:",
+            .types = "B24@0:8@16",
+            .imp = (sword3_objc_imp)nsobject_set_url,
+        },
+        {
+            .name = "initWithData:error:",
+            .types = "@32@0:8@16^@24",
+            .imp = (sword3_objc_imp)nsobject_init_with_data,
+        },
+        {
+            .name = "dataWithBytes:length:",
+            .types = "@32@0:8*16Q24",
+            .imp = (sword3_objc_imp)nsobject_data_with_bytes,
+        },
+        {
+            .name = "setPan:",
+            .types = "v20@0:8f16",
+            .imp = (sword3_objc_imp)nsobject_ignore,
+        },
+        {
+            .name = "stop",
+            .types = "v16@0:8",
+            .imp = (sword3_objc_imp)nsobject_stop,
+        },
+        {
+            .name = "pause",
+            .types = "v16@0:8",
+            .imp = (sword3_objc_imp)nsobject_pause,
+        },
+        {
+            .name = "setPlayer:",
+            .types = "v24@0:8@16",
+            .imp = (sword3_objc_imp)nsobject_set_player,
+        },
+        {
+            .name = "player",
+            .types = "@16@0:8",
+            .imp = (sword3_objc_imp)nsobject_player,
+        },
+        {
+            .name = "setDelegate:",
+            .types = "v24@0:8@16",
+            .imp = (sword3_objc_imp)nsobject_ignore,
         },
     },
 };
@@ -221,13 +799,18 @@ void sword3_objc_unsupported_symbol(const char *symbol)
     abort();
 }
 
-static SWORD3_OBJC_NORETURN void unknown_selector(sword3_objc_sel selector)
+static sword3_objc_imp stub_unknown_selector(sword3_objc_sel selector)
 {
-    write_diagnostic(
-        "[sword3-objc-shim] unrecognized selector: ",
-        selector == NULL ? "(null)" : selector
-    );
-    abort();
+    static unsigned seen;
+
+    if (seen < 64) {
+        seen++;
+        write_diagnostic(
+            "[sword3-objc-shim] stubbing selector: ",
+            selector == NULL ? "(null)" : selector
+        );
+    }
+    return (sword3_objc_imp)nsobject_init;
 }
 
 static const struct sword3_objc_class_ro *
@@ -626,7 +1209,7 @@ SWORD3_OBJC_HIDDEN sword3_objc_imp sword3_objc_lookup_imp(
     if (find_method_in_class(&sword3_nsobject_metaclass, selector, &decoded) &&
         decoded.imp != NULL)
         return decoded.imp;
-    unknown_selector(selector);
+    return stub_unknown_selector(selector);
 }
 
 SWORD3_OBJC_EXPORT void *object_getIndexedIvars(sword3_objc_id object)
@@ -693,12 +1276,20 @@ SWORD3_OBJC_EXPORT sword3_objc_Class objc_getMetaClass(const char *name)
 
 SWORD3_OBJC_EXPORT sword3_objc_id objc_alloc(sword3_objc_Class cls)
 {
-    const struct sword3_objc_class_ro *ro = class_ro(cls);
+    const struct sword3_objc_class_ro *ro;
     size_t size;
     sword3_objc_id object;
 
-    if (!aligned_instance_size(ro, &size))
+    if (cls == NULL)
         return NULL;
+    ro = class_ro(cls);
+    /*
+     * Imported UIKit/AVFoundation classes are 64-byte zero blobs with no
+     * class_ro.  Give them a dummy instance so [[AVPlayer alloc] initWithURL:]
+     * is not a nil receiver; otherwise play never runs and the intro hangs.
+     */
+    if (!aligned_instance_size(ro, &size))
+        size = 64;
     if (size < 2 * sizeof(void *))
         size = 2 * sizeof(void *);
     object = calloc(1, size);

@@ -332,6 +332,42 @@
       "group": "audio"
     },
     {
+      "symbol": "SDL_PauseAudioDevice",
+      "nth_after": {
+        "after_symbol": "SDL_OpenAudioDevice",
+        "n": 1
+      },
+      "expected_address": "0x1000a0fe4",
+      "group": "audio"
+    },
+    {
+      "symbol": "SDL_LockAudioDevice",
+      "nth_after": {
+        "after_symbol": "SDL_OpenAudioDevice",
+        "n": 2
+      },
+      "expected_address": "0x1000a1068",
+      "group": "audio"
+    },
+    {
+      "symbol": "SDL_UnlockAudioDevice",
+      "nth_after": {
+        "after_symbol": "SDL_OpenAudioDevice",
+        "n": 3
+      },
+      "expected_address": "0x1000a109c",
+      "group": "audio"
+    },
+    {
+      "symbol": "SDL_CloseAudioDevice",
+      "nth_after": {
+        "after_symbol": "SDL_OpenAudioDevice",
+        "n": 4
+      },
+      "expected_address": "0x1000a10d0",
+      "group": "audio"
+    },
+    {
       "symbol": "IMG_Load",
       "via": {
         "parent_string": "SS2D_LoadIconFile",

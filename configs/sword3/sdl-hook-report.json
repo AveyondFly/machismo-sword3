@@ -1,7 +1,7 @@
 {
   "binary_sha256": "268d6f40eac47718ee2cac6acd34912421546eb8a58056d310c0b42d2655e36b",
   "coverage": "partial",
-  "hook_count": 48,
+  "hook_count": 52,
   "hooks": [
     {
       "address": "0x1000abef8",
@@ -1012,6 +1012,86 @@
       "library": "./libsword3_host.so",
       "method": "nth LC_FUNCTION_STARTS after resolved origin",
       "symbol": "SDL_WaitEventTimeout"
+    },
+    {
+      "address": "0x1000a0fe4",
+      "anchor": "nth_after SDL_OpenAudioDevice n=1",
+      "end_address": "0x1000a1068",
+      "evidence": [
+        {
+          "n": 1,
+          "origin": "SDL_OpenAudioDevice",
+          "origin_address": "0x1000a077c",
+          "type": "nth-function-after"
+        }
+      ],
+      "expected_hex": "f657bda9f44f01a9fd7b02a9fd830091",
+      "fingerprint": "6de880d22e0cd56aacf3013d94599b6e0ef1d1cb17be707403178f770806009c",
+      "group": "audio",
+      "host_symbol": "sword3_SDL_PauseAudioDevice",
+      "library": "./libsword3_host.so",
+      "method": "nth LC_FUNCTION_STARTS after resolved origin",
+      "symbol": "SDL_PauseAudioDevice"
+    },
+    {
+      "address": "0x1000a1068",
+      "anchor": "nth_after SDL_OpenAudioDevice n=2",
+      "end_address": "0x1000a109c",
+      "evidence": [
+        {
+          "n": 2,
+          "origin": "SDL_OpenAudioDevice",
+          "origin_address": "0x1000a077c",
+          "type": "nth-function-after"
+        }
+      ],
+      "expected_hex": "080400511f3d007108010054c91300f0",
+      "fingerprint": "ecdd67969e7ad3dc6bc712d486fbb2d1fe5da417354946bc7b2df1d28ea29f66",
+      "group": "audio",
+      "host_symbol": "sword3_SDL_LockAudioDevice",
+      "library": "./libsword3_host.so",
+      "method": "nth LC_FUNCTION_STARTS after resolved origin",
+      "symbol": "SDL_LockAudioDevice"
+    },
+    {
+      "address": "0x1000a109c",
+      "anchor": "nth_after SDL_OpenAudioDevice n=3",
+      "end_address": "0x1000a10d0",
+      "evidence": [
+        {
+          "n": 3,
+          "origin": "SDL_OpenAudioDevice",
+          "origin_address": "0x1000a077c",
+          "type": "nth-function-after"
+        }
+      ],
+      "expected_hex": "080400511f3d007108010054c91300f0",
+      "fingerprint": "629529d6811f2ca197e7775efcbdc9f50443356e7002b1bc3f8f440a9a02db3b",
+      "group": "audio",
+      "host_symbol": "sword3_SDL_UnlockAudioDevice",
+      "library": "./libsword3_host.so",
+      "method": "nth LC_FUNCTION_STARTS after resolved origin",
+      "symbol": "SDL_UnlockAudioDevice"
+    },
+    {
+      "address": "0x1000a10d0",
+      "anchor": "nth_after SDL_OpenAudioDevice n=4",
+      "end_address": "0x1000a110c",
+      "evidence": [
+        {
+          "n": 4,
+          "origin": "SDL_OpenAudioDevice",
+          "origin_address": "0x1000a077c",
+          "type": "nth-function-after"
+        }
+      ],
+      "expected_hex": "fd7bbfa9fd030091080400511f3d0071",
+      "fingerprint": "f1a11f39790343def6c0c2ec41bc503834946e46cb9db777d7cf3d91850a8a58",
+      "group": "audio",
+      "host_symbol": "sword3_SDL_CloseAudioDevice",
+      "library": "./libsword3_host.so",
+      "method": "nth LC_FUNCTION_STARTS after resolved origin",
+      "symbol": "SDL_CloseAudioDevice"
     }
   ],
   "method": "unique exact cstring xref, ordered parent BL index, and nth LC_FUNCTION_STARTS after a resolved origin",

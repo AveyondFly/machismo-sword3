@@ -275,6 +275,12 @@ int main(int argc, char **argv)
            (unsigned char *)allocated + 2 * sizeof(void *));
     free(allocated);
 
+    struct sword3_objc_class imported = {0};
+    allocated = objc_alloc(&imported);
+    assert(allocated != NULL);
+    assert(object_getClass(allocated) == &imported);
+    free(allocated);
+
     objc_setProperty_atomic(
         &object, normal_selector, &base, offsetof(struct test_object, indexed)
     );
@@ -297,10 +303,61 @@ int main(int argc, char **argv)
     objc_autoreleasePoolPop(pool);
     objc_autoreleasePoolPop(NULL);
 
-    if (argc > 1 && strcmp(argv[1], "unknown") == 0)
-        (void)sword3_objc_lookup_imp(
+    assert(sword3_objc_lookup_imp(
+        &object, sel_registerName("pause"), NULL
+    ) != NULL);
+    if (argc > 1 && strcmp(argv[1], "unknown") == 0) {
+        sword3_objc_imp unknown = sword3_objc_lookup_imp(
             &object, sel_registerName("missingSelector:"), NULL
         );
+        assert(unknown != NULL);
+    }
+    if (argc > 1 && strcmp(argv[1], "seturl") == 0) {
+        unsigned char player[64];
+        unsigned char url[64];
+        struct constant_path {
+            void *isa;
+            uint32_t flags;
+            uint32_t reserved;
+            const char *bytes;
+            uintptr_t length;
+        } path = {
+            &sword3_nsobject_class, 0, 0, "/tmp/Empty.mp3", 14
+        };
+        sword3_objc_imp init_url;
+        sword3_objc_imp set_url;
+        sword3_objc_id result;
+
+        memset(player, 0, sizeof(player));
+        memset(url, 0, sizeof(url));
+        *(sword3_objc_Class *)player = &sword3_nsobject_class;
+        *(sword3_objc_Class *)url = &sword3_nsobject_class;
+        init_url = sword3_objc_lookup_imp(
+            (sword3_objc_id)url,
+            sel_registerName("initFileURLWithPath:"),
+            NULL
+        );
+        assert(init_url != NULL);
+        ((sword3_objc_id (*)(sword3_objc_id, sword3_objc_sel, sword3_objc_id))
+             init_url)(
+            (sword3_objc_id)url,
+            sel_registerName("initFileURLWithPath:"),
+            (sword3_objc_id)&path
+        );
+        set_url = sword3_objc_lookup_imp(
+            (sword3_objc_id)player, sel_registerName("Set:"), NULL
+        );
+        assert(set_url != NULL);
+        result = ((sword3_objc_id (*)(
+                      sword3_objc_id, sword3_objc_sel, sword3_objc_id
+                  ))set_url)(
+            (sword3_objc_id)player,
+            sel_registerName("Set:"),
+            (sword3_objc_id)url
+        );
+        assert(result == (sword3_objc_id)(uintptr_t)1);
+        assert(strcmp(((char **)player)[1], "/tmp/Empty.mp3") == 0);
+    }
     return 0;
 }
 """
@@ -348,6 +405,7 @@ class ObjCShimTest(unittest.TestCase):
                 "-shared",
                 str(cls.generated),
                 str(SHIM_C),
+                "-ldl",
                 "-o",
                 str(cls.library_path),
             ],
@@ -359,6 +417,7 @@ class ObjCShimTest(unittest.TestCase):
                 *common_flags,
                 str(cls.fixture_source),
                 str(SHIM_C),
+                "-ldl",
                 "-o",
                 str(cls.fixture_binary),
             ],
@@ -417,14 +476,23 @@ class ObjCShimTest(unittest.TestCase):
     def test_read_only_metadata_and_nil_operations(self) -> None:
         subprocess.run([str(self.fixture_binary)], check=True)
 
-    def test_unknown_selector_prints_name_and_aborts(self) -> None:
+    def test_unknown_selector_prints_name_and_stubs(self) -> None:
         completed = subprocess.run(
             [str(self.fixture_binary), "unknown"],
             capture_output=True,
             text=True,
         )
-        self.assertEqual(completed.returncode, -signal.SIGABRT)
-        self.assertIn("unrecognized selector: missingSelector:", completed.stderr)
+        self.assertEqual(completed.returncode, 0)
+        self.assertIn("stubbing selector: missingSelector:", completed.stderr)
+
+    def test_set_url_returns_objc_bool_true(self) -> None:
+        completed = subprocess.run(
+            [str(self.fixture_binary), "seturl"],
+            capture_output=True,
+            text=True,
+        )
+        self.assertEqual(completed.returncode, 0, completed.stderr)
+        self.assertIn("AVAudioPlayer Set: /tmp/Empty.mp3", completed.stderr)
 
     def test_generated_unsupported_wrapper_is_fail_fast(self) -> None:
         script = (

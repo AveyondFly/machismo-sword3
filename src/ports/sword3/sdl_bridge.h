@@ -1,6 +1,7 @@
 #ifndef SWORD3_SDL_BRIDGE_H
 #define SWORD3_SDL_BRIDGE_H
 
+#include <stddef.h>
 #include <SDL2/SDL.h>
 
 #ifdef __cplusplus
@@ -98,6 +99,16 @@ SDL_AudioDeviceID sword3_SDL_OpenAudioDevice(const char *device, int iscapture,
 					     const SDL_AudioSpec *desired,
 					     SDL_AudioSpec *obtained,
 					     int allowed_changes);
+void sword3_SDL_PauseAudioDevice(SDL_AudioDeviceID dev, int pause_on);
+void sword3_SDL_LockAudioDevice(SDL_AudioDeviceID dev);
+void sword3_SDL_UnlockAudioDevice(SDL_AudioDeviceID dev);
+void sword3_SDL_CloseAudioDevice(SDL_AudioDeviceID dev);
+int sword3_host_play_music_file(const char *path, int loops);
+int sword3_host_play_music_data(const void *data, size_t size, int loops);
+void sword3_host_stop_music(void);
+int sword3_host_play_video_file(const char *path, void (*done)(void));
+void sword3_host_stop_video(void);
+int sword3_host_video_playing(void);
 
 /* Generic 0-return stub kept for future address hooks. */
 int sword3_ret0(void);

@@ -46,7 +46,11 @@ class GeneratedSdlHooksTest(unittest.TestCase):
         self.assertIn("IMG_Load", symbols)
         self.assertIn("IMG_Load_RW", symbols)
         self.assertIn("IMG_LoadTyped_RW", symbols)
-        self.assertIn("SDL_GetWindowSize", symbols)
+        self.assertIn("SDL_OpenAudioDevice", symbols)
+        self.assertIn("SDL_PauseAudioDevice", symbols)
+        self.assertIn("SDL_LockAudioDevice", symbols)
+        self.assertIn("SDL_UnlockAudioDevice", symbols)
+        self.assertIn("SDL_CloseAudioDevice", symbols)
         self.assertNotIn("UIGamePad_Update", symbols)
         self.assertEqual(report["schema_version"], 2)
 
