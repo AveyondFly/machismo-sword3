@@ -51,6 +51,26 @@ int trampoline_patch_overrides(void* mh, uintptr_t slide, void* override_handle,
                                int match_local);
 
 /*
+ * Patch stripped Mach-O functions listed by unslid vmaddr in config_path.
+ *
+ * Each hook is fully validated before any entry point is modified: the address
+ * must be a function start in an executable __TEXT section, its expected bytes
+ * must match, and the host library/symbol must resolve.
+ *
+ * Returns the number of functions patched, or -1 if parsing or validation
+ * fails. On validation failure no hook from the file is applied.
+ */
+int trampoline_patch_addresses(void* mh, uintptr_t slide,
+                               const char* config_path);
+
+/*
+ * Validate a version-locked function address without modifying it.
+ * expected_hex is a contiguous even-length hex string of at least four bytes.
+ */
+int trampoline_validate_function(void* mh, uintptr_t slide, uintptr_t vmaddr,
+                                 const char* expected_hex);
+
+/*
  * Legacy API — reads MACHISMO_TRAMPOLINE_LIB and MACHISMO_TRAMPOLINE_PREFIX env vars.
  * Kept for backward compatibility with tests.
  */

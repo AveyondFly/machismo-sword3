@@ -1,0 +1,1019 @@
+{
+  "binary_sha256": "268d6f40eac47718ee2cac6acd34912421546eb8a58056d310c0b42d2655e36b",
+  "coverage": "partial",
+  "hook_count": 48,
+  "hooks": [
+    {
+      "address": "0x1000abef8",
+      "anchor": "Application didn't initialize properly, did you include SDL_main.h in the file containing your main() function?",
+      "end_address": "0x1000ac08c",
+      "evidence": [
+        {
+          "instruction": "0x1000ac04c",
+          "string": "Application didn't initialize properly, did you include SDL_main.h in the file containing your main() function?",
+          "string_address": "0x10027a80f",
+          "type": "anchor-string-xref"
+        }
+      ],
+      "expected_hex": "f44fbea9fd7b01a9fd430091881300d0",
+      "fingerprint": "7d331a4d71e5c9e738cca43c03822e22128794c823e630e7a754f3053289ef37",
+      "group": "init",
+      "host_symbol": "sword3_SDL_InitSubSystem",
+      "library": "./libsword3_host.so",
+      "method": "unique exact cstring xref + LC_FUNCTION_STARTS",
+      "symbol": "SDL_InitSubSystem"
+    },
+    {
+      "address": "0x1000e132c",
+      "anchor": "The video driver did not add any displays",
+      "end_address": "0x1000e15d8",
+      "evidence": [
+        {
+          "instruction": "0x1000e159c",
+          "string": "The video driver did not add any displays",
+          "string_address": "0x10027bb7b",
+          "type": "anchor-string-xref"
+        }
+      ],
+      "expected_hex": "ff4301d1f85f01a9f65702a9f44f03a9",
+      "fingerprint": "a9a202b17445b40049dd87a105a66e7082c11d7ef438126f7b12d3ed07b2c616",
+      "group": "init",
+      "host_symbol": "sword3_SDL_VideoInit",
+      "library": "./libsword3_host.so",
+      "method": "unique exact cstring xref + LC_FUNCTION_STARTS",
+      "symbol": "SDL_VideoInit"
+    },
+    {
+      "address": "0x1000a03cc",
+      "anchor": "No available audio device",
+      "end_address": "0x1000a06d8",
+      "evidence": [
+        {
+          "instruction": "0x1000a069c",
+          "string": "No available audio device",
+          "string_address": "0x10027859f",
+          "type": "anchor-string-xref"
+        }
+      ],
+      "expected_hex": "ff8301d1fa6701a9f85f02a9f65703a9",
+      "fingerprint": "855216a0cbc2e2342c9876295788b0e00a7f90c684b2df8fdb1faef232b159a5",
+      "group": "init",
+      "host_symbol": "sword3_SDL_AudioInit",
+      "library": "./libsword3_host.so",
+      "method": "unique exact cstring xref + LC_FUNCTION_STARTS",
+      "symbol": "SDL_AudioInit"
+    },
+    {
+      "address": "0x1000aad68",
+      "anchor": "SDL_RWFromFile(): No file or no mode specified",
+      "end_address": "0x1000aae30",
+      "evidence": [
+        {
+          "instruction": "0x1000aae04",
+          "string": "SDL_RWFromFile(): No file or no mode specified",
+          "string_address": "0x10027a2f7",
+          "type": "anchor-string-xref"
+        }
+      ],
+      "expected_hex": "ffc300d1f44f01a9fd7b02a9fd830091",
+      "fingerprint": "9aa7ad3b1bbb899270c692d6443a54cc6cec22602760e2a1cb0e0a425f6d72e4",
+      "group": "rwops",
+      "host_symbol": "sword3_SDL_RWFromFile",
+      "library": "./libsword3_host.so",
+      "method": "unique exact cstring xref + LC_FUNCTION_STARTS",
+      "symbol": "SDL_RWFromFile"
+    },
+    {
+      "address": "0x1000e2960",
+      "anchor": "SDL_VIDEO_HIGHDPI_DISABLED",
+      "end_address": "0x1000e2d44",
+      "evidence": [
+        {
+          "instruction": "0x1000e2a38",
+          "string": "SDL_VIDEO_HIGHDPI_DISABLED",
+          "string_address": "0x10027bda0",
+          "type": "anchor-string-xref"
+        },
+        {
+          "instruction": "0x1000e2a5c",
+          "string": "SDL_VIDEO_HIGHDPI_DISABLED",
+          "string_address": "0x10027bda0",
+          "type": "anchor-string-xref"
+        },
+        {
+          "instruction": "0x1000e2abc",
+          "string": "SDL_VIDEO_HIGHDPI_DISABLED",
+          "string_address": "0x10027bda0",
+          "type": "anchor-string-xref"
+        }
+      ],
+      "expected_hex": "ff0302d1fc6f02a9fa6703a9f85f04a9",
+      "fingerprint": "a713a6fd13d0bcc49734ab26ff2b392fa6bf37e9bfc8891dd9bec59dcb7b5e75",
+      "group": "window",
+      "host_symbol": "sword3_SDL_CreateWindow",
+      "library": "./libsword3_host.so",
+      "method": "unique exact cstring xref + LC_FUNCTION_STARTS",
+      "symbol": "SDL_CreateWindow"
+    },
+    {
+      "address": "0x1000e27ac",
+      "anchor": "SDL video driver doesn't support changing display mode",
+      "end_address": "0x1000e28d0",
+      "evidence": [
+        {
+          "instruction": "0x1000e28b0",
+          "string": "SDL video driver doesn't support changing display mode",
+          "string_address": "0x10027c1b6",
+          "type": "anchor-string-xref"
+        }
+      ],
+      "expected_hex": "ffc301d1f44f05a9fd7b06a9fd830191",
+      "fingerprint": "41cbbe5aef94d6e8ce71d2cec1e719cad2f7e2c67198139f111ed4d3710d32ac",
+      "group": "window",
+      "host_symbol": "sword3_SDL_SetWindowDisplayMode",
+      "library": "./libsword3_host.so",
+      "method": "unique exact cstring xref + LC_FUNCTION_STARTS",
+      "symbol": "SDL_SetWindowDisplayMode"
+    },
+    {
+      "address": "0x1000f52cc",
+      "anchor": "SDL_RENDER_VSYNC",
+      "end_address": "0x1000f5598",
+      "evidence": [
+        {
+          "instruction": "0x1000f5340",
+          "string": "SDL_RENDER_VSYNC",
+          "string_address": "0x10027cc11",
+          "type": "anchor-string-xref"
+        },
+        {
+          "instruction": "0x1000f5350",
+          "string": "SDL_RENDER_VSYNC",
+          "string_address": "0x10027cc11",
+          "type": "anchor-string-xref"
+        }
+      ],
+      "expected_hex": "ff8301d1f85f02a9f65703a9f44f04a9",
+      "fingerprint": "239126b175b8cf89b5af816b722f836ae1f89430dc51a71661a74d4add215097",
+      "group": "renderer",
+      "host_symbol": "sword3_SDL_CreateRenderer",
+      "library": "./libsword3_host.so",
+      "method": "unique exact cstring xref + LC_FUNCTION_STARTS",
+      "symbol": "SDL_CreateRenderer"
+    },
+    {
+      "address": "0x1000f82ec",
+      "anchor": "Texture was not created with this renderer",
+      "end_address": "0x1000f84f0",
+      "evidence": [
+        {
+          "instruction": "0x1000f8378",
+          "string": "Texture was not created with this renderer",
+          "string_address": "0x10027cdf0",
+          "type": "anchor-string-xref"
+        }
+      ],
+      "expected_hex": "ff8301d1f65703a9f44f04a9fd7b05a9",
+      "fingerprint": "996cceb186eb332edcf634caa36f40f30a731040a477206a08e4ab96d9f7c371",
+      "group": "renderer",
+      "host_symbol": "sword3_SDL_RenderCopyF",
+      "library": "./libsword3_host.so",
+      "method": "unique exact cstring xref + LC_FUNCTION_STARTS",
+      "symbol": "SDL_RenderCopyF"
+    },
+    {
+      "address": "0x1000f8544",
+      "anchor": "Renderer does not support RenderCopyEx",
+      "end_address": "0x1000f8784",
+      "evidence": [
+        {
+          "instruction": "0x1000f862c",
+          "string": "Texture was not created with this renderer",
+          "string_address": "0x10027cdf0",
+          "type": "anchor-string-xref"
+        },
+        {
+          "instruction": "0x1000f8654",
+          "string": "Renderer does not support RenderCopyEx",
+          "string_address": "0x10027cecd",
+          "type": "anchor-string-xref"
+        }
+      ],
+      "expected_hex": "ff0302d1e923036df85f04a9f65705a9",
+      "fingerprint": "ad249f378b1cc8d20ec5fd7df92e2bdfde752f1769acce91b4857cffa0100963",
+      "group": "renderer",
+      "host_symbol": "sword3_SDL_RenderCopyExF",
+      "library": "./libsword3_host.so",
+      "method": "unique exact cstring xref + LC_FUNCTION_STARTS",
+      "symbol": "SDL_RenderCopyExF"
+    },
+    {
+      "address": "0x1000f76f4",
+      "anchor": "SDL_RenderDrawFPoints(): Passed NULL points",
+      "end_address": "0x1000f78d4",
+      "evidence": [
+        {
+          "instruction": "0x1000f77bc",
+          "string": "SDL_RenderDrawFPoints(): Passed NULL points",
+          "string_address": "0x10027ce4d",
+          "type": "anchor-string-xref"
+        }
+      ],
+      "expected_hex": "f85fbca9f65701a9f44f02a9fd7b03a9",
+      "fingerprint": "4da7fa95a414a4313ffd7f6c1a3b7e6ea69ba767b99a0e1b439cd68281699c6d",
+      "group": "renderer",
+      "host_symbol": "sword3_SDL_RenderDrawPointsF",
+      "library": "./libsword3_host.so",
+      "method": "unique exact cstring xref + LC_FUNCTION_STARTS",
+      "symbol": "SDL_RenderDrawPointsF"
+    },
+    {
+      "address": "0x1000f80c8",
+      "anchor": "SDL_RenderFillFRects(): Passed NULL rects",
+      "end_address": "0x1000f8254",
+      "evidence": [
+        {
+          "instruction": "0x1000f8190",
+          "string": "SDL_RenderFillFRects(): Passed NULL rects",
+          "string_address": "0x10027cea3",
+          "type": "anchor-string-xref"
+        }
+      ],
+      "expected_hex": "f85fbca9f65701a9f44f02a9fd7b03a9",
+      "fingerprint": "f0844730aa804fe0f3faadd306fc1290a992734b05a9810151fe2d7d8a991b4a",
+      "group": "renderer",
+      "host_symbol": "sword3_SDL_RenderFillRectsF",
+      "library": "./libsword3_host.so",
+      "method": "unique exact cstring xref + LC_FUNCTION_STARTS",
+      "symbol": "SDL_RenderFillRectsF"
+    },
+    {
+      "address": "0x1000f6e0c",
+      "anchor": "Texture not created with SDL_TEXTUREACCESS_TARGET",
+      "end_address": "0x1000f7018",
+      "evidence": [
+        {
+          "instruction": "0x1000f6e98",
+          "string": "Texture was not created with this renderer",
+          "string_address": "0x10027cdf0",
+          "type": "anchor-string-xref"
+        },
+        {
+          "instruction": "0x1000f6ff0",
+          "string": "Texture not created with SDL_TEXTUREACCESS_TARGET",
+          "string_address": "0x10027ce1b",
+          "type": "anchor-string-xref"
+        }
+      ],
+      "expected_hex": "f657bda9f44f01a9fd7b02a9fd830091",
+      "fingerprint": "c44ed018795c5d8ffd653e75eba93154b75f4751039d20e0d1e2fecb6847620e",
+      "group": "renderer",
+      "host_symbol": "sword3_SDL_SetRenderTarget",
+      "library": "./libsword3_host.so",
+      "method": "unique exact cstring xref + LC_FUNCTION_STARTS",
+      "symbol": "SDL_SetRenderTarget"
+    },
+    {
+      "address": "0x1000f5ba8",
+      "anchor": "Renderer doesn't support querying output size",
+      "end_address": "0x1000f5c5c",
+      "evidence": [
+        {
+          "instruction": "0x1000f5c50",
+          "string": "Renderer doesn't support querying output size",
+          "string_address": "0x10027ccc2",
+          "type": "anchor-string-xref"
+        }
+      ],
+      "expected_hex": "fd7bbfa9fd030091c00000b4080040f9",
+      "fingerprint": "e3d334cf80a312c4289554d1d89ed49e73163af2c227fa341579d192b8f34f43",
+      "group": "renderer",
+      "host_symbol": "sword3_SDL_GetRendererOutputSize",
+      "library": "./libsword3_host.so",
+      "method": "unique exact cstring xref + LC_FUNCTION_STARTS",
+      "symbol": "SDL_GetRendererOutputSize"
+    },
+    {
+      "address": "0x1000f5cd0",
+      "anchor": "Texture dimensions can't be 0",
+      "end_address": "0x1000f6118",
+      "evidence": [
+        {
+          "instruction": "0x1000f5dec",
+          "string": "Texture dimensions can't be 0",
+          "string_address": "0x10027cd2d",
+          "type": "anchor-string-xref"
+        },
+        {
+          "instruction": "0x1000f5e00",
+          "string": "Texture dimensions can't be 0",
+          "string_address": "0x10027cd2d",
+          "type": "anchor-string-xref"
+        }
+      ],
+      "expected_hex": "ffc301d1fc6f01a9fa6702a9f85f03a9",
+      "fingerprint": "3384e4e00937c6a48adcba54b548279232c671681421ecd3b1843b7ef02e0b4b",
+      "group": "texture",
+      "host_symbol": "sword3_SDL_CreateTexture",
+      "library": "./libsword3_host.so",
+      "method": "unique exact cstring xref + LC_FUNCTION_STARTS",
+      "symbol": "SDL_CreateTexture"
+    },
+    {
+      "address": "0x1000f61f8",
+      "anchor": "SDL_CreateTextureFromSurface() passed NULL surface",
+      "end_address": "0x1000f65d4",
+      "evidence": [
+        {
+          "instruction": "0x1000f6270",
+          "string": "SDL_CreateTextureFromSurface() passed NULL surface",
+          "string_address": "0x10027cd73",
+          "type": "anchor-string-xref"
+        }
+      ],
+      "expected_hex": "ff0301d1f65701a9f44f02a9fd7b03a9",
+      "fingerprint": "26c9d5c4e0bfde7400fd255fd484c1624cb2913551bed13152abc66174f01dc6",
+      "group": "texture",
+      "host_symbol": "sword3_SDL_CreateTextureFromSurface",
+      "library": "./libsword3_host.so",
+      "method": "unique exact cstring xref + LC_FUNCTION_STARTS",
+      "symbol": "SDL_CreateTextureFromSurface"
+    },
+    {
+      "address": "0x1000f6aac",
+      "anchor": "SDL_LockTexture(): texture must be streaming",
+      "end_address": "0x1000f6c58",
+      "evidence": [
+        {
+          "instruction": "0x1000f6b78",
+          "string": "SDL_LockTexture(): texture must be streaming",
+          "string_address": "0x10027cdc3",
+          "type": "anchor-string-xref"
+        }
+      ],
+      "expected_hex": "ff4301d1f85f01a9f65702a9f44f03a9",
+      "fingerprint": "b71686d56b2e7e8f008880fb8de6591ab0fd0608e13380fea2b9cdb8d934ba08",
+      "group": "texture",
+      "host_symbol": "sword3_SDL_LockTexture",
+      "library": "./libsword3_host.so",
+      "method": "unique exact cstring xref + LC_FUNCTION_STARTS",
+      "symbol": "SDL_LockTexture"
+    },
+    {
+      "address": "0x1000dfd20",
+      "anchor": "SDL_SetSurfacePalette() passed a NULL surface",
+      "end_address": "0x1000dfd6c",
+      "evidence": [
+        {
+          "instruction": "0x1000dfd54",
+          "string": "SDL_SetSurfacePalette() passed a NULL surface",
+          "string_address": "0x10027ba22",
+          "type": "anchor-string-xref"
+        }
+      ],
+      "expected_hex": "800100b4f44fbea9fd7b01a9fd430091",
+      "fingerprint": "81bdb794d0cb7cf9cbcad9c0b3f9f19e8168532515830052d245ecee1a5ad5a0",
+      "group": "surface",
+      "host_symbol": "sword3_SDL_SetSurfacePalette",
+      "library": "./libsword3_host.so",
+      "method": "unique exact cstring xref + LC_FUNCTION_STARTS",
+      "symbol": "SDL_SetSurfacePalette"
+    },
+    {
+      "address": "0x1000e0330",
+      "anchor": "SDL_UpperBlit: passed a NULL surface",
+      "end_address": "0x1000e050c",
+      "evidence": [
+        {
+          "instruction": "0x1000e037c",
+          "string": "SDL_UpperBlit: passed a NULL surface",
+          "string_address": "0x10027ba7c",
+          "type": "anchor-string-xref"
+        }
+      ],
+      "expected_hex": "ffc301d1fa6702a9f85f03a9f65704a9",
+      "fingerprint": "a8ac72b1e69e0e7a2f3dd4ea8976df9b269908b51288dd318ddce8be66e25110",
+      "group": "surface",
+      "host_symbol": "sword3_SDL_UpperBlit",
+      "library": "./libsword3_host.so",
+      "method": "unique exact cstring xref + LC_FUNCTION_STARTS",
+      "symbol": "SDL_UpperBlit"
+    },
+    {
+      "address": "0x1000e050c",
+      "anchor": "SDL_UpperBlitScaled: passed a NULL surface",
+      "end_address": "0x1000e08f8",
+      "evidence": [
+        {
+          "instruction": "0x1000e0564",
+          "string": "SDL_UpperBlitScaled: passed a NULL surface",
+          "string_address": "0x10027bac9",
+          "type": "anchor-string-xref"
+        }
+      ],
+      "expected_hex": "ffc302d1ef3b036ded33046deb2b056d",
+      "fingerprint": "01cceac568bde077e2a365e824eecb7f35c8daf0c12be221dd8b146554973857",
+      "group": "surface",
+      "host_symbol": "sword3_SDL_UpperBlitScaled",
+      "library": "./libsword3_host.so",
+      "method": "unique exact cstring xref + LC_FUNCTION_STARTS",
+      "symbol": "SDL_UpperBlitScaled"
+    },
+    {
+      "address": "0x1000a783c",
+      "anchor": "Couldn't lock event queue",
+      "end_address": "0x1000a8600",
+      "evidence": [
+        {
+          "instruction": "0x1000a78c0",
+          "string": "Couldn't lock event queue",
+          "string_address": "0x10027972e",
+          "type": "anchor-string-xref"
+        }
+      ],
+      "expected_hex": "ff4306d1fc6f13a9fa6714a9f85f15a9",
+      "fingerprint": "e48aff99ae75e930632208fb57293b2f106a353a39cc24bd5cf8a7d6e8588ac9",
+      "group": "event",
+      "host_symbol": "sword3_SDL_PeepEvents",
+      "library": "./libsword3_host.so",
+      "method": "unique exact cstring xref + LC_FUNCTION_STARTS",
+      "symbol": "SDL_PeepEvents"
+    },
+    {
+      "address": "0x1000a077c",
+      "anchor": "Couldn't create mixer lock",
+      "end_address": "0x1000a0fdc",
+      "evidence": [
+        {
+          "instruction": "0x1000a0d58",
+          "string": "Couldn't create mixer lock",
+          "string_address": "0x1002786a9",
+          "type": "anchor-string-xref"
+        }
+      ],
+      "expected_hex": "ff8303d1fc6f08a9fa6709a9f85f0aa9",
+      "fingerprint": "2b92defbe07d23ad10c9adea760691b432806c505b77d1682be12da77d7f0487",
+      "group": "audio",
+      "host_symbol": "sword3_SDL_OpenAudioDevice",
+      "library": "./libsword3_host.so",
+      "method": "unique exact cstring xref + LC_FUNCTION_STARTS",
+      "symbol": "SDL_OpenAudioDevice"
+    },
+    {
+      "address": "0x100119644",
+      "anchor": "Passed a NULL data source",
+      "end_address": "0x1001197b8",
+      "evidence": [
+        {
+          "instruction": "0x10011972c",
+          "string": "Passed a NULL data source",
+          "string_address": "0x10027ea44",
+          "type": "anchor-string-xref"
+        }
+      ],
+      "expected_hex": "fc6fbaa9fa6701a9f85f02a9f65703a9",
+      "fingerprint": "a4023cb4211ea01ba4c770af0beef073a9d2d0d97111c16e691e05525be77f60",
+      "group": "image",
+      "host_symbol": "sword3_IMG_LoadTyped_RW",
+      "library": "./libsword3_host.so",
+      "method": "unique exact cstring xref + LC_FUNCTION_STARTS",
+      "symbol": "IMG_LoadTyped_RW"
+    },
+    {
+      "address": "0x1000abe8c",
+      "anchor": "via Couldn't create renderer: %s bl[6]",
+      "end_address": "0x1000abe98",
+      "evidence": [
+        {
+          "bl_index": 6,
+          "call_site": "0x100200564",
+          "parent_address": "0x1002004b8",
+          "parent_string": "Couldn't create renderer: %s\n",
+          "type": "parent-bl-index"
+        }
+      ],
+      "expected_hex": "801300d000d415914dffff17",
+      "fingerprint": "4a66ac28cd8b49c5c20e6c4bdee464e24fd84da26213bf5ca65b51bf550ac0ac",
+      "group": "error",
+      "host_symbol": "sword3_SDL_GetError",
+      "library": "./libsword3_host.so",
+      "method": "unique parent string + ordered direct BL index",
+      "symbol": "SDL_GetError"
+    },
+    {
+      "address": "0x10009f518",
+      "anchor": "via Couldn't create renderer: %s bl[5]",
+      "end_address": "0x10009f5dc",
+      "evidence": [
+        {
+          "bl_index": 5,
+          "call_site": "0x10020054c",
+          "parent_address": "0x1002004b8",
+          "parent_string": "Couldn't create renderer: %s\n",
+          "type": "parent-bl-index"
+        }
+      ],
+      "expected_hex": "ff8300d1fd7b01a9fd430091e8130090",
+      "fingerprint": "945e2896a2318ac731b7d0ed517a7ac95eb2a320d9b7ed74e4ff7665b9e2b86a",
+      "group": "timer",
+      "host_symbol": "sword3_SDL_GetTicks",
+      "library": "./libsword3_host.so",
+      "method": "unique parent string + ordered direct BL index",
+      "symbol": "SDL_GetTicks"
+    },
+    {
+      "address": "0x1000e2ec8",
+      "anchor": "via SDL_VIDEO_HIGHDPI_DISABLED bl[14]",
+      "end_address": "0x1000e3084",
+      "evidence": [
+        {
+          "bl_index": 14,
+          "call_site": "0x1000e2d3c",
+          "parent_address": "0x1000e2960",
+          "parent_string": "SDL_VIDEO_HIGHDPI_DISABLED",
+          "type": "parent-bl-index"
+        }
+      ],
+      "expected_hex": "f657bda9f44f01a9fd7b02a9fd830091",
+      "fingerprint": "b0c7854982faa3a8f76ed19271e0839a848a9b4a879319e208ac13877c253088",
+      "group": "window",
+      "host_symbol": "sword3_SDL_DestroyWindow",
+      "library": "./libsword3_host.so",
+      "method": "unique parent string + ordered direct BL index",
+      "symbol": "SDL_DestroyWindow"
+    },
+    {
+      "address": "0x1000e3b4c",
+      "anchor": "via Couldn't create window: %s bl[4]",
+      "end_address": "0x1000e3ccc",
+      "evidence": [
+        {
+          "bl_index": 4,
+          "call_site": "0x1001fff80",
+          "parent_address": "0x1001ffea4",
+          "parent_string": "Couldn't create window: %s\n",
+          "type": "parent-bl-index"
+        }
+      ],
+      "expected_hex": "ff0301d1f65701a9f44f02a9fd7b03a9",
+      "fingerprint": "81ce650ba4e0172f4e1f6c0252241b9c9ce40d317a5ce9ddba3890283edb5499",
+      "group": "window",
+      "host_symbol": "sword3_SDL_SetWindowSize",
+      "library": "./libsword3_host.so",
+      "method": "unique parent string + ordered direct BL index",
+      "symbol": "SDL_SetWindowSize"
+    },
+    {
+      "address": "0x1000e3d30",
+      "anchor": "via Couldn't create window: %s bl[18]",
+      "end_address": "0x1000e3dc0",
+      "evidence": [
+        {
+          "bl_index": 18,
+          "call_site": "0x1002001ac",
+          "parent_address": "0x1001ffea4",
+          "parent_string": "Couldn't create window: %s\n",
+          "type": "parent-bl-index"
+        }
+      ],
+      "expected_hex": "f44fbea9fd7b01a9fd430091f30300aa",
+      "fingerprint": "1771ba26a4357658f955c3041e7d8e11ec9be01f4d7cd7e724722091b5ae82a4",
+      "group": "window",
+      "host_symbol": "sword3_SDL_ShowWindow",
+      "library": "./libsword3_host.so",
+      "method": "unique parent string + ordered direct BL index",
+      "symbol": "SDL_ShowWindow"
+    },
+    {
+      "address": "0x1000f717c",
+      "anchor": "via Couldn't create renderer: %s bl[1]",
+      "end_address": "0x1000f7224",
+      "evidence": [
+        {
+          "bl_index": 1,
+          "call_site": "0x100200508",
+          "parent_address": "0x1002004b8",
+          "parent_string": "Couldn't create renderer: %s\n",
+          "type": "parent-bl-index"
+        }
+      ],
+      "expected_hex": "f44fbea9fd7b01a9fd430091e00000b4",
+      "fingerprint": "bdf53f930d5c272b988af25a809b196ba56fc71f96b67e59ba2426967f0d3853",
+      "group": "renderer",
+      "host_symbol": "sword3_SDL_RenderSetLogicalSize",
+      "library": "./libsword3_host.so",
+      "method": "unique parent string + ordered direct BL index",
+      "symbol": "SDL_RenderSetLogicalSize"
+    },
+    {
+      "address": "0x1000f7224",
+      "anchor": "via Couldn't create renderer: %s bl[2]",
+      "end_address": "0x1000f7270",
+      "evidence": [
+        {
+          "bl_index": 2,
+          "call_site": "0x100200520",
+          "parent_address": "0x1002004b8",
+          "parent_string": "Couldn't create renderer: %s\n",
+          "type": "parent-bl-index"
+        }
+      ],
+      "expected_hex": "fd7bbfa9fd030091e00000b4e80300aa",
+      "fingerprint": "c92fd319f819acbba1da4b3375a2ecb6b54053566cb772d973c8030383d15d49",
+      "group": "renderer",
+      "host_symbol": "sword3_SDL_RenderSetScale",
+      "library": "./libsword3_host.so",
+      "method": "unique parent string + ordered direct BL index",
+      "symbol": "SDL_RenderSetScale"
+    },
+    {
+      "address": "0x1000f759c",
+      "anchor": "via Couldn't create renderer: %s bl[3]",
+      "end_address": "0x1000f7628",
+      "evidence": [
+        {
+          "bl_index": 3,
+          "call_site": "0x100200530",
+          "parent_address": "0x1002004b8",
+          "parent_string": "Couldn't create renderer: %s\n",
+          "type": "parent-bl-index"
+        }
+      ],
+      "expected_hex": "f44fbea9fd7b01a9fd430091e00000b4",
+      "fingerprint": "b66ad4af1facca54c95c1ed3152d7c46e75c21a709026181255ec06e80eb3f1d",
+      "group": "renderer",
+      "host_symbol": "sword3_SDL_SetRenderDrawBlendMode",
+      "library": "./libsword3_host.so",
+      "method": "unique parent string + ordered direct BL index",
+      "symbol": "SDL_SetRenderDrawBlendMode"
+    },
+    {
+      "address": "0x1000f7548",
+      "anchor": "via Couldn't create renderer: %s bl[4]",
+      "end_address": "0x1000f759c",
+      "evidence": [
+        {
+          "bl_index": 4,
+          "call_site": "0x100200548",
+          "parent_address": "0x1002004b8",
+          "parent_string": "Couldn't create renderer: %s\n",
+          "type": "parent-bl-index"
+        }
+      ],
+      "expected_hex": "fd7bbfa9fd030091e00000b4e80300aa",
+      "fingerprint": "e1200c67cce71d563798be33349a4db92b426c9ebe845dc86f46c33bc52beb79",
+      "group": "renderer",
+      "host_symbol": "sword3_SDL_SetRenderDrawColor",
+      "library": "./libsword3_host.so",
+      "method": "unique parent string + ordered direct BL index",
+      "symbol": "SDL_SetRenderDrawColor"
+    },
+    {
+      "address": "0x1000f6a08",
+      "anchor": "via Couldn't create Texture: %s bl[4]",
+      "end_address": "0x1000f6aac",
+      "evidence": [
+        {
+          "bl_index": 4,
+          "call_site": "0x100200248",
+          "parent_address": "0x1002001d0",
+          "parent_string": "Couldn't create Texture: %s\n",
+          "type": "parent-bl-index"
+        }
+      ],
+      "expected_hex": "f657bda9f44f01a9fd7b02a9fd830091",
+      "fingerprint": "5200b028fb28cb55bc4afa29ad13009599f3a3dd15f01b8469313f49278db728",
+      "group": "texture",
+      "host_symbol": "sword3_SDL_SetTextureBlendMode",
+      "library": "./libsword3_host.so",
+      "method": "unique parent string + ordered direct BL index",
+      "symbol": "SDL_SetTextureBlendMode"
+    },
+    {
+      "address": "0x1000df9d4",
+      "anchor": "via Couldn't create window: %s bl[12]",
+      "end_address": "0x1000dfc00",
+      "evidence": [
+        {
+          "bl_index": 12,
+          "call_site": "0x100200124",
+          "parent_address": "0x1001ffea4",
+          "parent_string": "Couldn't create window: %s\n",
+          "type": "parent-bl-index"
+        }
+      ],
+      "expected_hex": "f657bda9f44f01a9fd7b02a9fd830091",
+      "fingerprint": "e2853d13c45e9accdb81d3e4f5255b7dabebdc557ad5165ce44c61185e3675a0",
+      "group": "surface",
+      "host_symbol": "sword3_SDL_CreateRGBSurfaceWithFormat",
+      "library": "./libsword3_host.so",
+      "method": "unique parent string + ordered direct BL index",
+      "symbol": "SDL_CreateRGBSurfaceWithFormat"
+    },
+    {
+      "address": "0x1000dfc00",
+      "anchor": "via Couldn't create window: %s bl[14]",
+      "end_address": "0x1000dfcd0",
+      "evidence": [
+        {
+          "bl_index": 14,
+          "call_site": "0x100200170",
+          "parent_address": "0x1001ffea4",
+          "parent_string": "Couldn't create window: %s\n",
+          "type": "parent-bl-index"
+        }
+      ],
+      "expected_hex": "f44fbea9fd7b01a9fd430091600100b4",
+      "fingerprint": "05df6d5ab5e8790d361fb76618844c5df2409bb9f1daa1df57a25fc3c84b3ca4",
+      "group": "surface",
+      "host_symbol": "sword3_SDL_FreeSurface",
+      "library": "./libsword3_host.so",
+      "method": "unique parent string + ordered direct BL index",
+      "symbol": "SDL_FreeSurface"
+    },
+    {
+      "address": "0x100116d98",
+      "anchor": "via SS2D_LoadIconFile bl[0]",
+      "end_address": "0x100116edc",
+      "evidence": [
+        {
+          "bl_index": 0,
+          "call_site": "0x1001c117c",
+          "parent_address": "0x1001c1168",
+          "parent_string": "SS2D_LoadIconFile",
+          "type": "parent-bl-index"
+        }
+      ],
+      "expected_hex": "f657bda9f44f01a9fd7b02a9fd830091",
+      "fingerprint": "9f0927c6e729433875f80f1a9d14e1c7509da2a9e13d0b13ca17a6842fb67dcb",
+      "group": "image",
+      "host_symbol": "sword3_IMG_Load",
+      "library": "./libsword3_host.so",
+      "method": "unique parent string + ordered direct BL index",
+      "symbol": "IMG_Load"
+    },
+    {
+      "address": "0x10011963c",
+      "anchor": "via LoadImageFile bl[3]",
+      "end_address": "0x100119644",
+      "evidence": [
+        {
+          "bl_index": 3,
+          "call_site": "0x1001c1114",
+          "parent_address": "0x1001c10c8",
+          "parent_string": "LoadImageFile",
+          "type": "parent-bl-index"
+        }
+      ],
+      "expected_hex": "020080d201000014",
+      "fingerprint": "0c244ca38e111acc333f15c81bf89871cbdb6fd7fc0569ea4f7b5a1efa244026",
+      "group": "image",
+      "host_symbol": "sword3_IMG_Load_RW",
+      "library": "./libsword3_host.so",
+      "method": "unique parent string + ordered direct BL index",
+      "symbol": "IMG_Load_RW"
+    },
+    {
+      "address": "0x1000e15d8",
+      "anchor": "nth_after SDL_VideoInit n=0",
+      "end_address": "0x1000e1764",
+      "evidence": [
+        {
+          "n": 0,
+          "origin": "SDL_VideoInit",
+          "origin_address": "0x1000e132c",
+          "type": "nth-function-after"
+        }
+      ],
+      "expected_hex": "fc6fbaa9fa6701a9f85f02a9f65703a9",
+      "fingerprint": "d3e5ab0b8b2bad777dec6d2e1d7ad43efca7cc23e5489b57fc44678c1dbfc3e0",
+      "group": "init",
+      "host_symbol": "sword3_SDL_VideoQuit",
+      "library": "./libsword3_host.so",
+      "method": "nth LC_FUNCTION_STARTS after resolved origin",
+      "symbol": "SDL_VideoQuit"
+    },
+    {
+      "address": "0x1000a06d8",
+      "anchor": "nth_after SDL_AudioInit n=0",
+      "end_address": "0x1000a077c",
+      "evidence": [
+        {
+          "n": 0,
+          "origin": "SDL_AudioInit",
+          "origin_address": "0x1000a03cc",
+          "type": "nth-function-after"
+        }
+      ],
+      "expected_hex": "f44fbea9fd7b01a9fd430091e8130090",
+      "fingerprint": "b4c3257391b0f78cbce486b8927c19d760f37c2887cf1c782fdf7a7ca06a2301",
+      "group": "init",
+      "host_symbol": "sword3_SDL_AudioQuit",
+      "library": "./libsword3_host.so",
+      "method": "nth LC_FUNCTION_STARTS after resolved origin",
+      "symbol": "SDL_AudioQuit"
+    },
+    {
+      "address": "0x1000e3cdc",
+      "anchor": "nth_after SDL_SetWindowSize n=1",
+      "end_address": "0x1000e3d30",
+      "evidence": [
+        {
+          "n": 1,
+          "origin": "SDL_SetWindowSize",
+          "origin_address": "0x1000e3b4c",
+          "type": "nth-function-after"
+        }
+      ],
+      "expected_hex": "c81100d0087d46f9280100b4a00000b4",
+      "fingerprint": "446a039208d5a4c3782afd294a6b7d21bfad7cf93fbce5ca9c3d3aba2faae7a8",
+      "group": "window",
+      "host_symbol": "sword3_SDL_GetWindowSize",
+      "library": "./libsword3_host.so",
+      "method": "nth LC_FUNCTION_STARTS after resolved origin",
+      "symbol": "SDL_GetWindowSize"
+    },
+    {
+      "address": "0x1000f7628",
+      "anchor": "nth_after SDL_SetRenderDrawBlendMode n=0",
+      "end_address": "0x1000f76c4",
+      "evidence": [
+        {
+          "n": 0,
+          "origin": "SDL_SetRenderDrawBlendMode",
+          "origin_address": "0x1000f759c",
+          "type": "nth-function-after"
+        }
+      ],
+      "expected_hex": "f44fbea9fd7b01a9fd430091e00000b4",
+      "fingerprint": "a5b25a3aad8aa94362b2e37c556423f70d2f66a441eb90c2087e0f44ec438371",
+      "group": "renderer",
+      "host_symbol": "sword3_SDL_RenderClear",
+      "library": "./libsword3_host.so",
+      "method": "nth LC_FUNCTION_STARTS after resolved origin",
+      "symbol": "SDL_RenderClear"
+    },
+    {
+      "address": "0x1000f8784",
+      "anchor": "nth_after SDL_RenderCopyExF n=0",
+      "end_address": "0x1000f87f0",
+      "evidence": [
+        {
+          "n": 0,
+          "origin": "SDL_RenderCopyExF",
+          "origin_address": "0x1000f8544",
+          "type": "nth-function-after"
+        }
+      ],
+      "expected_hex": "f44fbea9fd7b01a9fd430091e00000b4",
+      "fingerprint": "253c2bf65070ef9e03a4c41298c893ab914577df84ba04c079212b39d4e2180d",
+      "group": "renderer",
+      "host_symbol": "sword3_SDL_RenderPresent",
+      "library": "./libsword3_host.so",
+      "method": "nth LC_FUNCTION_STARTS after resolved origin",
+      "symbol": "SDL_RenderPresent"
+    },
+    {
+      "address": "0x1000f87f0",
+      "anchor": "nth_after SDL_RenderCopyExF n=1",
+      "end_address": "0x1000f88ec",
+      "evidence": [
+        {
+          "n": 1,
+          "origin": "SDL_RenderCopyExF",
+          "origin_address": "0x1000f8544",
+          "type": "nth-function-after"
+        }
+      ],
+      "expected_hex": "f44fbea9fd7b01a9fd430091e00000b4",
+      "fingerprint": "a88e2223378e140e7bdff21115df27f578e98279615a4dc4bf1f690023c2fde4",
+      "group": "renderer",
+      "host_symbol": "sword3_SDL_DestroyRenderer",
+      "library": "./libsword3_host.so",
+      "method": "nth LC_FUNCTION_STARTS after resolved origin",
+      "symbol": "SDL_DestroyRenderer"
+    },
+    {
+      "address": "0x1000f6118",
+      "anchor": "nth_after SDL_CreateTexture n=0",
+      "end_address": "0x1000f61f8",
+      "evidence": [
+        {
+          "n": 0,
+          "origin": "SDL_CreateTexture",
+          "origin_address": "0x1000f5cd0",
+          "type": "nth-function-after"
+        }
+      ],
+      "expected_hex": "f44fbea9fd7b01a9fd430091e00000b4",
+      "fingerprint": "da19cd0157e06b1700fef2bc9ac68d318afbe4ab0e321d2d249e2bbe462c6d9c",
+      "group": "texture",
+      "host_symbol": "sword3_SDL_DestroyTexture",
+      "library": "./libsword3_host.so",
+      "method": "nth LC_FUNCTION_STARTS after resolved origin",
+      "symbol": "SDL_DestroyTexture"
+    },
+    {
+      "address": "0x1000f65d4",
+      "anchor": "nth_after SDL_CreateTextureFromSurface n=0",
+      "end_address": "0x1000f6930",
+      "evidence": [
+        {
+          "n": 0,
+          "origin": "SDL_CreateTextureFromSurface",
+          "origin_address": "0x1000f61f8",
+          "type": "nth-function-after"
+        }
+      ],
+      "expected_hex": "ff4302d1fa6704a9f85f05a9f65706a9",
+      "fingerprint": "a25a0fa0475fd2b7c404ecfad42ee521c36232c997592e58f68762eff49fdf56",
+      "group": "texture",
+      "host_symbol": "sword3_SDL_UpdateTexture",
+      "library": "./libsword3_host.so",
+      "method": "nth LC_FUNCTION_STARTS after resolved origin",
+      "symbol": "SDL_UpdateTexture"
+    },
+    {
+      "address": "0x1000f6c58",
+      "anchor": "nth_after SDL_LockTexture n=0",
+      "end_address": "0x1000f6e0c",
+      "evidence": [
+        {
+          "n": 0,
+          "origin": "SDL_LockTexture",
+          "origin_address": "0x1000f6aac",
+          "type": "nth-function-after"
+        }
+      ],
+      "expected_hex": "ffc301d1fa6702a9f85f03a9f65704a9",
+      "fingerprint": "bb965d43308ac9a35bb1c4a305fe0ddcf1ab5fecdec2face70990fb35cf78e58",
+      "group": "texture",
+      "host_symbol": "sword3_SDL_UnlockTexture",
+      "library": "./libsword3_host.so",
+      "method": "nth LC_FUNCTION_STARTS after resolved origin",
+      "symbol": "SDL_UnlockTexture"
+    },
+    {
+      "address": "0x1000a8700",
+      "anchor": "nth_after SDL_PeepEvents n=3",
+      "end_address": "0x1000a874c",
+      "evidence": [
+        {
+          "n": 3,
+          "origin": "SDL_PeepEvents",
+          "origin_address": "0x1000a783c",
+          "type": "nth-function-after"
+        }
+      ],
+      "expected_hex": "fd7bbfa9fd03009185e50094600000b4",
+      "fingerprint": "feab8c4a152d95a82bad0461a9d776ccf538ec7d9c57a2af4f6402beefbe2ddc",
+      "group": "event",
+      "host_symbol": "sword3_SDL_PumpEvents",
+      "library": "./libsword3_host.so",
+      "method": "nth LC_FUNCTION_STARTS after resolved origin",
+      "symbol": "SDL_PumpEvents"
+    },
+    {
+      "address": "0x1000a874c",
+      "anchor": "nth_after SDL_PeepEvents n=4",
+      "end_address": "0x1000a8754",
+      "evidence": [
+        {
+          "n": 4,
+          "origin": "SDL_PeepEvents",
+          "origin_address": "0x1000a783c",
+          "type": "nth-function-after"
+        }
+      ],
+      "expected_hex": "0100805201000014",
+      "fingerprint": "1a62cc549a0b5850114ac25f0bf69578c044fa102f77c13ae2b8e88ccd66bbff",
+      "group": "event",
+      "host_symbol": "sword3_SDL_PollEvent",
+      "library": "./libsword3_host.so",
+      "method": "nth LC_FUNCTION_STARTS after resolved origin",
+      "symbol": "SDL_PollEvent"
+    },
+    {
+      "address": "0x1000a8754",
+      "anchor": "nth_after SDL_PeepEvents n=5",
+      "end_address": "0x1000a87f0",
+      "evidence": [
+        {
+          "n": 5,
+          "origin": "SDL_PeepEvents",
+          "origin_address": "0x1000a783c",
+          "type": "nth-function-after"
+        }
+      ],
+      "expected_hex": "f657bda9f44f01a9fd7b02a9fd830091",
+      "fingerprint": "17d28e453011e28158439e1d476b1fca00b381bf0397118d84a73a50d0d3bd9f",
+      "group": "event",
+      "host_symbol": "sword3_SDL_WaitEventTimeout",
+      "library": "./libsword3_host.so",
+      "method": "nth LC_FUNCTION_STARTS after resolved origin",
+      "symbol": "SDL_WaitEventTimeout"
+    }
+  ],
+  "method": "unique exact cstring xref, ordered parent BL index, and nth LC_FUNCTION_STARTS after a resolved origin",
+  "schema_version": 2
+}

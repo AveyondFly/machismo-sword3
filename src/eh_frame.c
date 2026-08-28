@@ -1014,10 +1014,18 @@ int eh_frame_register_macho(void* mh, uintptr_t slide)
 	}
 	ehf_pos = 0;
 
-	/* Emit CIEs — one with personality, one without */
-	uintptr_t gxx_personality = (hdr->personalityArrayCount > 0) ? personalities[0] : 0;
-	size_t cie_with_personality = emit_cie(gxx_personality);
+	/* Compact unwind stores a 1-based personality index in each encoding.
+	 * A binary may mix C++ and Objective-C personalities; routing every LSDA
+	 * through personalities[0] corrupts exception dispatch for the other
+	 * language.  Emit one CIE per personality and select it per FDE. */
 	size_t cie_without_personality = emit_cie(0);
+	size_t cie_by_personality[5] = {0};
+	cie_by_personality[0] = cie_without_personality;
+	uint32_t personality_count = hdr->personalityArrayCount;
+	if (personality_count > 4)
+		personality_count = 4;
+	for (uint32_t i = 0; i < personality_count; i++)
+		cie_by_personality[i + 1] = emit_cie(personalities[i]);
 
 	/* Emit FDEs */
 	int fdes_emitted = 0;
@@ -1034,8 +1042,17 @@ int eh_frame_register_macho(void* mh, uintptr_t slide)
 			lsda_addr = text_base + slide + entries[i].lsda_offset;
 		}
 
-		/* Select CIE based on LSDA presence */
-		size_t cie = has_lsda ? cie_with_personality : cie_without_personality;
+		uint32_t personality_index =
+			(encoding & UNWIND_PERSONALITY_MASK) >> 28;
+		size_t cie = cie_without_personality;
+		if (personality_index > 0 &&
+		    personality_index <= personality_count) {
+			cie = cie_by_personality[personality_index];
+		} else if (personality_index > personality_count) {
+			fprintf(stderr,
+			        "eh_frame: function 0x%lx references missing personality %u\n",
+			        (unsigned long)func_addr, personality_index);
+		}
 
 		/* Skip DWARF-mode entries — they're already in existing .eh_frame */
 		if (mode == UNWIND_ARM64_MODE_DWARF)

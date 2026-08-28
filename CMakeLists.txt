@@ -1,8 +1,9 @@
 cmake_minimum_required(VERSION 3.16)
-project(machismo C CXX)
+project(machismo C CXX ASM)
 
 set(CMAKE_C_STANDARD 11)
 set(CMAKE_CXX_STANDARD 14)
+find_package(Python3 COMPONENTS Interpreter REQUIRED)
 
 option(BUILD_WRAPGEN "Build the wrapgen utility" ON)
 option(BUILD_TESTS "Build test fixtures" ON)
@@ -87,6 +88,107 @@ target_link_options(system_shim PRIVATE
     -Wl,--version-script=${CMAKE_CURRENT_SOURCE_DIR}/src/shim/libsystem_shim.ver
 )
 
+# --- Sword3 iOS framework audit shim ---
+
+set(SWORD3_GENERATED_IMPORTS
+    ${CMAKE_CURRENT_BINARY_DIR}/generated/sword3_ios_imports.c)
+add_custom_command(
+    OUTPUT ${SWORD3_GENERATED_IMPORTS}
+    COMMAND ${CMAKE_COMMAND} -E make_directory
+            ${CMAKE_CURRENT_BINARY_DIR}/generated
+    COMMAND ${Python3_EXECUTABLE}
+            ${CMAKE_CURRENT_SOURCE_DIR}/tools/generate_sword3_shim.py
+            --manifest
+            ${CMAKE_CURRENT_SOURCE_DIR}/configs/sword3/binary-manifest.json
+            --output ${SWORD3_GENERATED_IMPORTS}
+    DEPENDS
+            tools/generate_sword3_shim.py
+            configs/sword3/binary-manifest.json
+    VERBATIM
+)
+add_library(sword3_ios_shim SHARED
+    src/shim/sword3_ios_shim.c
+    src/shim/sword3_ios_raise.S
+    ${SWORD3_GENERATED_IMPORTS}
+)
+target_include_directories(sword3_ios_shim PRIVATE src/shim)
+target_compile_options(sword3_ios_shim PRIVATE -Wall -Wextra -O2 -g)
+set_target_properties(sword3_ios_shim PROPERTIES
+    OUTPUT_NAME "sword3_ios_shim"
+    PREFIX "lib"
+)
+
+set(SWORD3_GENERATED_OBJC_IMPORTS
+    ${CMAKE_CURRENT_BINARY_DIR}/generated/sword3_objc_imports.c)
+add_custom_command(
+    OUTPUT ${SWORD3_GENERATED_OBJC_IMPORTS}
+    COMMAND ${CMAKE_COMMAND} -E make_directory
+            ${CMAKE_CURRENT_BINARY_DIR}/generated
+    COMMAND ${Python3_EXECUTABLE}
+            ${CMAKE_CURRENT_SOURCE_DIR}/tools/generate_objc_shim.py
+            --manifest
+            ${CMAKE_CURRENT_SOURCE_DIR}/configs/sword3/binary-manifest.json
+            --output ${SWORD3_GENERATED_OBJC_IMPORTS}
+    DEPENDS
+            tools/generate_objc_shim.py
+            configs/sword3/binary-manifest.json
+    VERBATIM
+)
+add_library(sword3_objc_shim SHARED
+    src/shim/sword3_objc_shim.c
+    src/shim/sword3_objc_msgsend.S
+    ${SWORD3_GENERATED_OBJC_IMPORTS}
+)
+target_include_directories(sword3_objc_shim PRIVATE src/shim)
+target_compile_options(sword3_objc_shim PRIVATE -Wall -Wextra -O2 -g)
+target_link_libraries(sword3_objc_shim PRIVATE gcc_s)
+set_target_properties(sword3_objc_shim PROPERTIES
+    OUTPUT_NAME "sword3_objc_shim"
+    PREFIX "lib"
+)
+
+# OpenGLES.framework contains a mix of GLES1 and GLES2 symbols.  A single
+# dependency cannot satisfy it on Linux, so expose both APIs through one
+# resolver handle.
+add_library(sword3_gl_bridge SHARED
+    src/ports/sword3/gl_bridge.c
+)
+target_link_options(sword3_gl_bridge PRIVATE -Wl,--no-as-needed)
+target_link_libraries(sword3_gl_bridge PRIVATE GLESv2 GLESv1_CM EGL dl)
+target_compile_options(sword3_gl_bridge PRIVATE -Wall -Wextra -O2 -g)
+set_target_properties(sword3_gl_bridge PROPERTIES
+    OUTPUT_NAME "sword3_gl_bridge"
+    PREFIX "lib"
+)
+
+# Host-owned services.  These never create a second window or renderer; the
+# game-specific hooks feed them paths/events and upload decoded frames into
+# the one SDL/EGL context owned by the host SDL implementation.
+if(NOT PkgConfig_FOUND)
+    message(FATAL_ERROR "Sword3 host services require pkg-config")
+endif()
+pkg_check_modules(SWORD3_SDL REQUIRED IMPORTED_TARGET sdl2 SDL2_mixer SDL2_image)
+pkg_check_modules(SWORD3_FFMPEG REQUIRED IMPORTED_TARGET
+    libavformat libavcodec libavutil libswscale)
+add_library(sword3_host SHARED
+    src/ports/sword3/host_prepare.c
+    src/ports/sword3/sdl_bridge.c
+    src/ports/sword3/paths.c
+    src/ports/sword3/input.c
+    src/ports/sword3/audio_bridge.c
+    src/ports/sword3/video_bridge.c
+)
+target_include_directories(sword3_host PUBLIC src/ports/sword3)
+target_compile_options(sword3_host PRIVATE -Wall -Wextra -O2 -g)
+target_link_libraries(sword3_host PRIVATE
+    PkgConfig::SWORD3_SDL
+    PkgConfig::SWORD3_FFMPEG
+)
+set_target_properties(sword3_host PROPERTIES
+    OUTPUT_NAME "sword3_host"
+    PREFIX "lib"
+)
+
 # --- libgalaxy_shim.so (GOG Galaxy SDK stub for DLC ownership) ---
 
 add_library(galaxy_shim SHARED
@@ -144,6 +246,12 @@ endif()
 
 install(TARGETS machismo RUNTIME DESTINATION bin)
 install(TARGETS system_shim LIBRARY DESTINATION lib)
+install(TARGETS
+    sword3_ios_shim
+    sword3_objc_shim
+    sword3_gl_bridge
+    sword3_host
+    LIBRARY DESTINATION lib)
 if(BUILD_WRAPGEN)
     install(TARGETS wrapgen RUNTIME DESTINATION bin)
 endif()

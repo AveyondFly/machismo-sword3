@@ -18,4 +18,8 @@ GLIBC_2.17 {
         dlopen;
         mmap;
         __assert_rtn;
+        dyld_stub_binder;
+        _dyld_register_func_for_add_image;
+        hash_create;
+        hash_search;
 };

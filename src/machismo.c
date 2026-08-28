@@ -282,8 +282,13 @@ int main(int argc, char** argv, char** envp)
 	 * Order: resolve main exe first (which triggers dylib loading),
 	 * then resolve each loaded dylib's own fixups. */
 	if (machismo_load_results.mh && cfg.dylib_map) {
-		resolver_resolve_fixups((void*)machismo_load_results.mh,
-		                        machismo_load_results.slide, cfg.dylib_map);
+		if (resolver_resolve_fixups((void*)machismo_load_results.mh,
+		                            machismo_load_results.slide,
+		                            cfg.dylib_map) < 0) {
+			fprintf(stderr, "machismo: main image fixup resolution failed\n");
+			config_free(&cfg);
+			return 1;
+		}
 
 		/* Resolve chained fixups for loaded Mach-O dylibs.
 		 * Each dylib has its own LC_DYLD_CHAINED_FIXUPS that need patching.
@@ -292,7 +297,14 @@ int main(int argc, char** argv, char** envp)
 		for (int i = 0; i < g_num_macho_dylibs; i++) {
 			struct macho_dylib_info *mdi = &g_macho_dylibs[i];
 			fprintf(stderr, "machismo: resolving fixups for Mach-O dylib '%s'\n", mdi->path);
-			resolver_resolve_fixups((void*)mdi->mh, mdi->slide, cfg.dylib_map);
+			if (resolver_resolve_fixups((void*)mdi->mh, mdi->slide,
+			                            cfg.dylib_map) < 0) {
+				fprintf(stderr,
+				        "machismo: fixup resolution failed for Mach-O dylib '%s'\n",
+				        mdi->path);
+				config_free(&cfg);
+				return 1;
+			}
 		}
 
 		/* Fix macOS pthread signatures in dylib __DATA segments.
@@ -390,10 +402,20 @@ int main(int argc, char** argv, char** envp)
 
 		/* Run static initializers for loaded Mach-O dylibs.
 		 * Must be after fixup resolution (function pointers in
-		 * __mod_init_func need to be rebased). */
-		for (int i = 0; i < g_num_macho_dylibs; i++) {
-			dylib_loader_run_inits(&g_macho_dylibs[i]);
+		 * __mod_init_func need to be rebased).  audit_only deliberately
+		 * stops before executing any guest instruction. */
+		if (!cfg.audit_only) {
+			for (int i = 0; i < g_num_macho_dylibs; i++) {
+				dylib_loader_run_inits(&g_macho_dylibs[i]);
+			}
 		}
+	}
+
+	if (cfg.audit_only) {
+		fprintf(stderr,
+		        "machismo: audit-only complete; no guest constructors or entry point executed\n");
+		config_free(&cfg);
+		return 0;
 	}
 
 	/* Fix macOS pthread objects and set up TLV before the __DATA guard
@@ -425,6 +447,18 @@ int main(int argc, char** argv, char** envp)
 			trampoline_set_pool(tramp_pool, tramp_pool_size);
 		} else {
 			fprintf(stderr, "machismo: WARNING: no pool space for trampoline islands\n");
+		}
+
+		if (cfg.address_hooks) {
+			int address_patched = trampoline_patch_addresses(
+				(void*)machismo_load_results.mh,
+				machismo_load_results.slide, cfg.address_hooks);
+			if (address_patched < 0) {
+				fprintf(stderr,
+				        "machismo: stripped address trampoline validation failed\n");
+				config_free(&cfg);
+				return 1;
+			}
 		}
 
 		for (int i = 0; i < cfg.num_trampolines; i++) {
@@ -594,6 +628,58 @@ int main(int argc, char** argv, char** envp)
 			fprintf(stderr, "machismo: patcher failed — aborting\n");
 			abort();
 		}
+	}
+
+	if (cfg.has_entry_override) {
+		if (!cfg.entry_expected ||
+		    trampoline_validate_function(
+			    (void*)machismo_load_results.mh,
+			    machismo_load_results.slide,
+			    cfg.entry_override, cfg.entry_expected) < 0) {
+			fprintf(stderr,
+			        "machismo: entry_override requires a matching entry_expected signature\n");
+			config_free(&cfg);
+			return 1;
+		}
+		if (cfg.entry_override > UINTPTR_MAX - machismo_load_results.slide) {
+			fprintf(stderr, "machismo: entry_override address overflow\n");
+			config_free(&cfg);
+			return 1;
+		}
+		machismo_load_results.entry_point =
+			cfg.entry_override + machismo_load_results.slide;
+		machismo_load_results.lc_main = true;
+		fprintf(stderr,
+		        "machismo: overriding guest entry with 0x%lx (runtime %p)\n",
+		        (unsigned long)cfg.entry_override,
+		        (void*)machismo_load_results.entry_point);
+	}
+
+	if (cfg.entry_prepare_lib || cfg.entry_prepare_symbol) {
+		if (!cfg.entry_prepare_lib || !cfg.entry_prepare_symbol) {
+			fprintf(stderr,
+			        "machismo: entry_prepare_lib and entry_prepare_symbol must be set together\n");
+			config_free(&cfg);
+			return 1;
+		}
+		void* prepare_handle =
+			dlopen(cfg.entry_prepare_lib, RTLD_NOW | RTLD_GLOBAL);
+		if (!prepare_handle) {
+			fprintf(stderr, "machismo: cannot load entry prepare library %s: %s\n",
+			        cfg.entry_prepare_lib, dlerror());
+			config_free(&cfg);
+			return 1;
+		}
+		int (*prepare)(void) =
+			(int (*)(void))dlsym(prepare_handle, cfg.entry_prepare_symbol);
+		if (!prepare || prepare() != 0) {
+			fprintf(stderr, "machismo: entry prepare hook %s failed\n",
+			        cfg.entry_prepare_symbol);
+			config_free(&cfg);
+			return 1;
+		}
+		fprintf(stderr, "machismo: entry prepare hook %s completed\n",
+		        cfg.entry_prepare_symbol);
 	}
 
 	/* Set up the Mach-O stack layout */
