@@ -1,6 +1,7 @@
 #include "host_menu.h"
 
 #include <limits.h>
+#include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -20,6 +21,31 @@
 #define HOST_MENU_TEXT_CACHE 96
 #define HOST_MENU_NATIVE_W 960
 #define HOST_MENU_NATIVE_H 720
+#define HOST_MENU_GUEST_LO 0x100294000ull
+#define HOST_MENU_GUEST_HI 0x100380000ull
+#define HOST_MENU_PARTY 0x1002ab1b8ull
+#define HOST_MENU_PARTY_STRIDE 0x68
+#define HOST_MENU_PARTY_N 4
+#define HOST_MENU_FILL_CHAR 0x10001e4c0ull
+#define HOST_MENU_LEVEL_MAX 0x100005f40ull
+#define HOST_MENU_LUA_BIND 0x10030aef0ull
+#define HOST_MENU_OFF_HP 0x04
+#define HOST_MENU_OFF_MP 0x08
+#define HOST_MENU_OFF_SP 0x0c
+#define HOST_MENU_OFF_HPMAX 0x10
+#define HOST_MENU_OFF_MPMAX 0x14
+#define HOST_MENU_OFF_SPMAX 0x18
+#define HOST_MENU_OFF_STR 0x1c
+#define HOST_MENU_OFF_STA 0x1e
+#define HOST_MENU_OFF_WIS 0x20
+#define HOST_MENU_OFF_AGI 0x26
+#define HOST_MENU_OFF_EXP 0x2c
+#define HOST_MENU_OFF_ATK 0x32
+#define HOST_MENU_OFF_DEF 0x34
+#define HOST_MENU_OFF_LEVEL 0x38
+#define HOST_MENU_OFF_ATTR 0x3a
+#define HOST_MENU_OFF_NAME 0x58
+#define HOST_MENU_RESIST_N 9
 
 enum host_menu_tab {
 	HOST_MENU_TAB_ITEM = 0,
@@ -72,6 +98,31 @@ static SDL_Texture *g_tex_dark;
 static SDL_Texture *g_tex_back;
 static SDL_Texture *g_tex_book[HOST_MENU_ACTIONS];
 
+struct host_menu_actor {
+	int used;
+	int level;
+	int level_max;
+	int hp;
+	int hp_max;
+	int mp;
+	int mp_max;
+	int sp;
+	int sp_max;
+	int str;
+	int sta;
+	int wis;
+	int agi;
+	int atk;
+	int def;
+	int exp;
+	int attr[HOST_MENU_RESIST_N];
+	char name[32];
+};
+
+static struct host_menu_actor g_party[HOST_MENU_PARTY_N];
+static int g_party_i;
+static int g_party_logged;
+
 static const char *g_book_files[HOST_MENU_ACTIONS] = {
 	"book_save.png",
 	"book_load.png",
@@ -92,7 +143,6 @@ static const int g_book_nx[HOST_MENU_ACTIONS] = {
 #define HOST_MENU_ITEM_CAT 7
 #define HOST_MENU_EQUIP_N 8
 #define HOST_MENU_STAT_N 7
-#define HOST_MENU_RESIST_N 9
 #define HOST_MENU_ITEM_ACT_NY 78
 #define HOST_MENU_ITEM_ACT_NW 122
 #define HOST_MENU_ITEM_ACT_NH 64
@@ -102,6 +152,8 @@ static const int g_book_nx[HOST_MENU_ACTIONS] = {
 #define HOST_MENU_ITEM_WELL_NY 240
 
 static void host_menu_enter_inner(void);
+static void host_menu_refresh_party(void);
+static void host_menu_fill_party(void);
 
 static const char *g_tab_text[HOST_MENU_TABS] = {
 	"物品", "装备", "奇术", "状态", "天书"
@@ -179,9 +231,13 @@ void host_menu_open(void)
 	g_stub = -1;
 	g_slot_mode = 0;
 	g_slot_focus = 0;
+	g_party_i = 0;
+	g_party_logged = 0;
+	memset(g_party, 0, sizeof(g_party));
 	memset(g_dir_down, 0, sizeof(g_dir_down));
 	memset(g_dir_axis, 0, sizeof(g_dir_axis));
 	memset(g_dir_held, 0, sizeof(g_dir_held));
+	host_menu_fill_party();
 	fprintf(stderr, "sword3-sdl: host menu open\n");
 }
 
@@ -217,6 +273,178 @@ static int host_menu_slot_used(int slot)
 	    (int)sizeof(path))
 		return 0;
 	return stat(path, &st) == 0 && S_ISREG(st.st_mode);
+}
+
+static int host_menu_guest_ok(uintptr_t addr, size_t n)
+{
+	return addr >= HOST_MENU_GUEST_LO &&
+	       addr + n - 1 < HOST_MENU_GUEST_HI;
+}
+
+static int host_menu_guest_i32(uintptr_t addr)
+{
+	if (!host_menu_guest_ok(addr, 4))
+		return 0;
+	return *(volatile int *)(uintptr_t)addr;
+}
+
+static int host_menu_guest_i16(uintptr_t addr)
+{
+	if (!host_menu_guest_ok(addr, 2))
+		return 0;
+	return (int)*(volatile int16_t *)(uintptr_t)addr;
+}
+
+static uintptr_t host_menu_guest_ptr(uintptr_t addr)
+{
+	if (!host_menu_guest_ok(addr, sizeof(uintptr_t)))
+		return 0;
+	return *(volatile uintptr_t *)(uintptr_t)addr;
+}
+
+static int host_menu_copy_name(char *dst, size_t dstn, uintptr_t ptr)
+{
+	size_t i;
+	const unsigned char *s;
+
+	if (!dst || dstn == 0)
+		return 0;
+	dst[0] = 0;
+	if (ptr < 0x1000ull || ptr > 0x00007fffffffffffull)
+		return 0;
+	s = (const unsigned char *)(uintptr_t)ptr;
+	for (i = 0; i + 1 < dstn && i < 31; i++) {
+		unsigned char c = s[i];
+
+		if (c == 0)
+			break;
+		if (c < 0x20)
+			return 0;
+		dst[i] = (char)c;
+	}
+	dst[i] = 0;
+	return i > 0;
+}
+
+static int host_menu_lua_ready(void)
+{
+	return host_menu_guest_ok(HOST_MENU_LUA_BIND, 8) &&
+	       host_menu_guest_ptr(HOST_MENU_LUA_BIND) != 0;
+}
+
+static int host_menu_party_any(void)
+{
+	int i;
+
+	for (i = 0; i < HOST_MENU_PARTY_N; i++) {
+		if (g_party[i].used)
+			return 1;
+	}
+	return 0;
+}
+
+static void host_menu_fill_party(void)
+{
+	int i;
+	int lvmax;
+	int filled = 0;
+
+	host_menu_refresh_party();
+	/*
+	 * The C cache at 0x1002ab1b8 is the live party block (save/load and
+	 * field HP writes). Filling from Lua NewGameChar would overwrite it,
+	 * so only refill when the cache still looks empty.
+	 */
+	if (!host_menu_party_any() && host_menu_lua_ready()) {
+		for (i = 0; i < HOST_MENU_PARTY_N; i++)
+			((void (*)(void *, int))(uintptr_t)HOST_MENU_FILL_CHAR)(
+				(void *)(uintptr_t)(HOST_MENU_PARTY +
+						    (uintptr_t)i *
+							    HOST_MENU_PARTY_STRIDE),
+				i + 1);
+		filled = 1;
+		host_menu_refresh_party();
+	}
+	if (host_menu_lua_ready()) {
+		for (i = 0; i < HOST_MENU_PARTY_N; i++) {
+			if (!g_party[i].used)
+				continue;
+			lvmax = ((int (*)(int))(uintptr_t)HOST_MENU_LEVEL_MAX)(
+				i + 1);
+			if (lvmax < 1 || lvmax > 999)
+				lvmax = 0;
+			g_party[i].level_max = lvmax;
+		}
+	}
+	fprintf(stderr, "sword3-sdl: party fill lua=%d filled=%d used=%d\n",
+		host_menu_lua_ready(), filled, host_menu_party_any());
+}
+
+static void host_menu_refresh_party(void)
+{
+	int i;
+	int j;
+	int lvmax;
+	uintptr_t rec;
+	uintptr_t name;
+	struct host_menu_actor *a;
+
+	if (!host_menu_guest_ok(HOST_MENU_PARTY,
+				HOST_MENU_PARTY_STRIDE * HOST_MENU_PARTY_N))
+		return;
+	for (i = 0; i < HOST_MENU_PARTY_N; i++) {
+		rec = HOST_MENU_PARTY + (uintptr_t)i * HOST_MENU_PARTY_STRIDE;
+		a = &g_party[i];
+		lvmax = a->level_max;
+		memset(a, 0, sizeof(*a));
+		a->level_max = lvmax;
+		a->hp_max = host_menu_guest_i32(rec + HOST_MENU_OFF_HPMAX);
+		a->mp_max = host_menu_guest_i32(rec + HOST_MENU_OFF_MPMAX);
+		a->sp_max = host_menu_guest_i32(rec + HOST_MENU_OFF_SPMAX);
+		a->hp = host_menu_guest_i32(rec + HOST_MENU_OFF_HP);
+		a->mp = host_menu_guest_i32(rec + HOST_MENU_OFF_MP);
+		a->sp = host_menu_guest_i32(rec + HOST_MENU_OFF_SP);
+		a->str = host_menu_guest_i16(rec + HOST_MENU_OFF_STR);
+		a->sta = host_menu_guest_i16(rec + HOST_MENU_OFF_STA);
+		a->wis = host_menu_guest_i16(rec + HOST_MENU_OFF_WIS);
+		a->agi = host_menu_guest_i16(rec + HOST_MENU_OFF_AGI);
+		a->atk = host_menu_guest_i16(rec + HOST_MENU_OFF_ATK);
+		a->def = host_menu_guest_i16(rec + HOST_MENU_OFF_DEF);
+		a->exp = host_menu_guest_i32(rec + HOST_MENU_OFF_EXP);
+		a->level = host_menu_guest_i16(rec + HOST_MENU_OFF_LEVEL);
+		for (j = 0; j < HOST_MENU_RESIST_N; j++) {
+			if (host_menu_guest_ok(rec + HOST_MENU_OFF_ATTR + j, 1))
+				a->attr[j] = *(volatile int8_t *)(uintptr_t)
+						     (rec + HOST_MENU_OFF_ATTR +
+						      j);
+		}
+		name = host_menu_guest_ptr(rec + HOST_MENU_OFF_NAME);
+		host_menu_copy_name(a->name, sizeof(a->name), name);
+		a->used = a->hp_max > 0 || a->level > 0 || a->name[0];
+	}
+	if (!g_party_logged && g_party[0].used) {
+		g_party_logged = 1;
+		fprintf(stderr,
+			"sword3-sdl: party0 name=%s lv=%d/%d hp=%d/%d mp=%d/%d sp=%d/%d\n",
+			g_party[0].name[0] ? g_party[0].name : "-",
+			g_party[0].level, g_party[0].level_max, g_party[0].hp,
+			g_party[0].hp_max, g_party[0].mp, g_party[0].mp_max,
+			g_party[0].sp, g_party[0].sp_max);
+	}
+}
+
+static const struct host_menu_actor *host_menu_actor(void)
+{
+	int i;
+
+	if (g_party_i >= 0 && g_party_i < HOST_MENU_PARTY_N &&
+	    g_party[g_party_i].used)
+		return &g_party[g_party_i];
+	for (i = 0; i < HOST_MENU_PARTY_N; i++) {
+		if (g_party[i].used)
+			return &g_party[i];
+	}
+	return NULL;
 }
 
 static void host_menu_enter_inner(void)
@@ -870,17 +1098,34 @@ static void host_menu_plaque(SDL_Renderer *renderer, SDL_Rect box, int selected)
 }
 
 static void host_menu_bar(SDL_Renderer *renderer, SDL_Rect track, Uint8 r,
-			  Uint8 g, Uint8 b)
+			  Uint8 g, Uint8 b, int cur, int max)
 {
-	SDL_Rect cap;
+	SDL_Rect fill;
+	int w;
 
 	host_menu_fill(renderer, track, 24, 18, 12, 255);
 	host_menu_frame(renderer, track, 1, 80, 56, 24, 255);
-	cap = track;
-	cap.w = 3;
-	if (cap.w > track.w)
-		cap.w = track.w;
-	host_menu_fill(renderer, cap, r, g, b, 220);
+	if (max <= 0)
+		return;
+	if (cur < 0)
+		cur = 0;
+	if (cur > max)
+		cur = max;
+	w = (int)((long)track.w * cur / max);
+	if (w <= 0)
+		return;
+	fill = track;
+	fill.x += 1;
+	fill.y += 1;
+	fill.h -= 2;
+	fill.w = w - 2;
+	if (fill.w < 1)
+		fill.w = 1;
+	if (fill.w > track.w - 2)
+		fill.w = track.w - 2;
+	if (fill.h < 1)
+		return;
+	host_menu_fill(renderer, fill, r, g, b, 230);
 }
 
 static void host_menu_scroll(SDL_Renderer *renderer, SDL_Rect well)
@@ -927,11 +1172,41 @@ static void host_menu_draw_left(SDL_Renderer *renderer, int logical_w,
 	SDL_Rect track;
 	int i;
 	int bar_y;
+	int cur[3];
+	int maxv[3];
+	char name[40];
+	char lvline[40];
+	char barline[32];
+	const struct host_menu_actor *act;
 	const char *labs[3] = { "命", "灵", "体" };
 	const SDL_Color *ink[3] = { &g_ink_hp, &g_ink_mp, &g_ink_sp };
 	Uint8 br[3] = { 176, 48, 48 };
 	Uint8 bg[3] = { 48, 140, 64 };
 	Uint8 bb[3] = { 48, 96, 176 };
+
+	act = host_menu_actor();
+	if (act && act->name[0])
+		snprintf(name, sizeof(name), "%s", act->name);
+	else
+		snprintf(name, sizeof(name), "%s", "—");
+	if (act && act->used) {
+		if (act->level_max > 0)
+			snprintf(lvline, sizeof(lvline), "%d 级 / %d",
+				 act->level, act->level_max);
+		else
+			snprintf(lvline, sizeof(lvline), "%d 级 / —",
+				 act->level);
+		cur[0] = act->hp;
+		cur[1] = act->mp;
+		cur[2] = act->sp;
+		maxv[0] = act->hp_max;
+		maxv[1] = act->mp_max;
+		maxv[2] = act->sp_max;
+	} else {
+		snprintf(lvline, sizeof(lvline), "%s", "— 级 / —");
+		cur[0] = cur[1] = cur[2] = 0;
+		maxv[0] = maxv[1] = maxv[2] = 0;
+	}
 
 	left.x = 0;
 	left.y = 0;
@@ -956,11 +1231,11 @@ static void host_menu_draw_left(SDL_Renderer *renderer, int logical_w,
 	host_menu_fill(renderer, portrait, 32, 22, 12, 255);
 	host_menu_frame(renderer, portrait, 2, 196, 164, 72, 255);
 
-	host_menu_text_left(renderer, "—",
+	host_menu_text_left(renderer, name,
 			    portrait.x + portrait.w + host_sx(10, logical_w),
 			    portrait.y + host_sy(6, logical_h), pt,
 			    g_ink_paper);
-	host_menu_text_left(renderer, "— 级 / —",
+	host_menu_text_left(renderer, lvline,
 			    portrait.x + portrait.w + host_sx(10, logical_w),
 			    portrait.y + host_sy(34, logical_h), pt_small,
 			    g_ink_paper);
@@ -978,8 +1253,14 @@ static void host_menu_draw_left(SDL_Renderer *renderer, int logical_w,
 		track.h = host_sy(16, logical_h);
 		if (track.w < 8)
 			continue;
-		host_menu_bar(renderer, track, br[i], bg[i], bb[i]);
-		host_menu_text_left(renderer, "— / —",
+		host_menu_bar(renderer, track, br[i], bg[i], bb[i], cur[i],
+			      maxv[i]);
+		if (maxv[i] > 0)
+			snprintf(barline, sizeof(barline), "%d / %d", cur[i],
+				 maxv[i]);
+		else
+			snprintf(barline, sizeof(barline), "%s", "— / —");
+		host_menu_text_left(renderer, barline,
 				    track.x + host_sx(4, logical_w),
 				    track.y - 1, pt_small, g_ink_title);
 	}
@@ -1048,7 +1329,14 @@ static void host_menu_draw_combat(SDL_Renderer *renderer, int logical_w,
 	int i;
 	int x0;
 	int y0;
+	int vals[3];
+	char num[16];
+	const struct host_menu_actor *act;
 
+	act = host_menu_actor();
+	vals[0] = act ? act->atk : 0;
+	vals[1] = act ? act->def : 0;
+	vals[2] = act ? act->agi : 0;
 	x0 = host_sx(HOST_MENU_SPLIT_X + 12, logical_w);
 	y0 = host_sy(68, logical_h);
 	box.x = x0;
@@ -1056,8 +1344,10 @@ static void host_menu_draw_combat(SDL_Renderer *renderer, int logical_w,
 	box.w = host_sx(88, logical_w);
 	box.h = host_sy(34, logical_h);
 	host_menu_plaque(renderer, box, 0);
-	host_menu_text_center(renderer, "—", box.x + box.w / 2,
-			      box.y + box.h / 2, pt_small, g_ink_body);
+	host_menu_text_center(renderer,
+			      (act && act->name[0]) ? act->name : "—",
+			      box.x + box.w / 2, box.y + box.h / 2, pt_small,
+			      g_ink_body);
 	for (i = 0; i < 3; i++) {
 		box.x = x0 + host_sx(96, logical_w) +
 			i * host_sx(118, logical_w);
@@ -1067,7 +1357,11 @@ static void host_menu_draw_combat(SDL_Renderer *renderer, int logical_w,
 				    box.x + host_sx(8, logical_w),
 				    box.y + box.h / 2 - pt_small / 2, pt_small,
 				    g_ink_body);
-		host_menu_text_center(renderer, "—",
+		if (act && act->used)
+			snprintf(num, sizeof(num), "%d", vals[i]);
+		else
+			snprintf(num, sizeof(num), "%s", "—");
+		host_menu_text_center(renderer, num,
 				      box.x + box.w - host_sx(22, logical_w),
 				      box.y + box.h / 2, pt_small, g_ink_hint);
 	}
@@ -1207,6 +1501,19 @@ static void host_menu_draw_status(SDL_Renderer *renderer, int logical_w,
 	int x0;
 	int y0;
 	int rh;
+	int vals[HOST_MENU_STAT_N];
+	char num[24];
+	char resist[12];
+	const struct host_menu_actor *act;
+
+	act = host_menu_actor();
+	vals[0] = act ? act->level : 0;
+	vals[1] = act ? act->exp : 0;
+	vals[2] = act ? act->str : 0;
+	vals[3] = act ? act->sta : 0;
+	vals[4] = act ? act->wis : 0;
+	vals[5] = act ? act->agi : 0;
+	vals[6] = 0;
 
 	host_menu_draw_combat(renderer, logical_w, logical_h, pt_small);
 	x0 = host_sx(HOST_MENU_SPLIT_X + 20, logical_w);
@@ -1215,7 +1522,11 @@ static void host_menu_draw_status(SDL_Renderer *renderer, int logical_w,
 		host_menu_text_left(renderer, g_stat_row[i], x0,
 				    y0 + i * host_sy(28, logical_h), pt_small,
 				    g_ink_body);
-		host_menu_text_left(renderer, "—",
+		if (i == 6 || !act || !act->used)
+			snprintf(num, sizeof(num), "%s", "—");
+		else
+			snprintf(num, sizeof(num), "%d", vals[i]);
+		host_menu_text_left(renderer, num,
 				    x0 + host_sx(120, logical_w),
 				    y0 + i * host_sy(28, logical_h), pt_small,
 				    g_ink_hint);
@@ -1228,7 +1539,11 @@ static void host_menu_draw_status(SDL_Renderer *renderer, int logical_w,
 				    y0 + host_sy(238, logical_h) +
 					    (i / 2) * host_sy(26, logical_h),
 				    pt_small, g_ink_hint);
-		host_menu_text_left(renderer, "----",
+		if (!act || !act->used || act->attr[i] == 0)
+			snprintf(resist, sizeof(resist), "%s", "----");
+		else
+			snprintf(resist, sizeof(resist), "%d", act->attr[i]);
+		host_menu_text_left(renderer, resist,
 				    x0 + host_sx(28, logical_w) +
 					    (i % 2) * host_sx(140, logical_w),
 				    y0 + host_sy(238, logical_h) +
@@ -1365,6 +1680,7 @@ void host_menu_draw(SDL_Renderer *renderer, int logical_w, int logical_h)
 		return;
 	if (SDL_GetRenderTarget(renderer) != NULL)
 		return;
+	host_menu_refresh_party();
 
 	if (g_text_renderer != renderer) {
 		host_menu_text_flush(g_text_renderer);
