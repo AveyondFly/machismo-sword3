@@ -18,7 +18,7 @@
 #define HOST_MENU_SLOT_COLS 2
 #define HOST_MENU_FONT "/usr/share/fonts/TTF/DejaVuSansMono.ttf"
 #define HOST_MENU_FONT_SLOTS 8
-#define HOST_MENU_TEXT_CACHE 96
+#define HOST_MENU_TEXT_CACHE 160
 #define HOST_MENU_NATIVE_W 960
 #define HOST_MENU_NATIVE_H 720
 #define HOST_MENU_GUEST_LO 0x100294000ull
@@ -39,13 +39,30 @@
 #define HOST_MENU_OFF_STA 0x1e
 #define HOST_MENU_OFF_WIS 0x20
 #define HOST_MENU_OFF_AGI 0x26
-#define HOST_MENU_OFF_EXP 0x2c
+#define HOST_MENU_OFF_EXP 0x00
+#define HOST_MENU_OFF_LVUP 0x2c
 #define HOST_MENU_OFF_ATK 0x32
 #define HOST_MENU_OFF_DEF 0x34
 #define HOST_MENU_OFF_LEVEL 0x38
 #define HOST_MENU_OFF_ATTR 0x3a
 #define HOST_MENU_OFF_NAME 0x58
 #define HOST_MENU_RESIST_N 9
+#define HOST_MENU_ITEM_REPO 0x1002ab4d8ull
+#define HOST_MENU_EQUIP_REPO 0x1002ab628ull
+#define HOST_MENU_SKILL_REPO 0x1002ab608ull
+#define HOST_MENU_SKEXP 0x1002ab358ull
+#define HOST_MENU_SKEXP_STRIDE 0x60
+#define HOST_MENU_ITEM_NODE 0x130
+#define HOST_MENU_BAG_N 48
+#define HOST_MENU_SKILL_N 32
+#define HOST_MENU_EQUIP_N 8
+#define HOST_MENU_OFF_NEXT 0x10
+#define HOST_MENU_OFF_TEMP 0x20
+#define HOST_MENU_OFF_COUNT 0x28
+#define HOST_MENU_OFF_COUNT_NEW 0x30
+#define HOST_MENU_OFF_INAME 0x38
+#define HOST_MENU_OFF_HELP 0x110
+#define HOST_MENU_OFF_INFO 0x118
 
 enum host_menu_tab {
 	HOST_MENU_TAB_ITEM = 0,
@@ -115,13 +132,33 @@ struct host_menu_actor {
 	int atk;
 	int def;
 	int exp;
+	int exp_need;
+	int sk_exp;
+	int sk_next;
 	int attr[HOST_MENU_RESIST_N];
 	char name[32];
 };
 
+struct host_menu_item {
+	int used;
+	int count;
+	int count_new;
+	int temp;
+	char name[32];
+	char help[48];
+	char info[48];
+};
+
 static struct host_menu_actor g_party[HOST_MENU_PARTY_N];
+static struct host_menu_item g_bag[HOST_MENU_BAG_N];
+static struct host_menu_item g_equip[HOST_MENU_EQUIP_N];
+static struct host_menu_item g_skills[HOST_MENU_SKILL_N];
 static int g_party_i;
 static int g_party_logged;
+static int g_bag_n;
+static int g_skill_n;
+static int g_skill_focus;
+static int g_inv_logged;
 
 static const char *g_book_files[HOST_MENU_ACTIONS] = {
 	"book_save.png",
@@ -141,7 +178,6 @@ static const int g_book_nx[HOST_MENU_ACTIONS] = {
 #define HOST_MENU_SPLIT_X 282
 #define HOST_MENU_ITEM_ACT 3
 #define HOST_MENU_ITEM_CAT 7
-#define HOST_MENU_EQUIP_N 8
 #define HOST_MENU_STAT_N 7
 #define HOST_MENU_ITEM_ACT_NY 78
 #define HOST_MENU_ITEM_ACT_NW 122
@@ -153,6 +189,7 @@ static const int g_book_nx[HOST_MENU_ACTIONS] = {
 
 static void host_menu_enter_inner(void);
 static void host_menu_refresh_party(void);
+static void host_menu_refresh_inv(void);
 static void host_menu_fill_party(void);
 
 static const char *g_tab_text[HOST_MENU_TABS] = {
@@ -233,7 +270,14 @@ void host_menu_open(void)
 	g_slot_focus = 0;
 	g_party_i = 0;
 	g_party_logged = 0;
+	g_inv_logged = 0;
+	g_skill_focus = 0;
+	g_bag_n = 0;
+	g_skill_n = 0;
 	memset(g_party, 0, sizeof(g_party));
+	memset(g_bag, 0, sizeof(g_bag));
+	memset(g_equip, 0, sizeof(g_equip));
+	memset(g_skills, 0, sizeof(g_skills));
 	memset(g_dir_down, 0, sizeof(g_dir_down));
 	memset(g_dir_axis, 0, sizeof(g_dir_axis));
 	memset(g_dir_held, 0, sizeof(g_dir_held));
@@ -302,6 +346,36 @@ static uintptr_t host_menu_guest_ptr(uintptr_t addr)
 	return *(volatile uintptr_t *)(uintptr_t)addr;
 }
 
+static int host_menu_heap_ok(uintptr_t addr, size_t n)
+{
+	if (addr < 0x10000ull || addr > 0x00007fffffffffffull)
+		return 0;
+	if (n == 0)
+		return 1;
+	if (addr + n - 1 < addr)
+		return 0;
+	return addr + n - 1 <= 0x00007fffffffffffull;
+}
+
+static int host_menu_mem_ok(uintptr_t addr, size_t n)
+{
+	return host_menu_guest_ok(addr, n) || host_menu_heap_ok(addr, n);
+}
+
+static int host_menu_mem_i32(uintptr_t addr)
+{
+	if (!host_menu_mem_ok(addr, 4))
+		return 0;
+	return *(volatile int *)(uintptr_t)addr;
+}
+
+static uintptr_t host_menu_mem_ptr(uintptr_t addr)
+{
+	if (!host_menu_mem_ok(addr, sizeof(uintptr_t)))
+		return 0;
+	return *(volatile uintptr_t *)(uintptr_t)addr;
+}
+
 static int host_menu_copy_name(char *dst, size_t dstn, uintptr_t ptr)
 {
 	size_t i;
@@ -313,7 +387,7 @@ static int host_menu_copy_name(char *dst, size_t dstn, uintptr_t ptr)
 	if (ptr < 0x1000ull || ptr > 0x00007fffffffffffull)
 		return 0;
 	s = (const unsigned char *)(uintptr_t)ptr;
-	for (i = 0; i + 1 < dstn && i < 31; i++) {
+	for (i = 0; i + 1 < dstn; i++) {
 		unsigned char c = s[i];
 
 		if (c == 0)
@@ -378,6 +452,7 @@ static void host_menu_fill_party(void)
 	}
 	fprintf(stderr, "sword3-sdl: party fill lua=%d filled=%d used=%d\n",
 		host_menu_lua_ready(), filled, host_menu_party_any());
+	host_menu_refresh_inv();
 }
 
 static void host_menu_refresh_party(void)
@@ -385,6 +460,8 @@ static void host_menu_refresh_party(void)
 	int i;
 	int j;
 	int lvmax;
+	int sk_exp;
+	int sk_next;
 	uintptr_t rec;
 	uintptr_t name;
 	struct host_menu_actor *a;
@@ -396,8 +473,12 @@ static void host_menu_refresh_party(void)
 		rec = HOST_MENU_PARTY + (uintptr_t)i * HOST_MENU_PARTY_STRIDE;
 		a = &g_party[i];
 		lvmax = a->level_max;
+		sk_exp = a->sk_exp;
+		sk_next = a->sk_next;
 		memset(a, 0, sizeof(*a));
 		a->level_max = lvmax;
+		a->sk_exp = sk_exp;
+		a->sk_next = sk_next;
 		a->hp_max = host_menu_guest_i32(rec + HOST_MENU_OFF_HPMAX);
 		a->mp_max = host_menu_guest_i32(rec + HOST_MENU_OFF_MPMAX);
 		a->sp_max = host_menu_guest_i32(rec + HOST_MENU_OFF_SPMAX);
@@ -411,6 +492,7 @@ static void host_menu_refresh_party(void)
 		a->atk = host_menu_guest_i16(rec + HOST_MENU_OFF_ATK);
 		a->def = host_menu_guest_i16(rec + HOST_MENU_OFF_DEF);
 		a->exp = host_menu_guest_i32(rec + HOST_MENU_OFF_EXP);
+		a->exp_need = host_menu_guest_i32(rec + HOST_MENU_OFF_LVUP);
 		a->level = host_menu_guest_i16(rec + HOST_MENU_OFF_LEVEL);
 		for (j = 0; j < HOST_MENU_RESIST_N; j++) {
 			if (host_menu_guest_ok(rec + HOST_MENU_OFF_ATTR + j, 1))
@@ -425,11 +507,11 @@ static void host_menu_refresh_party(void)
 	if (!g_party_logged && g_party[0].used) {
 		g_party_logged = 1;
 		fprintf(stderr,
-			"sword3-sdl: party0 name=%s lv=%d/%d hp=%d/%d mp=%d/%d sp=%d/%d\n",
+			"sword3-sdl: party0 name=%s lv=%d/%d hp=%d/%d exp=%d/%d sk=%d/%d\n",
 			g_party[0].name[0] ? g_party[0].name : "-",
 			g_party[0].level, g_party[0].level_max, g_party[0].hp,
-			g_party[0].hp_max, g_party[0].mp, g_party[0].mp_max,
-			g_party[0].sp, g_party[0].sp_max);
+			g_party[0].hp_max, g_party[0].exp, g_party[0].exp_need,
+			g_party[0].sk_exp, g_party[0].sk_next);
 	}
 }
 
@@ -447,6 +529,124 @@ static const struct host_menu_actor *host_menu_actor(void)
 	return NULL;
 }
 
+static int host_menu_load_item(struct host_menu_item *it, uintptr_t node)
+{
+	uintptr_t help;
+	uintptr_t info;
+	int temp;
+
+	memset(it, 0, sizeof(*it));
+	if (!host_menu_heap_ok(node, HOST_MENU_ITEM_NODE))
+		return 0;
+	temp = host_menu_mem_i32(node + HOST_MENU_OFF_TEMP);
+	if (temp < 1)
+		return 0;
+	it->temp = temp;
+	it->count = host_menu_mem_i32(node + HOST_MENU_OFF_COUNT);
+	it->count_new = host_menu_mem_i32(node + HOST_MENU_OFF_COUNT_NEW);
+	if (it->count < 0)
+		it->count = 0;
+	if (it->count_new < 0)
+		it->count_new = 0;
+	host_menu_copy_name(it->name, sizeof(it->name),
+			    node + HOST_MENU_OFF_INAME);
+	help = host_menu_mem_ptr(node + HOST_MENU_OFF_HELP);
+	if (help)
+		host_menu_copy_name(it->help, sizeof(it->help), help);
+	info = host_menu_mem_ptr(node + HOST_MENU_OFF_INFO);
+	if (info)
+		host_menu_copy_name(it->info, sizeof(it->info), info);
+	it->used = it->name[0] || temp > 0;
+	return it->used;
+}
+
+static int host_menu_walk_list(struct host_menu_item *dst, int max,
+			      uintptr_t head)
+{
+	int n = 0;
+	int seen_n = 0;
+	int guard = 0;
+	int i;
+	uintptr_t node;
+	uintptr_t seen[HOST_MENU_BAG_N];
+
+	node = head;
+	while (node && n < max && guard < max + 8) {
+		guard++;
+		for (i = 0; i < seen_n; i++) {
+			if (seen[i] == node)
+				return n;
+		}
+		if (seen_n < HOST_MENU_BAG_N)
+			seen[seen_n++] = node;
+		if (host_menu_load_item(&dst[n], node))
+			n++;
+		node = host_menu_mem_ptr(node + HOST_MENU_OFF_NEXT);
+	}
+	return n;
+}
+
+static void host_menu_refresh_inv(void)
+{
+	int i;
+	int idx;
+	uintptr_t rec;
+	uintptr_t head;
+	uintptr_t node;
+	struct host_menu_actor *a;
+
+	memset(g_bag, 0, sizeof(g_bag));
+	memset(g_equip, 0, sizeof(g_equip));
+	memset(g_skills, 0, sizeof(g_skills));
+	g_bag_n = 0;
+	g_skill_n = 0;
+	if (host_menu_guest_ok(HOST_MENU_ITEM_REPO + HOST_MENU_OFF_NEXT, 8)) {
+		head = host_menu_guest_ptr(HOST_MENU_ITEM_REPO +
+					  HOST_MENU_OFF_NEXT);
+		g_bag_n = host_menu_walk_list(g_bag, HOST_MENU_BAG_N, head);
+	}
+	if (host_menu_guest_ok(HOST_MENU_EQUIP_REPO,
+			       (size_t)HOST_MENU_EQUIP_N * 8 *
+				       HOST_MENU_PARTY_N)) {
+		for (i = 0; i < HOST_MENU_EQUIP_N; i++) {
+			idx = i + g_party_i * 16;
+			node = host_menu_guest_ptr(HOST_MENU_EQUIP_REPO +
+						  (uintptr_t)idx * 8);
+			if (node)
+				host_menu_load_item(&g_equip[i], node);
+		}
+	}
+	if (host_menu_guest_ok(HOST_MENU_SKILL_REPO +
+				      (uintptr_t)g_party_i * 8,
+			      8)) {
+		rec = host_menu_guest_ptr(HOST_MENU_SKILL_REPO +
+					 (uintptr_t)g_party_i * 8);
+		if (rec)
+			head = host_menu_mem_ptr(rec + HOST_MENU_OFF_NEXT);
+		else
+			head = 0;
+		g_skill_n = host_menu_walk_list(g_skills, HOST_MENU_SKILL_N,
+						head);
+	}
+	if (g_skill_focus >= g_skill_n)
+		g_skill_focus = g_skill_n > 0 ? g_skill_n - 1 : 0;
+	for (i = 0; i < HOST_MENU_PARTY_N; i++) {
+		a = &g_party[i];
+		rec = HOST_MENU_SKEXP + (uintptr_t)i * HOST_MENU_SKEXP_STRIDE;
+		if (!host_menu_guest_ok(rec, 16))
+			continue;
+		a->sk_exp = host_menu_guest_i32(rec + 4);
+		a->sk_next = host_menu_guest_i32(rec + 8);
+	}
+	if (!g_inv_logged && (g_bag_n || g_skill_n || g_equip[0].used)) {
+		g_inv_logged = 1;
+		fprintf(stderr,
+			"sword3-sdl: inv bag=%d skill=%d equip0=%s\n", g_bag_n,
+			g_skill_n,
+			g_equip[0].name[0] ? g_equip[0].name : "-");
+	}
+}
+
 static void host_menu_enter_inner(void)
 {
 	g_layer = HOST_MENU_LAYER_INNER;
@@ -454,6 +654,8 @@ static void host_menu_enter_inner(void)
 		g_item_focus = 0;
 	else if (g_tab == HOST_MENU_TAB_EQUIP)
 		g_equip_focus = 0;
+	else if (g_tab == HOST_MENU_TAB_SKILL)
+		g_skill_focus = 0;
 	else if (g_tab == HOST_MENU_TAB_BOOK)
 		g_book_focus = 0;
 	fprintf(stderr, "sword3-sdl: host menu enter tab=%d\n", g_tab);
@@ -506,6 +708,13 @@ static void host_menu_move_equip(int delta)
 			HOST_MENU_EQUIP_N;
 }
 
+static void host_menu_move_skill(int delta)
+{
+	if (g_skill_n <= 0)
+		return;
+	g_skill_focus = (g_skill_focus + delta + g_skill_n) % g_skill_n;
+}
+
 static void host_menu_dir(int index, int down)
 {
 	if (index < 0 || index >= 4)
@@ -554,6 +763,13 @@ static void host_menu_dir(int index, int down)
 			host_menu_move_equip(1);
 		else if (index == 0)
 			host_menu_move_equip(-1);
+		return;
+	}
+	if (g_tab == HOST_MENU_TAB_SKILL) {
+		if (index == 2)
+			host_menu_move_skill(1);
+		else if (index == 0)
+			host_menu_move_skill(-1);
 	}
 }
 
@@ -1374,6 +1590,9 @@ static void host_menu_draw_items(SDL_Renderer *renderer, int logical_w,
 	SDL_Rect well;
 	int i;
 	int on;
+	int rh;
+	int rows;
+	char line[48];
 
 	(void)pt;
 	for (i = 0; i < HOST_MENU_ITEM_ACT; i++) {
@@ -1411,6 +1630,34 @@ static void host_menu_draw_items(SDL_Renderer *renderer, int logical_w,
 	well.h = logical_h - well.y - host_sy(16, logical_h);
 	host_menu_well(renderer, well);
 	host_menu_scroll(renderer, well);
+	if (g_bag_n <= 0) {
+		host_menu_text_center(renderer, "没有物品", well.x + well.w / 2,
+				      well.y + well.h / 2, pt, g_ink_hint);
+		return;
+	}
+	rh = host_sy(28, logical_h);
+	if (rh < 18)
+		rh = 18;
+	rows = (well.h - host_sy(12, logical_h)) / rh;
+	if (rows < 1)
+		rows = 1;
+	if (rows > g_bag_n)
+		rows = g_bag_n;
+	for (i = 0; i < rows; i++) {
+		if (!g_bag[i].used)
+			continue;
+		if (g_bag[i].count + g_bag[i].count_new > 1)
+			snprintf(line, sizeof(line), "%s  x%d",
+				 g_bag[i].name[0] ? g_bag[i].name : "—",
+				 g_bag[i].count + g_bag[i].count_new);
+		else
+			snprintf(line, sizeof(line), "%s",
+				 g_bag[i].name[0] ? g_bag[i].name : "—");
+		host_menu_text_left(renderer, line,
+				    well.x + host_sx(16, logical_w),
+				    well.y + host_sy(8, logical_h) + i * rh,
+				    pt_small, g_ink_body);
+	}
 }
 
 static void host_menu_draw_equip(SDL_Renderer *renderer, int logical_w,
@@ -1445,18 +1692,58 @@ static void host_menu_draw_equip(SDL_Renderer *renderer, int logical_w,
 				    row.x + host_sx(8, logical_w),
 				    row.y + row.h / 2 - pt_small / 2, pt_small,
 				    g_ink_body);
-		host_menu_text_center(renderer, "无",
+		host_menu_text_center(renderer,
+				      (g_equip[i].used && g_equip[i].name[0]) ?
+					      g_equip[i].name :
+					      "无",
 				      row.x + row.w - host_sx(24, logical_w),
-				      row.y + row.h / 2, pt_small, g_ink_hint);
+				      row.y + row.h / 2, pt_small,
+				      g_equip[i].used ? g_ink_body :
+							g_ink_hint);
 	}
 	well.x = list.x + list.w + host_sx(8, logical_w);
 	well.y = list.y;
 	well.w = logical_w - well.x - host_sx(24, logical_w);
 	well.h = host_sy(300, logical_h);
 	if (well.w > host_sx(40, logical_w)) {
+		int rh;
+		int rows;
+		int i;
+		char line[48];
+
 		host_menu_well(renderer, well);
-		host_menu_text_center(renderer, "没有物品", well.x + well.w / 2,
-				      well.y + well.h / 2, pt, g_ink_hint);
+		if (g_bag_n <= 0) {
+			host_menu_text_center(renderer, "没有物品",
+					      well.x + well.w / 2,
+					      well.y + well.h / 2, pt,
+					      g_ink_hint);
+		} else {
+			rh = host_sy(26, logical_h);
+			if (rh < 16)
+				rh = 16;
+			rows = (well.h - host_sy(12, logical_h)) / rh;
+			if (rows > g_bag_n)
+				rows = g_bag_n;
+			for (i = 0; i < rows; i++) {
+				if (!g_bag[i].name[0])
+					continue;
+				if (g_bag[i].count + g_bag[i].count_new > 1)
+					snprintf(line, sizeof(line), "%s x%d",
+						 g_bag[i].name,
+						 g_bag[i].count +
+							 g_bag[i].count_new);
+				else
+					snprintf(line, sizeof(line), "%s",
+						 g_bag[i].name);
+				host_menu_text_left(renderer, line,
+						    well.x +
+							    host_sx(8, logical_w),
+						    well.y +
+							    host_sy(6, logical_h) +
+							    i * rh,
+						    pt_small, g_ink_body);
+			}
+		}
 	}
 }
 
@@ -1465,8 +1752,14 @@ static void host_menu_draw_skill(SDL_Renderer *renderer, int logical_w,
 {
 	SDL_Rect list;
 	SDL_Rect desc;
+	SDL_Rect row;
+	int i;
+	int rh;
+	int on;
+	char effect[64];
+	char target[64];
+	const struct host_menu_item *sk;
 
-	(void)pt;
 	list.x = host_sx(HOST_MENU_SPLIT_X + 16, logical_w);
 	list.y = host_sy(78, logical_h);
 	list.w = logical_w - list.x - host_sx(24, logical_w);
@@ -1474,17 +1767,59 @@ static void host_menu_draw_skill(SDL_Renderer *renderer, int logical_w,
 	if (list.y + list.h > logical_h - host_sy(90, logical_h))
 		list.h = logical_h - list.y - host_sy(90, logical_h);
 	host_menu_well(renderer, list);
+	if (g_skill_n <= 0)
+		host_menu_text_center(renderer, "没有奇术", list.x + list.w / 2,
+				      list.y + list.h / 2, pt, g_ink_hint);
+	else {
+		rh = (list.h - host_sy(12, logical_h)) / g_skill_n;
+		if (rh > host_sy(36, logical_h))
+			rh = host_sy(36, logical_h);
+		if (rh < host_sy(22, logical_h))
+			rh = host_sy(22, logical_h);
+		for (i = 0; i < g_skill_n; i++) {
+			row.x = list.x + host_sx(8, logical_w);
+			row.y = list.y + host_sy(6, logical_h) + i * rh;
+			row.w = list.w - host_sx(16, logical_w);
+			row.h = rh - 2;
+			on = (g_layer == HOST_MENU_LAYER_INNER &&
+			      g_skill_focus == i);
+			if (on)
+				host_menu_frame(renderer, row, 2, g_ink_gold.r,
+						g_ink_gold.g, g_ink_gold.b,
+						255);
+			host_menu_text_left(renderer,
+					    g_skills[i].name[0] ?
+						    g_skills[i].name :
+						    "—",
+					    row.x + host_sx(8, logical_w),
+					    row.y + row.h / 2 - pt_small / 2,
+					    pt_small,
+					    on ? g_ink_gold : g_ink_body);
+		}
+	}
 	desc.x = list.x;
 	desc.y = list.y + list.h + host_sy(8, logical_h);
 	desc.w = list.w;
 	desc.h = logical_h - desc.y - host_sy(12, logical_h);
 	if (desc.h > host_sy(36, logical_h)) {
+		sk = (g_skill_n > 0 && g_skill_focus >= 0 &&
+		      g_skill_focus < g_skill_n) ?
+			     &g_skills[g_skill_focus] :
+			     NULL;
+		if (sk && sk->help[0])
+			snprintf(effect, sizeof(effect), "效果  %s", sk->help);
+		else
+			snprintf(effect, sizeof(effect), "%s", "效果  —");
+		if (sk && sk->info[0])
+			snprintf(target, sizeof(target), "对象  %s", sk->info);
+		else
+			snprintf(target, sizeof(target), "%s", "对象  —");
 		host_menu_well(renderer, desc);
-		host_menu_text_left(renderer, "效果  —",
+		host_menu_text_left(renderer, effect,
 				    desc.x + host_sx(12, logical_w),
 				    desc.y + host_sy(8, logical_h), pt_small,
 				    g_ink_hint);
-		host_menu_text_left(renderer, "对象  —",
+		host_menu_text_left(renderer, target,
 				    desc.x + host_sx(12, logical_w) +
 					    desc.w / 2,
 				    desc.y + host_sy(8, logical_h), pt_small,
@@ -1522,7 +1857,15 @@ static void host_menu_draw_status(SDL_Renderer *renderer, int logical_w,
 		host_menu_text_left(renderer, g_stat_row[i], x0,
 				    y0 + i * host_sy(28, logical_h), pt_small,
 				    g_ink_body);
-		if (i == 6 || !act || !act->used)
+		if (!act || !act->used)
+			snprintf(num, sizeof(num), "%s", "—");
+		else if (i == 1 && act->exp_need > 0)
+			snprintf(num, sizeof(num), "%d / %d", act->exp,
+				 act->exp_need);
+		else if (i == 6 && (act->sk_exp || act->sk_next))
+			snprintf(num, sizeof(num), "%d / %d", act->sk_exp,
+				 act->sk_next);
+		else if (i == 6)
 			snprintf(num, sizeof(num), "%s", "—");
 		else
 			snprintf(num, sizeof(num), "%d", vals[i]);
@@ -1566,11 +1909,16 @@ static void host_menu_draw_status(SDL_Renderer *renderer, int logical_w,
 					    row.x + host_sx(6, logical_w),
 					    row.y + row.h / 2 - pt_small / 2,
 					    pt_small, g_ink_body);
-			host_menu_text_center(renderer, "无",
+			host_menu_text_center(renderer,
+					      (g_equip[i].used &&
+					       g_equip[i].name[0]) ?
+						      g_equip[i].name :
+						      "无",
 					      row.x + row.w -
 						      host_sx(20, logical_w),
 					      row.y + row.h / 2, pt_small,
-					      g_ink_hint);
+					      g_equip[i].used ? g_ink_body :
+								g_ink_hint);
 		}
 	}
 }
@@ -1681,6 +2029,7 @@ void host_menu_draw(SDL_Renderer *renderer, int logical_w, int logical_h)
 	if (SDL_GetRenderTarget(renderer) != NULL)
 		return;
 	host_menu_refresh_party();
+	host_menu_refresh_inv();
 
 	if (g_text_renderer != renderer) {
 		host_menu_text_flush(g_text_renderer);
