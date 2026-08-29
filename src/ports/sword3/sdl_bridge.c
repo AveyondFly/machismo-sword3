@@ -182,8 +182,10 @@ static void owner_drop(enum sword3_sdl_kind kind, void *pointer)
  *   SELECT        -> open the host-drawn system menu on the field
  *                    (does not open the iOS touch menu). Title/load
  *                    still send Escape. SWORD3_NATIVE_MENU=1 restores
- *                    the old tap / draw_gate path.
- *   B             -> close/back in the host menu. Field: swallowed.
+ *                    the old tap / draw_gate path on SELECT.
+ *   L3            -> open the original iOS system menu (compare only).
+ *   B             -> close/back in the host menu. Original menu: tap
+ *                    the back icon. Field: swallowed.
  *   A             -> confirm in the host menu; field Return talks.
  *   D-pad / stick in host menu -> tabs, or 天书 存盘/读取/记载/设置/离开.
  *                    Up on 天书 returns to the tab strip.
@@ -191,7 +193,7 @@ static void owner_drop(enum sword3_sdl_kind kind, void *pointer)
  * In the field the physical pad is the pad:
  *   stick         -> SDL_CONTROLLERAXIS (UIGamePad mode 4 / virtual cross)
  *   D-pad         -> keyboard arrows (setting.lua KB_UP=82 etc.)
- *   A talks (Return); B back-only; SELECT opens the system menu
+ *   A talks (Return); B back-only; SELECT host menu; L3 original menu
  *
  * Battle already consumes controller logical actions 1..6 (directions,
  * cancel, confirm). Keep those SDL_CONTROLLER events native. iOS 2022 has
@@ -237,6 +239,10 @@ static void owner_drop(enum sword3_sdl_kind kind, void *pointer)
 #define GUEST_FEX_RET 0x10005b87cull
 #define GUEST_FEX_FIELD 0x1000831a8ull
 #define GUEST_FEX_SYSPAGE 0x10002d018ull
+#define GUEST_REBIND_ACTIONS 0x1001fa5e8ull
+#define GUEST_PAD_READY 0x248c
+#define GUEST_SLOT_MASK 0x10
+#define GUEST_ACTION7_MASK 0x40u
 #define GUEST_SAVE_FILE 0x100028318ull
 #define GUEST_LOAD_GAME 0x100028f20ull
 #define GUEST_RESET_KEYS 0x1001c18d4ull
@@ -2017,6 +2023,42 @@ static void guest_keyboard_key(SDL_Scancode scancode, int down)
 	}
 }
 
+/*
+ * Action 7 is consumed at 0x1000731fc and calls 0x10005bd38, which writes
+ * draw_gate=0x80000001 and opens the original menu. Return's stock mask is
+ * 0x60. Whenever the game restores that default, remove only action 7,
+ * preserve every other binding, then rebuild the action lists.
+ */
+static void host_unlink_return_menu(void)
+{
+	static unsigned repairs;
+	uint8_t *pad;
+	uint32_t *return_mask;
+	uint32_t old_return;
+	void (*rebind)(void *);
+
+	if (!guest_data_ok(GUEST_UIGAMEPAD))
+		return;
+	pad = (uint8_t *)(uintptr_t)GUEST_UIGAMEPAD;
+	if (!pad[GUEST_PAD_READY])
+		return;
+	return_mask = (uint32_t *)(pad + GUEST_KEY_SLOT +
+				   SDL_SCANCODE_RETURN * GUEST_KEY_STRIDE +
+				   GUEST_SLOT_MASK);
+	old_return = *return_mask;
+	if (!(old_return & GUEST_ACTION7_MASK))
+		return;
+	*return_mask &= ~GUEST_ACTION7_MASK;
+	rebind = (void (*)(void *))(uintptr_t)GUEST_REBIND_ACTIONS;
+	rebind(pad);
+	if (repairs++ < 8) {
+		fprintf(stderr,
+			"sword3-sdl: Return action7 unbound %#x -> %#x "
+			"(repair %u)\n",
+			(unsigned)old_return, (unsigned)*return_mask, repairs);
+	}
+}
+
 static void field_talk_key(int down)
 {
 	uint8_t *pad;
@@ -2928,6 +2970,7 @@ static void host_menu_run_pending(void)
 
 static void apply_pad_pointer(void)
 {
+	host_unlink_return_menu();
 	host_menu_run_pending();
 	sync_ui_mode();
 	menu_poll_open_pulse();
@@ -3402,12 +3445,44 @@ static int rewrite_event(SDL_Event *event)
 		prepare_guest_controller(event->cbutton.which);
 		return 1;
 	}
+	if (button == SDL_CONTROLLER_BUTTON_LEFTSTICK) {
+		if (g_save_ui || g_title_keys || g_fight_ui ||
+		    g_pointer_ui) {
+			event->type = SDL_FIRSTEVENT;
+			return 0;
+		}
+		if (g_menu_open_button == SDL_CONTROLLER_BUTTON_LEFTSTICK) {
+			if (!down) {
+				menu_finish_open();
+				fprintf(stderr,
+					"sword3-sdl: L3 menu button up\n");
+			}
+			event->type = SDL_FIRSTEVENT;
+			return 0;
+		}
+		if (menu_drawn() || menu_opening() || g_menu_session) {
+			event->type = SDL_FIRSTEVENT;
+			return 0;
+		}
+		if (down) {
+			if (host_menu_active())
+				host_menu_close();
+			if (g_menu_session || g_menu_open_pending ||
+			    g_menu_close_pending)
+				menu_leave_session();
+			release_guest_walk();
+			menu_begin_open(SDL_CONTROLLER_BUTTON_LEFTSTICK);
+			fprintf(stderr, "sword3-sdl: L3 -> native menu\n");
+		}
+		event->type = SDL_FIRSTEVENT;
+		return 0;
+	}
 	if (host_menu_active()) {
 		host_menu_button(button, down);
 		event->type = SDL_FIRSTEVENT;
 		return 0;
 	}
-	/* X/Y/L1/R1/L3/R3/Guide are not game actions on this handheld. */
+	/* X/Y/L1/R1/R3/Guide are not game actions on this handheld. */
 	event->type = SDL_FIRSTEVENT;
 	return 0;
 }
