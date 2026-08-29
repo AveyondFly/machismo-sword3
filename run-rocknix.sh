@@ -26,12 +26,6 @@ case "${SWORD3_REQUIRE_HASH-}" in
         ;;
 esac
 
-[ -f "$IPA" ] || fail "place the owned IPA at $IPA"
-if [ "$require_hash" -eq 1 ]; then
-    [ "$(hash_file "$IPA")" = "$EXPECTED_IPA" ] ||
-        fail "unsupported IPA hash"
-fi
-
 mkdir -p "$GAMEDIR/saves" "$GAMEDIR/logs"
 
 need_extract=0
@@ -40,6 +34,14 @@ if [ ! -f "$BINARY" ]; then
 elif [ "$require_hash" -eq 1 ] &&
      [ "$(hash_file "$BINARY")" != "$EXPECTED_BINARY" ]; then
     need_extract=1
+fi
+
+if [ "$need_extract" -eq 1 ]; then
+    [ -f "$IPA" ] || fail "place the owned IPA at $IPA (needed only to extract game/)"
+    if [ "$require_hash" -eq 1 ]; then
+        [ "$(hash_file "$IPA")" = "$EXPECTED_IPA" ] ||
+            fail "unsupported IPA hash"
+    fi
 fi
 
 if [ "$need_extract" -eq 1 ]; then

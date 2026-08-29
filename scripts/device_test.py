@@ -65,20 +65,7 @@ def deploy(
     tar.wait()
     if tar.returncode != 0 or ssh.returncode != 0:
         raise SystemExit("failed to stream the ROCKNIX package over SSH")
-    if not ipa or not ipa.is_file():
-        return
-    remote_ipa = f"{remote}/sword3.ipa"
-    if not sync_ipa:
-        present = run(
-            ssh_cmd(target) + [f"test -f '{remote_ipa}'"],
-            check=False,
-        )
-        if present.returncode == 0:
-            print("remote IPA already present, skipping copy", flush=True)
-            return
-    print(f"+ scp {ipa} ({ipa.stat().st_size} bytes)", flush=True)
-    run(["scp", "-o", "BatchMode=yes", "-o", "ConnectTimeout=10",
-         str(ipa), f"{target}:{remote_ipa}"])
+    _ = ipa, sync_ipa
 
 
 def smoke(target: str, remote: str, seconds: int) -> str:
@@ -86,15 +73,7 @@ def smoke(target: str, remote: str, seconds: int) -> str:
 set -eu
 cd '{remote}'
 test -x ./run-rocknix.sh
-test -f sword3.ipa
-if [ ! -f game/Payload/SWD3.app/SWD3 ]; then
-  echo 'extracting IPA...'
-  rm -rf game.new game
-  mkdir game.new
-  unzip -q sword3.ipa 'Payload/SWD3.app/*' -d game.new
-  test -f game.new/Payload/SWD3.app/SWD3
-  mv game.new game
-fi
+test -f game/Payload/SWD3.app/SWD3
 hash=$(sha256sum game/Payload/SWD3.app/SWD3 | awk '{{print $1}}')
 test "$hash" = '{EXPECTED_BINARY}'
 echo 'binary hash ok'
@@ -142,7 +121,7 @@ def main() -> int:
     parser.add_argument(
         "--sync-ipa",
         action="store_true",
-        help="copy sword3.ipa even if the remote file already exists",
+        help="ignored; deploy never copies the IPA",
     )
     args = parser.parse_args()
 
