@@ -43,6 +43,16 @@ cp "$ROOT/configs/sword3/machismo.conf" \
    "$ROOT/configs/sword3/sdl-hook-report.json" \
    "$ROOT/run-rocknix.sh" \
    "$OUTPUT.new/"
+if [ -d "$ROOT/assets/host_menu" ]; then
+	mkdir -p "$OUTPUT.new/assets/host_menu"
+	# Chrome only: never ship full-page grim skins (tab_*.jpg / left.jpg).
+	for f in paper.jpg dark.jpg back.png \
+		book_save.png book_load.png book_log.png book_opt.png book_leave.png; do
+		if [ -f "$ROOT/assets/host_menu/$f" ]; then
+			cp "$ROOT/assets/host_menu/$f" "$OUTPUT.new/assets/host_menu/"
+		fi
+	done
+fi
 chmod +x "$OUTPUT.new/machismo" "$OUTPUT.new/run-rocknix.sh"
 
 rm -rf "$OUTPUT"
