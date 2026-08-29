@@ -173,6 +173,7 @@ pkg_check_modules(SWORD3_FFMPEG REQUIRED IMPORTED_TARGET
 add_library(sword3_host SHARED
     src/ports/sword3/host_prepare.c
     src/ports/sword3/sdl_bridge.c
+    src/ports/sword3/host_menu.c
     src/ports/sword3/paths.c
     src/ports/sword3/input.c
     src/ports/sword3/audio_bridge.c
@@ -183,6 +184,7 @@ target_compile_options(sword3_host PRIVATE -Wall -Wextra -O2 -g)
 target_link_libraries(sword3_host PRIVATE
     PkgConfig::SWORD3_SDL
     PkgConfig::SWORD3_FFMPEG
+    SDL2_ttf
 )
 set_target_properties(sword3_host PROPERTIES
     OUTPUT_NAME "sword3_host"

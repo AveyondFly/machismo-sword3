@@ -1,4 +1,5 @@
 #include "sdl_bridge.h"
+#include "host_menu.h"
 #include "video_bridge.h"
 
 #include <pthread.h>
@@ -178,22 +179,14 @@ static void owner_drop(enum sword3_sdl_kind kind, void *pointer)
  *   START swallowed; SELECT -> Escape; SELECT+START exits
  *
  * Field and system menu:
- *   SELECT        -> open the system menu. On the title/load UI, tap
- *                    widget 0x2495 (that walker is still installed).
- *                    On the walking field after a close, tap does
- *                    nothing: layer is 0 and fExecute click is RET.
- *                    Reopen by writing draw_gate=1 (no bit 31) and
- *                    layer=1. set-draw(3) sets bit 31, which is the
- *                    title/boot path and re-enters 再续前缘. Never tap
- *                    0x2495 to close. ConfigIcon is the left HUD.
- *   B             -> back one level (tap 0x2495) only while draw_gate is
- *                    set. Root back leaves the host session once draw
- *                    falls to 0. Swallowed on the field; never opens.
- *   A             -> confirm while the menu is painted (Return). On the
- *                    field, Return as well (setting.lua KB_RETURN) so A
- *                    can talk to NPCs. Not used to open the system menu.
- *   D-pad left/right in menu -> tap the on-screen tab strip
- *   D-pad up/down in menu    -> KB_UP / KB_DOWN
+ *   SELECT        -> open the host-drawn system menu on the field
+ *                    (does not open the iOS touch menu). Title/load
+ *                    still send Escape. SWORD3_NATIVE_MENU=1 restores
+ *                    the old tap / draw_gate path.
+ *   B             -> close/back in the host menu. Field: swallowed.
+ *   A             -> confirm in the host menu; field Return talks.
+ *   D-pad / stick in host menu -> tabs, or 天书 存盘/读取/记载/设置/离开.
+ *                    Up on 天书 returns to the tab strip.
  *
  * In the field the physical pad is the pad:
  *   stick         -> SDL_CONTROLLERAXIS (UIGamePad mode 4 / virtual cross)
@@ -243,6 +236,11 @@ static void owner_drop(enum sword3_sdl_kind kind, void *pointer)
 #define GUEST_INSTALLER 0x100023d8cull
 #define GUEST_FEX_RET 0x10005b87cull
 #define GUEST_FEX_FIELD 0x1000831a8ull
+#define GUEST_FEX_SYSPAGE 0x10002d018ull
+#define GUEST_SAVE_FILE 0x100028318ull
+#define GUEST_LOAD_GAME 0x100028f20ull
+#define GUEST_RESET_KEYS 0x1001c18d4ull
+#define GUEST_SAVE_INDEX 0x1002a9ca4ull
 #define GUEST_LAYER_FIELD 0xea60
 #define GUEST_LAYER_WALK 1
 #define GUEST_DRAW_OBJ 0x10030f488ull
@@ -370,6 +368,7 @@ static int g_menu_close_pending;
 static int g_menu_tab_index;
 static int g_menu_action_focus = -1;
 static int g_menu_action_a_up;
+static int g_menu_nested;
 static Uint32 g_menu_a_block_until;
 static SDL_FRect g_fight_dest_build[FIGHT_DEST_MAX];
 static int g_fight_ndest_build;
@@ -785,6 +784,14 @@ static int menu_select_busy(void)
 	if (menu_drawn() || menu_opening())
 		return 1;
 	return g_menu_session && !g_menu_saw_draw;
+}
+
+static int native_system_menu(void)
+{
+	const char *value;
+
+	value = getenv("SWORD3_NATIVE_MENU");
+	return value && value[0] == '1' && value[1] == '\0';
 }
 
 static int guest_system_menu(void)
@@ -1210,6 +1217,8 @@ static void sync_ui_mode(void)
 	pointer_ui = 0;
 	menu_keys = !title_ui && !save_ui && menu_ui;
 	fight_ui = !pointer_ui && !menu_keys && guest_in_fight();
+	if ((fight_ui || title_ui) && host_menu_active())
+		host_menu_close();
 	if (pointer_ui == g_pointer_ui && title_ui == g_title_keys &&
 	    save_ui == g_save_ui &&
 	    menu_ui == g_menu_ui && menu_keys == g_menu_keys &&
@@ -1906,9 +1915,20 @@ static int menu_click_widget(int id)
 	return 1;
 }
 
+static int menu_syspage_active(void)
+{
+	return guest_read_ptr(GUEST_FEXECUTE) == GUEST_FEX_SYSPAGE;
+}
+
 static int menu_tianshu_active(void)
 {
-	return g_menu_tab_index == 4;
+	/*
+	 * Host-driven 存盘/读取 row. After tapping one, click becomes
+	 * SysPage 0x10002d018 and those widgets stay on screen; D-pad
+	 * must then move save slots, not the parent row.
+	 */
+	return g_menu_tab_index == 4 && !menu_syspage_active() &&
+	       !g_menu_nested;
 }
 
 static void menu_click_action(int index)
@@ -1916,7 +1936,9 @@ static void menu_click_action(int index)
 	if (index < 0 || index >= 5 ||
 	    !menu_click_widget(index + 3))
 		return;
-	fprintf(stderr, "sword3-sdl: Tianshu action=%d id=%d\n",
+	g_menu_nested = 1;
+	g_menu_action_focus = -1;
+	fprintf(stderr, "sword3-sdl: Tianshu action=%d id=%d nested\n",
 		index, index + 3);
 }
 
@@ -1952,7 +1974,13 @@ static void menu_switch_tab(int delta)
 
 	index = (g_menu_tab_index + delta + 5) % 5;
 	g_menu_tab_index = index;
-	g_menu_action_focus = -1;
+	/*
+	 * 天书's 存盘/读取/记载/设置/离开 row is selected immediately so
+	 * left/right can cycle those buttons without pressing Down first.
+	 * Up still returns to the tab strip (focus -1) to leave this page.
+	 */
+	g_menu_action_focus = index == 4 ? 0 : -1;
+	g_menu_nested = 0;
 	push_finger_at(tab_x[index], 0.058f, SDL_FINGERDOWN);
 	push_finger_at(tab_x[index], 0.058f, SDL_FINGERUP);
 	fprintf(stderr, "sword3-sdl: menu tab=%d touch=%.3f,0.058\n",
@@ -2016,6 +2044,7 @@ static void menu_enter_session(void)
 	g_menu_open_pending = 0;
 	g_menu_tab_index = 0;
 	g_menu_action_focus = -1;
+	g_menu_nested = 0;
 	fprintf(stderr, "sword3-sdl: menu session start\n");
 }
 
@@ -2039,6 +2068,7 @@ static void menu_leave_session(void)
 	g_menu_back_until = 0;
 	g_menu_reenter_until = SDL_GetTicks() + MENU_BACK_GRACE_MS;
 	g_field_mode_held = 0;
+	g_menu_nested = 0;
 	menu_release_directions();
 	release_guest_walk();
 	if (guest_data_ok(GUEST_UIGAMEPAD)) {
@@ -2539,6 +2569,9 @@ static int menu_begin_close(void)
 {
 	menu_log_icons("close");
 	g_menu_close_pending = 1;
+	if (g_menu_nested && g_menu_tab_index == 4)
+		g_menu_action_focus = 0;
+	g_menu_nested = 0;
 	if (menu_try_close())
 		return 1;
 	fprintf(stderr, "sword3-sdl: menu B waiting for back icon\n");
@@ -2573,10 +2606,15 @@ static void menu_set_dir_source(int index, int axis, int down)
 		}
 		g_menu_dir_down[index] = 1;
 		/*
-		 * First-level bar (SysLevel 0): the game switches SysPage
-		 * from keyboard left/right (0x10002d4f4 / 0x10002d69c).
-		 * Fake tab taps only apply when those widgets are on screen.
+		 * Nested pages (save slots, item bag) keep the tab strip
+		 * and Tianshu buttons drawn. The game has installed the
+		 * SysPage table; send keyboard arrows into that list.
 		 */
+		if (menu_syspage_active() || g_menu_nested) {
+			guest_keyboard_key(g_menu_dir_keys[index], 1);
+			menu_log_state(index == 1 ? "right" : "left");
+			return;
+		}
 		if (menu_tianshu_active() && g_menu_action_focus >= 0) {
 			g_menu_action_focus =
 				(g_menu_action_focus +
@@ -2856,8 +2894,41 @@ static void fight_confirm_target(void)
 	((void (*)(int))(uintptr_t)GUEST_FIGHT_OK)(0);
 }
 
+static void host_menu_run_pending(void)
+{
+	int action;
+	int slot;
+	void (*reset_keys)(void *);
+
+	slot = 0;
+	action = host_menu_take_pending(&slot);
+	if (action < 0)
+		return;
+	if (slot < 0)
+		slot = 0;
+	if (guest_data_ok(GUEST_SAVE_INDEX))
+		*(volatile int *)(uintptr_t)GUEST_SAVE_INDEX = slot;
+	if (action == 0) {
+		((void (*)(int))(uintptr_t)GUEST_SAVE_FILE)(slot);
+		fprintf(stderr, "sword3-sdl: host menu -> SaveFileACT slot=%d\n",
+			slot);
+		return;
+	}
+	if (action == 1) {
+		if (guest_data_ok(GUEST_UIGAMEPAD)) {
+			reset_keys = (void (*)(void *))(uintptr_t)
+				GUEST_RESET_KEYS;
+			reset_keys((void *)(uintptr_t)GUEST_UIGAMEPAD);
+		}
+		((void (*)(int))(uintptr_t)GUEST_LOAD_GAME)(slot);
+		fprintf(stderr, "sword3-sdl: host menu -> LoadGame slot=%d\n",
+			slot);
+	}
+}
+
 static void apply_pad_pointer(void)
 {
+	host_menu_run_pending();
 	sync_ui_mode();
 	menu_poll_open_pulse();
 	menu_trace_poll();
@@ -2979,6 +3050,11 @@ static int rewrite_event(SDL_Event *event)
 		return 0;
 	}
 	if (event->type == SDL_CONTROLLERAXISMOTION) {
+		if (host_menu_active()) {
+			host_menu_axis(event->caxis.axis, event->caxis.value);
+			event->type = SDL_FIRSTEVENT;
+			return 0;
+		}
 		if (g_save_ui) {
 			event->type = SDL_FIRSTEVENT;
 			return 0;
@@ -3056,6 +3132,10 @@ static int rewrite_event(SDL_Event *event)
 			fill_key(event, SDL_SCANCODE_ESCAPE, down);
 			return 1;
 		}
+		if (host_menu_active()) {
+			event->type = SDL_FIRSTEVENT;
+			return 0;
+		}
 		if (g_menu_open_button == SDL_CONTROLLER_BUTTON_BACK) {
 			if (!down) {
 				menu_finish_open();
@@ -3073,8 +3153,16 @@ static int rewrite_event(SDL_Event *event)
 			if (g_menu_session || g_menu_open_pending ||
 			    g_menu_close_pending)
 				menu_leave_session();
-			menu_begin_open(SDL_CONTROLLER_BUTTON_BACK);
-			fprintf(stderr, "sword3-sdl: SELECT -> menu button down\n");
+			if (native_system_menu()) {
+				menu_begin_open(SDL_CONTROLLER_BUTTON_BACK);
+				fprintf(stderr,
+					"sword3-sdl: SELECT -> native menu\n");
+			} else {
+				release_guest_walk();
+				host_menu_open();
+				fprintf(stderr,
+					"sword3-sdl: SELECT -> host menu\n");
+			}
 			event->type = SDL_FIRSTEVENT;
 			return 0;
 		}
@@ -3101,6 +3189,11 @@ static int rewrite_event(SDL_Event *event)
 		if (g_title_keys) {
 			fill_key(event, SDL_SCANCODE_ESCAPE, down);
 			return 1;
+		}
+		if (host_menu_active()) {
+			host_menu_button(button, down);
+			event->type = SDL_FIRSTEVENT;
+			return 0;
 		}
 		if (menu_drawn()) {
 			if (down) {
@@ -3154,6 +3247,11 @@ static int rewrite_event(SDL_Event *event)
 		return 0;
 	}
 	if (button == SDL_CONTROLLER_BUTTON_A) {
+		if (host_menu_active()) {
+			host_menu_button(button, down);
+			event->type = SDL_FIRSTEVENT;
+			return 0;
+		}
 		if (g_menu_keys && menu_drawn()) {
 			Uint32 now = SDL_GetTicks();
 
@@ -3268,6 +3366,11 @@ static int rewrite_event(SDL_Event *event)
 	    button == SDL_CONTROLLER_BUTTON_DPAD_DOWN ||
 	    button == SDL_CONTROLLER_BUTTON_DPAD_LEFT ||
 	    button == SDL_CONTROLLER_BUTTON_DPAD_RIGHT) {
+		if (host_menu_active()) {
+			host_menu_button(button, down);
+			event->type = SDL_FIRSTEVENT;
+			return 0;
+		}
 		if (g_save_ui) {
 			save_dpad_event(button, down);
 			event->type = SDL_FIRSTEVENT;
@@ -3298,6 +3401,11 @@ static int rewrite_event(SDL_Event *event)
 		}
 		prepare_guest_controller(event->cbutton.which);
 		return 1;
+	}
+	if (host_menu_active()) {
+		host_menu_button(button, down);
+		event->type = SDL_FIRSTEVENT;
+		return 0;
 	}
 	/* X/Y/L1/R1/L3/R3/Guide are not game actions on this handheld. */
 	event->type = SDL_FIRSTEVENT;
@@ -3727,6 +3835,9 @@ void sword3_SDL_RenderPresent(SDL_Renderer *renderer)
 	g_last_present_ms = SDL_GetTicks();
 	if (movie_is_playing() && SDL_GetRenderTarget(renderer) == NULL) {
 		movie_present(renderer);
+	} else if (host_menu_active() &&
+		   SDL_GetRenderTarget(renderer) == NULL) {
+		host_menu_draw(renderer, g_logical_w, g_logical_h);
 	} else if (g_fight_ui && SDL_GetRenderTarget(renderer) == NULL &&
 		   fight_select_rect(&x, &y, &bw, &bh)) {
 		draw_select_frame(renderer, x, y, bw, bh);
