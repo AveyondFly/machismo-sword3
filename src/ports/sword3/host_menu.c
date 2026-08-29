@@ -6,6 +6,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <sys/stat.h>
+#include <time.h>
 #include <unistd.h>
 
 #include <SDL2/SDL_image.h>
@@ -15,7 +16,11 @@
 #define HOST_MENU_TABS 5
 #define HOST_MENU_ACTIONS 5
 #define HOST_MENU_SLOTS 10
-#define HOST_MENU_SLOT_COLS 2
+#define HOST_MENU_SAV_THUMB_W 160
+#define HOST_MENU_SAV_THUMB_H 120
+#define HOST_MENU_SAV_THUMB_OFF 31
+#define HOST_MENU_SAV_THUMB_BYTES \
+	(HOST_MENU_SAV_THUMB_W * HOST_MENU_SAV_THUMB_H * 2)
 #define HOST_MENU_FONT "/usr/share/fonts/TTF/DejaVuSansMono.ttf"
 #define HOST_MENU_FONT_SLOTS 8
 #define HOST_MENU_TEXT_CACHE 160
@@ -172,6 +177,11 @@ static SDL_Texture *g_tex_back;
 static SDL_Texture *g_tex_book[HOST_MENU_ACTIONS];
 static SDL_Texture *g_tex_face[HOST_MENU_PARTY_N];
 static int g_face_act[HOST_MENU_PARTY_N];
+static SDL_Texture *g_tex_slot[HOST_MENU_SLOTS];
+static int g_slot_have[HOST_MENU_SLOTS];
+static unsigned g_slot_play[HOST_MENU_SLOTS];
+static time_t g_slot_mtime[HOST_MENU_SLOTS];
+static char g_slot_map[HOST_MENU_SLOTS][40];
 
 struct host_menu_actor {
 	int used;
@@ -251,8 +261,9 @@ static const int g_book_nx[HOST_MENU_ACTIONS] = {
 	302, 417, 531, 645, 759
 };
 #define HOST_MENU_BOOK_NY 76
-#define HOST_MENU_BOOK_NW 104
-#define HOST_MENU_BOOK_NH 142
+#define HOST_MENU_BOOK_NW 90
+#define HOST_MENU_BOOK_NH 66
+#define HOST_MENU_BOOK_PAD 7
 #define HOST_MENU_SPLIT_X 282
 #define HOST_MENU_ITEM_ACT 3
 #define HOST_MENU_ITEM_CAT 7
@@ -422,21 +433,57 @@ int host_menu_take_pending(int *slot)
 	return action;
 }
 
-static int host_menu_slot_used(int slot)
+static int host_menu_slot_path(int slot, char *path, size_t n)
 {
 	const char *dir;
-	char path[PATH_MAX];
-	struct stat st;
 
-	if (slot < 0 || slot >= HOST_MENU_SLOTS)
+	if (!path || n == 0 || slot < 0 || slot >= HOST_MENU_SLOTS)
 		return 0;
 	dir = getenv("SWORD3_DATA_DIR");
 	if (!dir || dir[0] != '/')
 		dir = "/tmp/sword3/documents";
-	if (snprintf(path, sizeof(path), "%s/%d.sav", dir, slot) >=
-	    (int)sizeof(path))
+	return snprintf(path, n, "%s/%d.sav", dir, slot) < (int)n;
+}
+
+static int host_menu_slot_used(int slot)
+{
+	char path[PATH_MAX];
+	struct stat st;
+
+	if (!host_menu_slot_path(slot, path, sizeof(path)))
 		return 0;
 	return stat(path, &st) == 0 && S_ISREG(st.st_mode);
+}
+
+static void host_menu_slot_clear(int slot)
+{
+	if (slot < 0 || slot >= HOST_MENU_SLOTS)
+		return;
+	if (g_tex_slot[slot]) {
+		SDL_DestroyTexture(g_tex_slot[slot]);
+		g_tex_slot[slot] = NULL;
+	}
+	g_slot_have[slot] = 0;
+	g_slot_play[slot] = 0;
+	g_slot_mtime[slot] = 0;
+	g_slot_map[slot][0] = 0;
+}
+
+static void host_menu_fmt_play(char *dst, size_t n, unsigned sec)
+{
+	unsigned h;
+	unsigned m;
+	unsigned s;
+
+	if (!dst || n == 0)
+		return;
+	h = sec / 3600u;
+	m = (sec / 60u) % 60u;
+	s = sec % 60u;
+	if (h > 0)
+		snprintf(dst, n, "游玩 %u:%02u:%02u", h, m, s);
+	else
+		snprintf(dst, n, "游玩 %u:%02u", m, s);
 }
 
 static int host_menu_guest_ok(uintptr_t addr, size_t n)
@@ -1559,15 +1606,13 @@ static void host_menu_enter_slots(int mode)
 
 static void host_menu_move_slot(int dx, int dy)
 {
-	int col;
-	int row;
+	int delta;
 
-	col = g_slot_focus % HOST_MENU_SLOT_COLS;
-	row = g_slot_focus / HOST_MENU_SLOT_COLS;
-	col = (col + dx + HOST_MENU_SLOT_COLS) % HOST_MENU_SLOT_COLS;
-	row = (row + dy + HOST_MENU_SLOTS / HOST_MENU_SLOT_COLS) %
-	      (HOST_MENU_SLOTS / HOST_MENU_SLOT_COLS);
-	g_slot_focus = row * HOST_MENU_SLOT_COLS + col;
+	delta = dy + dx;
+	if (delta == 0)
+		return;
+	g_slot_focus = (g_slot_focus + delta + HOST_MENU_SLOTS) %
+		       HOST_MENU_SLOTS;
 }
 
 static void host_menu_move_tab(int delta)
@@ -2171,6 +2216,110 @@ static SDL_Surface *host_menu_open_surf(const char *name)
 	return NULL;
 }
 
+static Uint32 host_menu_surf_pixel(SDL_Surface *surf, int x, int y)
+{
+	int bpp;
+	Uint8 *p;
+
+	bpp = surf->format->BytesPerPixel;
+	p = (Uint8 *)surf->pixels + y * surf->pitch + x * bpp;
+	switch (bpp) {
+	case 1:
+		return *p;
+	case 2:
+		return *(Uint16 *)p;
+	case 3:
+		if (SDL_BYTEORDER == SDL_BIG_ENDIAN)
+			return ((Uint32)p[0] << 16) | ((Uint32)p[1] << 8) |
+			       p[2];
+		return p[0] | ((Uint32)p[1] << 8) | ((Uint32)p[2] << 16);
+	case 4:
+		return *(Uint32 *)p;
+	default:
+		return 0;
+	}
+}
+
+static int host_menu_row_ink(SDL_Surface *surf, int y, int thresh)
+{
+	int x;
+	int n;
+	Uint8 r;
+	Uint8 g;
+	Uint8 b;
+	Uint8 a;
+
+	n = 0;
+	for (x = 0; x < surf->w; x++) {
+		SDL_GetRGBA(host_menu_surf_pixel(surf, x, y), surf->format, &r,
+			    &g, &b, &a);
+		if ((int)r + (int)g + (int)b >= thresh)
+			n++;
+	}
+	return n;
+}
+
+static SDL_Surface *host_menu_crop_plaque(SDL_Surface *src)
+{
+	SDL_Surface *rgba;
+	SDL_Surface *out;
+	SDL_Rect clip;
+	int y;
+	int first;
+	int last;
+	int half;
+	int lim;
+
+	if (!src || src->w < 8 || src->h < 8)
+		return NULL;
+	rgba = SDL_ConvertSurfaceFormat(src, SDL_PIXELFORMAT_ARGB8888, 0);
+	if (!rgba)
+		return NULL;
+	if (SDL_MUSTLOCK(rgba) && SDL_LockSurface(rgba) != 0) {
+		SDL_FreeSurface(rgba);
+		return NULL;
+	}
+	half = rgba->w / 2;
+	if (half < 8)
+		half = 8;
+	lim = rgba->h < 96 ? rgba->h : 96;
+	first = -1;
+	last = -1;
+	for (y = 0; y < lim; y++) {
+		if (host_menu_row_ink(rgba, y, 160) >= half) {
+			if (first < 0)
+				first = y;
+			last = y;
+		}
+	}
+	if (SDL_MUSTLOCK(rgba))
+		SDL_UnlockSurface(rgba);
+	if (first < 0 || last < first) {
+		SDL_FreeSurface(rgba);
+		return NULL;
+	}
+	clip.x = 0;
+	clip.y = first > 2 ? first - 2 : 0;
+	clip.w = rgba->w;
+	clip.h = last + 4 - clip.y;
+	if (clip.h < 8 || clip.y + clip.h > rgba->h)
+		clip.h = rgba->h - clip.y;
+	if (clip.h >= rgba->h - 4) {
+		SDL_FreeSurface(rgba);
+		return NULL;
+	}
+	out = SDL_CreateRGBSurfaceWithFormat(0, clip.w, clip.h, 32,
+					     SDL_PIXELFORMAT_ARGB8888);
+	if (!out) {
+		SDL_FreeSurface(rgba);
+		return NULL;
+	}
+	SDL_SetSurfaceBlendMode(rgba, SDL_BLENDMODE_NONE);
+	SDL_BlitSurface(rgba, &clip, out, NULL);
+	SDL_FreeSurface(rgba);
+	return out;
+}
+
 static SDL_Texture *host_menu_load_tex(SDL_Renderer *renderer, const char *name)
 {
 	SDL_Surface *surf;
@@ -2181,6 +2330,33 @@ static SDL_Texture *host_menu_load_tex(SDL_Renderer *renderer, const char *name)
 	surf = host_menu_open_surf(name);
 	if (!surf)
 		return NULL;
+	tex = SDL_CreateTextureFromSurface(renderer, surf);
+	SDL_FreeSurface(surf);
+	if (!tex)
+		return NULL;
+	SDL_SetTextureBlendMode(tex, SDL_BLENDMODE_BLEND);
+	return tex;
+}
+
+static SDL_Texture *host_menu_load_tex_plaque(SDL_Renderer *renderer,
+					     const char *name)
+{
+	SDL_Surface *surf;
+	SDL_Surface *crop;
+	SDL_Texture *tex;
+
+	if (!renderer || !name)
+		return NULL;
+	surf = host_menu_open_surf(name);
+	if (!surf)
+		return NULL;
+	crop = host_menu_crop_plaque(surf);
+	if (crop) {
+		fprintf(stderr, "sword3-sdl: %s plaque %dx%d -> %dx%d\n", name,
+			surf->w, surf->h, crop->w, crop->h);
+		SDL_FreeSurface(surf);
+		surf = crop;
+	}
 	tex = SDL_CreateTextureFromSurface(renderer, surf);
 	SDL_FreeSurface(surf);
 	if (!tex)
@@ -2213,6 +2389,8 @@ static void host_menu_assets_flush(void)
 		g_tex_face[i] = NULL;
 		g_face_act[i] = 0;
 	}
+	for (i = 0; i < HOST_MENU_SLOTS; i++)
+		host_menu_slot_clear(i);
 	g_asset_renderer = NULL;
 }
 
@@ -2230,7 +2408,8 @@ static void host_menu_assets_ensure(SDL_Renderer *renderer)
 	g_tex_back = host_menu_load_tex(renderer, "back.png");
 	ok = 0;
 	for (i = 0; i < HOST_MENU_ACTIONS; i++) {
-		g_tex_book[i] = host_menu_load_tex(renderer, g_book_files[i]);
+		g_tex_book[i] = host_menu_load_tex_plaque(renderer,
+							 g_book_files[i]);
 		if (g_tex_book[i])
 			ok = 1;
 	}
@@ -3001,11 +3180,7 @@ static void host_menu_draw_tabs(SDL_Renderer *renderer, int logical_w,
 				      tab.x + tab.w / 2, tab.y + tab.h / 2, pt,
 				      g_tab == i ? g_ink_tab_on : g_ink_hint);
 		if (g_layer == HOST_MENU_LAYER_TABS && g_tab == i) {
-			tab.x -= 3;
-			tab.y -= 3;
-			tab.w += 6;
-			tab.h += 6;
-			host_menu_frame(renderer, tab, 3, g_ink_gold.r,
+			host_menu_frame(renderer, tab, 2, g_ink_gold.r,
 					g_ink_gold.g, g_ink_gold.b, 255);
 		}
 	}
@@ -3493,84 +3668,210 @@ static void host_menu_draw_book(SDL_Renderer *renderer, int logical_w,
 	SDL_Rect icon;
 	int i;
 	int selected;
+	int tw;
+	int th;
 
 	for (i = 0; i < HOST_MENU_ACTIONS; i++) {
-		icon.x = host_sx(g_book_nx[i], logical_w);
+		icon.x = host_sx(g_book_nx[i] + HOST_MENU_BOOK_PAD, logical_w);
 		icon.y = host_sy(HOST_MENU_BOOK_NY, logical_h);
 		icon.w = host_sx(HOST_MENU_BOOK_NW, logical_w);
 		icon.h = host_sy(HOST_MENU_BOOK_NH, logical_h);
 		selected = (g_layer == HOST_MENU_LAYER_INNER &&
 			    g_book_focus == i);
-		if (g_tex_book[i])
+		if (g_tex_book[i] &&
+		    SDL_QueryTexture(g_tex_book[i], NULL, NULL, &tw, &th) ==
+			    0 &&
+		    tw > 0 && th > 0) {
+			icon.h = (int)((long)th * icon.w / tw);
+			if (icon.h < 1)
+				icon.h = 1;
 			host_menu_blit(renderer, g_tex_book[i], icon);
-		else {
+		} else if (!g_tex_book[i]) {
 			host_menu_plaque(renderer, icon, selected);
 			host_menu_text_center(renderer, g_book_text[i],
 					      icon.x + icon.w / 2,
 					      icon.y + icon.h / 2, pt,
 					      g_ink_body);
 		}
-		if (selected) {
-			icon.x -= 3;
-			icon.y -= 3;
-			icon.w += 6;
-			icon.h += 6;
-			host_menu_frame(renderer, icon, 3, g_ink_gold.r,
+		if (selected)
+			host_menu_frame(renderer, icon, 2, g_ink_gold.r,
 					g_ink_gold.g, g_ink_gold.b, 255);
+	}
+}
+
+static void host_menu_load_slot(SDL_Renderer *renderer, int slot)
+{
+	char path[PATH_MAX];
+	unsigned char hdr[HOST_MENU_SAV_THUMB_OFF];
+	uint16_t *pix;
+	uint32_t nmap;
+	struct stat st;
+	FILE *fp;
+	SDL_Surface *surf;
+	size_t nread;
+
+	if (slot < 0 || slot >= HOST_MENU_SLOTS)
+		return;
+	host_menu_slot_clear(slot);
+	if (!host_menu_slot_path(slot, path, sizeof(path)))
+		return;
+	if (stat(path, &st) != 0 || !S_ISREG(st.st_mode))
+		return;
+	g_slot_mtime[slot] = st.st_mtime;
+	fp = fopen(path, "rb");
+	if (!fp)
+		return;
+	nread = fread(hdr, 1, sizeof(hdr), fp);
+	if (nread != sizeof(hdr) || memcmp(hdr, "u9SWD3", 6) != 0) {
+		fclose(fp);
+		return;
+	}
+	pix = (uint16_t *)malloc(HOST_MENU_SAV_THUMB_BYTES);
+	if (!pix) {
+		fclose(fp);
+		return;
+	}
+	nread = fread(pix, 1, HOST_MENU_SAV_THUMB_BYTES, fp);
+	if (nread == HOST_MENU_SAV_THUMB_BYTES && renderer) {
+		surf = host_menu_expand_rgb555(pix, HOST_MENU_SAV_THUMB_W,
+					       HOST_MENU_SAV_THUMB_H,
+					       HOST_MENU_SAV_THUMB_W);
+		g_tex_slot[slot] = host_menu_tex_from_surf(renderer, surf);
+	}
+	free(pix);
+	nmap = 0;
+	if (fread(&nmap, 4, 1, fp) == 1 && nmap > 1 && nmap < sizeof(g_slot_map[0])) {
+		if (fread(g_slot_map[slot], 1, nmap, fp) == nmap)
+			g_slot_map[slot][nmap - 1] = 0;
+		else
+			g_slot_map[slot][0] = 0;
+	}
+	if (fread(&g_slot_play[slot], 4, 1, fp) != 1)
+		g_slot_play[slot] = 0;
+	fclose(fp);
+	g_slot_have[slot] = 1;
+}
+
+static void host_menu_sync_slots(SDL_Renderer *renderer)
+{
+	char path[PATH_MAX];
+	struct stat st;
+	int i;
+
+	for (i = 0; i < HOST_MENU_SLOTS; i++) {
+		if (!host_menu_slot_path(i, path, sizeof(path)) ||
+		    stat(path, &st) != 0 || !S_ISREG(st.st_mode)) {
+			host_menu_slot_clear(i);
+			continue;
 		}
+		if (g_slot_mtime[i] == st.st_mtime && g_slot_have[i] &&
+		    (!renderer || g_tex_slot[i]))
+			continue;
+		host_menu_load_slot(renderer, i);
 	}
 }
 
 static void host_menu_draw_slots(SDL_Renderer *renderer, SDL_Rect well,
-				int logical_h, int pt, int pt_small)
+				int logical_w, int logical_h, int pt,
+				int pt_small)
 {
 	SDL_Rect cell;
+	SDL_Rect thumb;
+	SDL_Rect list;
 	int i;
-	int rows = HOST_MENU_SLOTS / HOST_MENU_SLOT_COLS;
 	int gap;
-	int cell_w;
-	int cell_h;
-	int col;
-	int row;
-	int used;
+	int row_h;
+	int vis;
+	int start;
 	int selected;
-	char line[32];
+	int used;
+	int tx;
+	char line[48];
+	char play[32];
 
-	gap = well.w / 40;
-	if (gap < 6)
-		gap = 6;
+	host_menu_sync_slots(renderer);
+	gap = host_sy(6, logical_h);
+	if (gap < 4)
+		gap = 4;
 	host_menu_fill(renderer, well, 8, 12, 10, 230);
 	host_menu_frame(renderer, well, 2, 212, 176, 88, 255);
 	host_menu_text_center(renderer,
 			      g_slot_mode ? "选择读档" : "选择存档",
 			      well.x + well.w / 2,
-			      well.y + logical_h * 3 / 100, pt, g_ink_title);
-	cell_w = (well.w - gap * 3) / HOST_MENU_SLOT_COLS;
-	cell_h = (well.h - logical_h * 8 / 100 - gap * (rows + 1)) / rows;
-	for (i = 0; i < HOST_MENU_SLOTS; i++) {
-		col = i % HOST_MENU_SLOT_COLS;
-		row = i / HOST_MENU_SLOT_COLS;
-		cell.x = well.x + gap + col * (cell_w + gap);
-		cell.y = well.y + logical_h * 6 / 100 + gap +
-			 row * (cell_h + gap);
-		cell.w = cell_w;
-		cell.h = cell_h;
-		selected = (g_slot_focus == i);
-		used = host_menu_slot_used(i);
+			      well.y + host_sy(8, logical_h), pt, g_ink_title);
+	list.x = well.x + host_sx(8, logical_w);
+	list.y = well.y + host_sy(36, logical_h);
+	list.w = well.w - host_sx(16, logical_w);
+	list.h = well.y + well.h - list.y - host_sy(8, logical_h);
+	row_h = host_sy(86, logical_h);
+	if (row_h < 56)
+		row_h = 56;
+	vis = list.h / row_h;
+	if (vis < 1)
+		vis = 1;
+	if (vis > HOST_MENU_SLOTS)
+		vis = HOST_MENU_SLOTS;
+	start = g_slot_focus - vis / 2;
+	if (start < 0)
+		start = 0;
+	if (start + vis > HOST_MENU_SLOTS)
+		start = HOST_MENU_SLOTS - vis;
+	host_menu_scroll(renderer, list, start, vis, HOST_MENU_SLOTS);
+	for (i = 0; i < vis; i++) {
+		int slot = start + i;
+
+		cell.x = list.x;
+		cell.y = list.y + i * row_h;
+		cell.w = list.w - host_sx(16, logical_w);
+		cell.h = row_h - gap;
+		selected = (g_slot_focus == slot);
+		used = g_slot_have[slot] || host_menu_slot_used(slot);
 		if (selected)
 			host_menu_fill(renderer, cell, 88, 68, 28, 250);
 		else
 			host_menu_fill(renderer, cell, 28, 32, 26, 230);
-		host_menu_frame(renderer, cell, selected ? 3 : 1, 212, 176, 88,
+		host_menu_frame(renderer, cell, selected ? 2 : 1, 212, 176, 88,
 				selected ? 255 : 150);
-		snprintf(line, sizeof(line), "档位 %d", i + 1);
-		host_menu_text_left(renderer, line, cell.x + cell.w / 12,
-				    cell.y + cell.h / 2 - pt_small / 2,
-				    pt_small, g_ink_body);
-		host_menu_text_center(renderer, used ? "已存" : "空",
-				      cell.x + cell.w * 3 / 4,
-				      cell.y + cell.h / 2, pt_small,
-				      g_ink_hint);
+		thumb.x = cell.x + host_sx(6, logical_w);
+		thumb.y = cell.y + host_sy(6, logical_h);
+		thumb.h = cell.h - host_sy(12, logical_h);
+		thumb.w = thumb.h * HOST_MENU_SAV_THUMB_W /
+			  HOST_MENU_SAV_THUMB_H;
+		if (thumb.w > host_sx(120, logical_w))
+			thumb.w = host_sx(120, logical_w);
+		if (g_tex_slot[slot]) {
+			host_menu_fill(renderer, thumb, 16, 12, 8, 255);
+			host_menu_blit_contain(renderer, g_tex_slot[slot],
+					       thumb);
+			host_menu_frame(renderer, thumb, 1, 196, 164, 72, 200);
+		} else {
+			host_menu_fill(renderer, thumb, 24, 18, 12, 255);
+			host_menu_frame(renderer, thumb, 1, 80, 64, 40, 180);
+			host_menu_text_center(renderer, used ? "—" : "空",
+					      thumb.x + thumb.w / 2,
+					      thumb.y + thumb.h / 2, pt_small,
+					      g_ink_hint);
+		}
+		tx = thumb.x + thumb.w + host_sx(10, logical_w);
+		snprintf(line, sizeof(line), "档位 %d", slot + 1);
+		host_menu_text_left(renderer, line, tx,
+				    cell.y + host_sy(8, logical_h), pt_small,
+				    g_ink_body);
+		if (g_slot_have[slot] && g_slot_map[slot][0])
+			host_menu_text_left(renderer, g_slot_map[slot], tx,
+					    cell.y + host_sy(30, logical_h),
+					    pt_small, g_ink_gold);
+		else
+			host_menu_text_left(renderer, used ? "已存" : "空档", tx,
+					    cell.y + host_sy(30, logical_h),
+					    pt_small, g_ink_hint);
+		if (g_slot_have[slot]) {
+			host_menu_fmt_play(play, sizeof(play),
+					   g_slot_play[slot]);
+			host_menu_text_left(renderer, play, tx,
+					    cell.y + host_sy(52, logical_h),
+					    pt_small, g_ink_hint);
+		}
 	}
 }
 
@@ -3979,7 +4280,8 @@ void host_menu_draw(SDL_Renderer *renderer, int logical_w, int logical_h)
 	well.w = logical_w - well.x - host_sx(16, logical_w);
 	well.h = logical_h - well.y - host_sy(16, logical_h);
 	if (g_layer == HOST_MENU_LAYER_SLOTS)
-		host_menu_draw_slots(renderer, well, logical_h, pt, pt_small);
+		host_menu_draw_slots(renderer, well, logical_w, logical_h, pt,
+				     pt_small);
 	else if (g_layer == HOST_MENU_LAYER_BESTIARY)
 		host_menu_draw_bestiary(renderer, well, logical_w, logical_h,
 					pt, pt_small);
