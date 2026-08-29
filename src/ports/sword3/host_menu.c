@@ -61,6 +61,7 @@
 #define HOST_MENU_OFF_COUNT 0x28
 #define HOST_MENU_OFF_COUNT_NEW 0x30
 #define HOST_MENU_OFF_INAME 0x38
+#define HOST_MENU_OFF_IT 0x58
 #define HOST_MENU_OFF_HELP 0x110
 #define HOST_MENU_OFF_INFO 0x118
 
@@ -84,6 +85,8 @@ static int g_tab;
 static int g_layer;
 static int g_book_focus;
 static int g_item_focus;
+static int g_item_cat;
+static int g_item_sel;
 static int g_equip_focus;
 static int g_stub;
 static int g_slot_mode;
@@ -144,6 +147,7 @@ struct host_menu_item {
 	int count;
 	int count_new;
 	int temp;
+	int flags;
 	char name[32];
 	char help[48];
 	char info[48];
@@ -201,7 +205,7 @@ static const char *g_book_text[HOST_MENU_ACTIONS] = {
 };
 
 static const char *g_item_act[] = { "使用", "整理", "丢弃" };
-static const char *g_item_cat[] = {
+static const char *g_item_cat_text[] = {
 	"新品", "恢复", "辅助", "法宝", "装备", "活物", "其他"
 };
 static const char *g_equip_slot[] = {
@@ -217,6 +221,11 @@ static const char *g_combat[] = { "攻击", "防御", "敏捷" };
 static const int g_item_act_nx[HOST_MENU_ITEM_ACT] = { 320, 464, 606 };
 static const int g_item_cat_nx[HOST_MENU_ITEM_CAT] = {
 	320, 384, 447, 510, 573, 636, 695
+};
+/* Original PropResort masks at 0x1002a50c0. Tab 0 is Count_New. */
+static const uint32_t g_item_cat_mask[HOST_MENU_ITEM_CAT] = {
+	0x00008000u, 0x00001003u, 0x0000001cu, 0x08000040u,
+	0x00000700u, 0x00000800u, 0x00000020u
 };
 
 static const char *g_stub_text[HOST_MENU_ACTIONS] = {
@@ -264,6 +273,8 @@ void host_menu_open(void)
 	g_layer = HOST_MENU_LAYER_TABS;
 	g_book_focus = 0;
 	g_item_focus = 0;
+	g_item_cat = 0;
+	g_item_sel = 0;
 	g_equip_focus = 0;
 	g_stub = -1;
 	g_slot_mode = 0;
@@ -544,6 +555,7 @@ static int host_menu_load_item(struct host_menu_item *it, uintptr_t node)
 	it->temp = temp;
 	it->count = host_menu_mem_i32(node + HOST_MENU_OFF_COUNT);
 	it->count_new = host_menu_mem_i32(node + HOST_MENU_OFF_COUNT_NEW);
+	it->flags = host_menu_mem_i32(node + HOST_MENU_OFF_IT);
 	if (it->count < 0)
 		it->count = 0;
 	if (it->count_new < 0)
@@ -641,10 +653,66 @@ static void host_menu_refresh_inv(void)
 	if (!g_inv_logged && (g_bag_n || g_skill_n || g_equip[0].used)) {
 		g_inv_logged = 1;
 		fprintf(stderr,
-			"sword3-sdl: inv bag=%d skill=%d equip0=%s\n", g_bag_n,
-			g_skill_n,
-			g_equip[0].name[0] ? g_equip[0].name : "-");
+			"sword3-sdl: inv bag=%d skill=%d equip0=%s flags0=%08x\n",
+			g_bag_n, g_skill_n,
+			g_equip[0].name[0] ? g_equip[0].name : "-",
+			(unsigned)g_bag[0].flags);
 	}
+}
+
+static int host_menu_item_in_cat(const struct host_menu_item *it, int cat)
+{
+	uint32_t flags;
+	uint32_t mask;
+	uint32_t special;
+
+	if (!it || !it->used)
+		return 0;
+	if (cat == 0)
+		return it->count_new > 0;
+	if (cat < 0 || cat >= HOST_MENU_ITEM_CAT || it->count <= 0)
+		return 0;
+	flags = (uint32_t)it->flags;
+	mask = g_item_cat_mask[cat];
+	if (cat == 3 || cat == 6) {
+		if (flags & mask)
+			return 1;
+		return cat == 6 && flags == 0;
+	}
+	if ((flags & mask) == 0)
+		return 0;
+	special = g_item_cat_mask[3] | g_item_cat_mask[6];
+	return (flags & special) == 0;
+}
+
+static int host_menu_item_view(int *out, int max)
+{
+	int i;
+	int n = 0;
+
+	if (!out || max <= 0)
+		return 0;
+	for (i = 0; i < g_bag_n && n < max; i++) {
+		if (host_menu_item_in_cat(&g_bag[i], g_item_cat))
+			out[n++] = i;
+	}
+	return n;
+}
+
+static void host_menu_clamp_item_sel(void)
+{
+	int view[HOST_MENU_BAG_N];
+	int n;
+
+	if (g_item_cat < 0 || g_item_cat >= HOST_MENU_ITEM_CAT)
+		g_item_cat = 0;
+	n = host_menu_item_view(view, HOST_MENU_BAG_N);
+	if (n <= 0)
+		g_item_sel = 0;
+	else if (g_item_sel >= n)
+		g_item_sel = n - 1;
+	else if (g_item_sel < 0)
+		g_item_sel = 0;
 }
 
 static void host_menu_enter_inner(void)
@@ -702,6 +770,24 @@ static void host_menu_move_item(int delta)
 		       HOST_MENU_ITEM_ACT;
 }
 
+static void host_menu_move_item_cat(int delta)
+{
+	g_item_cat = (g_item_cat + delta + HOST_MENU_ITEM_CAT) %
+		     HOST_MENU_ITEM_CAT;
+	g_item_sel = 0;
+}
+
+static void host_menu_move_item_sel(int delta)
+{
+	int view[HOST_MENU_BAG_N];
+	int n;
+
+	n = host_menu_item_view(view, HOST_MENU_BAG_N);
+	if (n <= 0)
+		return;
+	g_item_sel = (g_item_sel + delta % n + n) % n;
+}
+
 static void host_menu_move_equip(int delta)
 {
 	g_equip_focus = (g_equip_focus + delta + HOST_MENU_EQUIP_N) %
@@ -755,7 +841,11 @@ static void host_menu_dir(int index, int down)
 	}
 	if (g_tab == HOST_MENU_TAB_ITEM) {
 		if (index == 1 || index == 3)
-			host_menu_move_item(index == 1 ? 1 : -1);
+			host_menu_move_item_cat(index == 1 ? 1 : -1);
+		else if (index == 2)
+			host_menu_move_item_sel(1);
+		else if (index == 0)
+			host_menu_move_item_sel(-1);
 		return;
 	}
 	if (g_tab == HOST_MENU_TAB_EQUIP) {
@@ -854,13 +944,23 @@ int host_menu_button(int button, int down)
 		return 1;
 	case SDL_CONTROLLER_BUTTON_LEFTSHOULDER:
 		if (down && g_layer != HOST_MENU_LAYER_SLOTS &&
-		    g_layer != HOST_MENU_LAYER_STUB)
-			host_menu_move_tab(-1);
+		    g_layer != HOST_MENU_LAYER_STUB) {
+			if (g_layer == HOST_MENU_LAYER_INNER &&
+			    g_tab == HOST_MENU_TAB_ITEM)
+				host_menu_move_item(-1);
+			else
+				host_menu_move_tab(-1);
+		}
 		return 1;
 	case SDL_CONTROLLER_BUTTON_RIGHTSHOULDER:
 		if (down && g_layer != HOST_MENU_LAYER_SLOTS &&
-		    g_layer != HOST_MENU_LAYER_STUB)
-			host_menu_move_tab(1);
+		    g_layer != HOST_MENU_LAYER_STUB) {
+			if (g_layer == HOST_MENU_LAYER_INNER &&
+			    g_tab == HOST_MENU_TAB_ITEM)
+				host_menu_move_item(1);
+			else
+				host_menu_move_tab(1);
+		}
 		return 1;
 	case SDL_CONTROLLER_BUTTON_DPAD_UP:
 		index = 0;
@@ -1344,11 +1444,14 @@ static void host_menu_bar(SDL_Renderer *renderer, SDL_Rect track, Uint8 r,
 	host_menu_fill(renderer, fill, r, g, b, 230);
 }
 
-static void host_menu_scroll(SDL_Renderer *renderer, SDL_Rect well)
+static void host_menu_scroll(SDL_Renderer *renderer, SDL_Rect well, int start,
+			    int vis, int total)
 {
 	SDL_Rect rail;
 	SDL_Rect thumb;
 	SDL_Rect cap;
+	int span;
+	int travel;
 
 	if (well.h < 24 || well.w < 20)
 		return;
@@ -1363,13 +1466,26 @@ static void host_menu_scroll(SDL_Renderer *renderer, SDL_Rect well)
 	host_menu_fill(renderer, cap, 212, 176, 88, 255);
 	cap.y = rail.y + rail.h - 6;
 	host_menu_fill(renderer, cap, 212, 176, 88, 255);
+	span = rail.h - 12;
+	if (span < 12)
+		span = 12;
 	thumb = rail;
 	thumb.x += 1;
 	thumb.w -= 2;
-	thumb.h = rail.h / 5;
-	if (thumb.h < 12)
-		thumb.h = 12;
-	thumb.y += 6;
+	if (total > vis && vis > 0) {
+		thumb.h = span * vis / total;
+		if (thumb.h < 12)
+			thumb.h = 12;
+		if (thumb.h > span)
+			thumb.h = span;
+		travel = span - thumb.h;
+		thumb.y = rail.y + 6 + travel * start / (total - vis);
+	} else {
+		thumb.h = span / 5;
+		if (thumb.h < 12)
+			thumb.h = 12;
+		thumb.y = rail.y + 6;
+	}
 	host_menu_fill(renderer, thumb, 196, 164, 72, 255);
 }
 
@@ -1588,13 +1704,23 @@ static void host_menu_draw_items(SDL_Renderer *renderer, int logical_w,
 {
 	SDL_Rect row;
 	SDL_Rect well;
+	SDL_Rect hit;
+	SDL_Rect desc;
 	int i;
 	int on;
 	int rh;
 	int rows;
+	int view_n;
+	int start;
+	int idx;
+	int count;
+	int view[HOST_MENU_BAG_N];
 	char line[48];
+	const struct host_menu_item *it;
+	const struct host_menu_item *sel;
 
-	(void)pt;
+	host_menu_clamp_item_sel();
+	view_n = host_menu_item_view(view, HOST_MENU_BAG_N);
 	for (i = 0; i < HOST_MENU_ITEM_ACT; i++) {
 		row.x = host_sx(g_item_act_nx[i], logical_w);
 		row.y = host_sy(HOST_MENU_ITEM_ACT_NY, logical_h);
@@ -1619,18 +1745,43 @@ static void host_menu_draw_items(SDL_Renderer *renderer, int logical_w,
 		row.y = host_sy(HOST_MENU_ITEM_CAT_NY, logical_h);
 		row.w = host_sx(HOST_MENU_ITEM_CAT_NW, logical_w);
 		row.h = host_sy(HOST_MENU_ITEM_CAT_NH, logical_h);
-		host_menu_plaque(renderer, row, 0);
-		host_menu_text_center(renderer, g_item_cat[i],
+		on = (g_layer == HOST_MENU_LAYER_INNER && g_item_cat == i);
+		host_menu_plaque(renderer, row, on);
+		host_menu_text_center(renderer, g_item_cat_text[i],
 				      row.x + row.w / 2, row.y + row.h / 2,
-				      pt_small, g_ink_body);
+				      pt_small, on ? g_ink_tab_on : g_ink_body);
+		if (on) {
+			row.x -= 3;
+			row.y -= 3;
+			row.w += 6;
+			row.h += 6;
+			host_menu_frame(renderer, row, 3, g_ink_gold.r,
+					g_ink_gold.g, g_ink_gold.b, 255);
+		}
 	}
 	well.x = host_sx(318, logical_w);
 	well.y = host_sy(HOST_MENU_ITEM_WELL_NY, logical_h);
 	well.w = host_sx(548, logical_w);
 	well.h = logical_h - well.y - host_sy(16, logical_h);
 	host_menu_well(renderer, well);
-	host_menu_scroll(renderer, well);
-	if (g_bag_n <= 0) {
+	sel = NULL;
+	if (view_n > 0 && g_item_sel >= 0 && g_item_sel < view_n)
+		sel = &g_bag[view[g_item_sel]];
+	desc = well;
+	if (sel && (sel->help[0] || sel->info[0]) &&
+	    well.h > host_sy(56, logical_h)) {
+		desc.h = host_sy(40, logical_h);
+		desc.y = well.y + well.h - desc.h;
+		well.h -= desc.h;
+		host_menu_fill(renderer, desc, 16, 12, 8, 230);
+		host_menu_text_left(renderer,
+				    sel->help[0] ? sel->help : sel->info,
+				    desc.x + host_sx(12, logical_w),
+				    desc.y + desc.h / 2 - pt_small / 2,
+				    pt_small, g_ink_hint);
+	}
+	if (view_n <= 0) {
+		host_menu_scroll(renderer, well, 0, 1, 1);
 		host_menu_text_center(renderer, "没有物品", well.x + well.w / 2,
 				      well.y + well.h / 2, pt, g_ink_hint);
 		return;
@@ -1641,22 +1792,37 @@ static void host_menu_draw_items(SDL_Renderer *renderer, int logical_w,
 	rows = (well.h - host_sy(12, logical_h)) / rh;
 	if (rows < 1)
 		rows = 1;
-	if (rows > g_bag_n)
-		rows = g_bag_n;
+	if (rows > view_n)
+		rows = view_n;
+	start = g_item_sel - rows / 2;
+	if (start < 0)
+		start = 0;
+	if (start + rows > view_n)
+		start = view_n - rows;
+	host_menu_scroll(renderer, well, start, rows, view_n);
 	for (i = 0; i < rows; i++) {
-		if (!g_bag[i].used)
-			continue;
-		if (g_bag[i].count + g_bag[i].count_new > 1)
+		idx = view[start + i];
+		it = &g_bag[idx];
+		count = (g_item_cat == 0) ? it->count_new : it->count;
+		if (count > 1)
 			snprintf(line, sizeof(line), "%s  x%d",
-				 g_bag[i].name[0] ? g_bag[i].name : "—",
-				 g_bag[i].count + g_bag[i].count_new);
+				 it->name[0] ? it->name : "—", count);
 		else
 			snprintf(line, sizeof(line), "%s",
-				 g_bag[i].name[0] ? g_bag[i].name : "—");
+				 it->name[0] ? it->name : "—");
+		hit.x = well.x + host_sx(8, logical_w);
+		hit.y = well.y + host_sy(6, logical_h) + i * rh;
+		hit.w = well.w - host_sx(24, logical_w);
+		hit.h = rh - 2;
+		on = (g_layer == HOST_MENU_LAYER_INNER &&
+		      g_item_sel == start + i);
+		if (on)
+			host_menu_frame(renderer, hit, 2, g_ink_gold.r,
+					g_ink_gold.g, g_ink_gold.b, 255);
 		host_menu_text_left(renderer, line,
-				    well.x + host_sx(16, logical_w),
-				    well.y + host_sy(8, logical_h) + i * rh,
-				    pt_small, g_ink_body);
+				    hit.x + host_sx(8, logical_w),
+				    hit.y + hit.h / 2 - pt_small / 2, pt_small,
+				    on ? g_ink_gold : g_ink_body);
 	}
 }
 
