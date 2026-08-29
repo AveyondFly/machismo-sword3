@@ -46,7 +46,15 @@
 #define HOST_MENU_OFF_LEVEL 0x38
 #define HOST_MENU_OFF_ATTR 0x3a
 #define HOST_MENU_OFF_NAME 0x58
+#define HOST_MENU_OFF_ACT 0x64
 #define HOST_MENU_RESIST_N 9
+#define HOST_MENU_TSW_ROOT 0x100319e58ull
+#define HOST_MENU_TSW_GET 0x100204a64ull
+#define HOST_MENU_TSW_TSWP 0x1001a7144ull
+#define HOST_MENU_TSW_HGA3 0x1001a730cull
+#define HOST_MENU_TSW_FREE 0x10023fb50ull
+#define HOST_MENU_TSW_KEY 0x100319dd8ull
+#define HOST_MENU_TSW_MAGIC 0x100319dc0ull
 #define HOST_MENU_ITEM_REPO 0x1002ab4d8ull
 #define HOST_MENU_EQUIP_REPO 0x1002ab628ull
 #define HOST_MENU_SKILL_REPO 0x1002ab608ull
@@ -102,6 +110,8 @@
 #define HOST_MENU_STR_ADDHP 0x100272b70ull
 #define HOST_MENU_STR_ADDMP 0x100272b76ull
 #define HOST_MENU_STR_ADDSP 0x100272b7cull
+#define HOST_MENU_STR_CHAR 0x100273e0aull
+#define HOST_MENU_STR_ACT 0x100272a1aull
 
 enum host_menu_tab {
 	HOST_MENU_TAB_ITEM = 0,
@@ -160,6 +170,8 @@ static SDL_Texture *g_tex_paper;
 static SDL_Texture *g_tex_dark;
 static SDL_Texture *g_tex_back;
 static SDL_Texture *g_tex_book[HOST_MENU_ACTIONS];
+static SDL_Texture *g_tex_face[HOST_MENU_PARTY_N];
+static int g_face_act[HOST_MENU_PARTY_N];
 
 struct host_menu_actor {
 	int used;
@@ -182,6 +194,7 @@ struct host_menu_actor {
 	int sk_exp;
 	int sk_next;
 	int attr[HOST_MENU_RESIST_N];
+	int act;
 	char name[32];
 };
 
@@ -630,16 +643,29 @@ static void host_menu_refresh_party(void)
 		}
 		name = host_menu_guest_ptr(rec + HOST_MENU_OFF_NAME);
 		host_menu_copy_name(a->name, sizeof(a->name), name);
+		a->act = host_menu_guest_i32(rec + HOST_MENU_OFF_ACT);
+		if (a->act <= 0 && host_menu_lua_ready()) {
+			a->act = ((int (*)(void *, const void *, int,
+					   const void *))(
+					  uintptr_t)HOST_MENU_LUA_INT)(
+				(void *)(uintptr_t)HOST_MENU_LUA_BIND,
+				(const void *)(uintptr_t)HOST_MENU_STR_CHAR,
+				i + 1,
+				(const void *)(uintptr_t)HOST_MENU_STR_ACT);
+			if (a->act > 0)
+				host_menu_mem_set_i32(rec + HOST_MENU_OFF_ACT,
+						      a->act);
+		}
 		a->used = a->hp_max > 0 || a->level > 0 || a->name[0];
 	}
 	if (!g_party_logged && g_party[0].used) {
 		g_party_logged = 1;
 		fprintf(stderr,
-			"sword3-sdl: party0 name=%s lv=%d/%d hp=%d/%d exp=%d/%d sk=%d/%d\n",
+			"sword3-sdl: party0 name=%s lv=%d/%d hp=%d/%d exp=%d/%d sk=%d/%d act=%d\n",
 			g_party[0].name[0] ? g_party[0].name : "-",
 			g_party[0].level, g_party[0].level_max, g_party[0].hp,
 			g_party[0].hp_max, g_party[0].exp, g_party[0].exp_need,
-			g_party[0].sk_exp, g_party[0].sk_next);
+			g_party[0].sk_exp, g_party[0].sk_next, g_party[0].act);
 	}
 }
 
@@ -2181,6 +2207,12 @@ static void host_menu_assets_flush(void)
 			SDL_DestroyTexture(g_tex_book[i]);
 		g_tex_book[i] = NULL;
 	}
+	for (i = 0; i < HOST_MENU_PARTY_N; i++) {
+		if (g_tex_face[i])
+			SDL_DestroyTexture(g_tex_face[i]);
+		g_tex_face[i] = NULL;
+		g_face_act[i] = 0;
+	}
 	g_asset_renderer = NULL;
 }
 
@@ -2212,6 +2244,484 @@ static void host_menu_blit(SDL_Renderer *renderer, SDL_Texture *tex,
 	if (!tex)
 		return;
 	SDL_RenderCopy(renderer, tex, NULL, &dst);
+}
+
+static void host_menu_blit_contain(SDL_Renderer *renderer, SDL_Texture *tex,
+				  SDL_Rect box)
+{
+	int tw;
+	int th;
+	SDL_Rect dst;
+
+	if (!tex || box.w <= 0 || box.h <= 0)
+		return;
+	if (SDL_QueryTexture(tex, NULL, NULL, &tw, &th) != 0 || tw <= 0 ||
+	    th <= 0)
+		return;
+	if ((long)tw * box.h < (long)th * box.w) {
+		dst.h = box.h;
+		dst.w = (int)((long)tw * box.h / th);
+	} else {
+		dst.w = box.w;
+		dst.h = (int)((long)th * box.w / tw);
+	}
+	dst.x = box.x + (box.w - dst.w) / 2;
+	dst.y = box.y + (box.h - dst.h) / 2;
+	SDL_RenderCopy(renderer, tex, NULL, &dst);
+}
+
+static uintptr_t host_menu_tsw_obj(int act)
+{
+	uintptr_t table;
+	uintptr_t buckets;
+	uintptr_t node;
+	int n;
+
+	if (act <= 0)
+		return 0;
+	if (!host_menu_guest_ok(HOST_MENU_TSW_ROOT + 0x400, 8))
+		return 0;
+	table = host_menu_guest_ptr(HOST_MENU_TSW_ROOT + 0x400);
+	if (!table || !host_menu_mem_ok(table + 8, 8))
+		return 0;
+	buckets = host_menu_mem_ptr(table + 8);
+	if (!buckets ||
+	    !host_menu_mem_ok(buckets + (uintptr_t)(act & 15) * 8, 8))
+		return 0;
+	node = host_menu_mem_ptr(buckets + (uintptr_t)(act & 15) * 8);
+	for (n = 0; node && n < 128; n++) {
+		if (!host_menu_mem_ok(node, 0x88))
+			break;
+		node = host_menu_mem_ptr(node + 0x80);
+		if (!node)
+			break;
+		if (!host_menu_mem_ok(node, 0x88))
+			break;
+		if (host_menu_mem_i32(node + 0x28) == act)
+			return node;
+	}
+	return 0;
+}
+
+static SDL_Surface *host_menu_surface_from_png(const void *data, int size)
+{
+	const unsigned char *p;
+	SDL_RWops *rw;
+
+	if (!data || size < 16)
+		return NULL;
+	p = (const unsigned char *)data;
+	if (p[1] != 'P' || p[2] != 'N' || p[3] != 'G')
+		return NULL;
+	rw = SDL_RWFromConstMem(data, size);
+	if (!rw)
+		return NULL;
+	return IMG_Load_RW(rw, 1);
+}
+
+static SDL_Surface *host_menu_expand_index(const uint8_t *src, int w, int h,
+					   int pitch, const uint16_t *pal)
+{
+	SDL_Surface *copy;
+	int x;
+	int y;
+	uint16_t key;
+	uint32_t *dst;
+
+	if (!src || !pal || w < 1 || h < 1 || pitch < w)
+		return NULL;
+	copy = SDL_CreateRGBSurfaceWithFormat(0, w, h, 32,
+					      SDL_PIXELFORMAT_ARGB8888);
+	if (!copy)
+		return NULL;
+	key = 0;
+	if (host_menu_guest_ok(HOST_MENU_TSW_KEY, 2))
+		key = (uint16_t)host_menu_mem_u16(HOST_MENU_TSW_KEY);
+	if (SDL_LockSurface(copy) != 0) {
+		SDL_FreeSurface(copy);
+		return NULL;
+	}
+	for (y = 0; y < h; y++) {
+		dst = (uint32_t *)((uint8_t *)copy->pixels + y * copy->pitch);
+		for (x = 0; x < w; x++) {
+			uint16_t c = pal[src[y * pitch + x]];
+			uint8_t r = (uint8_t)(((c >> 10) & 31) * 255 / 31);
+			uint8_t g = (uint8_t)(((c >> 5) & 31) * 255 / 31);
+			uint8_t b = (uint8_t)((c & 31) * 255 / 31);
+			uint8_t a = (c == key) ? 0 : 255;
+
+			dst[x] = SDL_MapRGBA(copy->format, r, g, b, a);
+		}
+	}
+	SDL_UnlockSurface(copy);
+	SDL_SetSurfaceBlendMode(copy, SDL_BLENDMODE_BLEND);
+	return copy;
+}
+
+static SDL_Surface *host_menu_expand_rgb555(const uint16_t *src, int w, int h,
+					    int pitch)
+{
+	SDL_Surface *copy;
+	int x;
+	int y;
+	uint16_t key;
+	uint32_t *dst;
+
+	if (!src || w < 1 || h < 1 || pitch < w)
+		return NULL;
+	copy = SDL_CreateRGBSurfaceWithFormat(0, w, h, 32,
+					      SDL_PIXELFORMAT_ARGB8888);
+	if (!copy)
+		return NULL;
+	key = 0;
+	if (host_menu_guest_ok(HOST_MENU_TSW_KEY, 2))
+		key = (uint16_t)host_menu_mem_u16(HOST_MENU_TSW_KEY);
+	if (SDL_LockSurface(copy) != 0) {
+		SDL_FreeSurface(copy);
+		return NULL;
+	}
+	for (y = 0; y < h; y++) {
+		dst = (uint32_t *)((uint8_t *)copy->pixels + y * copy->pitch);
+		for (x = 0; x < w; x++) {
+			uint16_t c = src[y * pitch + x];
+			uint8_t r = (uint8_t)(((c >> 10) & 31) * 255 / 31);
+			uint8_t g = (uint8_t)(((c >> 5) & 31) * 255 / 31);
+			uint8_t b = (uint8_t)((c & 31) * 255 / 31);
+			uint8_t a = (c == key) ? 0 : 255;
+
+			dst[x] = SDL_MapRGBA(copy->format, r, g, b, a);
+		}
+	}
+	SDL_UnlockSurface(copy);
+	SDL_SetSurfaceBlendMode(copy, SDL_BLENDMODE_BLEND);
+	return copy;
+}
+
+static uint16_t host_menu_u16le(const uint8_t *p)
+{
+	return (uint16_t)p[0] | ((uint16_t)p[1] << 8);
+}
+
+static uint32_t host_menu_map555(const SDL_PixelFormat *fmt, uint16_t c,
+				 uint16_t key)
+{
+	uint8_t r = (uint8_t)(((c >> 10) & 31) * 255 / 31);
+	uint8_t g = (uint8_t)(((c >> 5) & 31) * 255 / 31);
+	uint8_t b = (uint8_t)((c & 31) * 255 / 31);
+	uint8_t a = (c == key) ? 0 : 255;
+
+	return SDL_MapRGBA(fmt, r, g, b, a);
+}
+
+static int host_menu_rle_rows(SDL_Surface *copy, int w, int h, int bpp,
+			      const uint16_t *pal, uint16_t key,
+			      const uint8_t *src, const uint8_t *end)
+{
+	int y;
+	int painted;
+	const uint8_t *p;
+
+	painted = 0;
+	p = src;
+	for (y = 0; y < h && p + 2 <= end; y++) {
+		uint16_t row;
+		uint16_t row_bytes;
+		const uint8_t *row_end;
+		uint32_t *dst;
+		int x;
+
+		row = host_menu_u16le(p);
+		row_bytes = (uint16_t)(row & 0x7fff);
+		if (row_bytes == 0)
+			break;
+		if (row_bytes < 4 || p + row_bytes > end)
+			break;
+		row_end = p + row_bytes;
+		p += 2;
+		dst = (uint32_t *)((uint8_t *)copy->pixels + y * copy->pitch);
+		x = 0;
+		while (p + 2 <= row_end && x < w) {
+			uint16_t cmd;
+			int n;
+			int i;
+
+			cmd = host_menu_u16le(p);
+			p += 2;
+			if (cmd == 0)
+				break;
+			n = (int)(cmd & 0x3fff);
+			if (n <= 0)
+				break;
+			if (cmd & 0xc000) {
+				x += n;
+				continue;
+			}
+			for (i = 0; i < n && x < w; i++, x++) {
+				uint16_t c;
+
+				if (bpp == 8) {
+					if (p >= row_end || !pal)
+						break;
+					c = pal[*p++];
+				} else {
+					if (p + 2 > row_end)
+						break;
+					c = host_menu_u16le(p);
+					p += 2;
+				}
+				dst[x] = host_menu_map555(copy->format, c, key);
+				if ((dst[x] >> 24) != 0)
+					painted++;
+			}
+		}
+		p = row_end;
+	}
+	return painted;
+}
+
+static SDL_Surface *host_menu_expand_tsw_rle(const uint8_t *src, uint32_t nbytes,
+					     int hint_w, int hint_h,
+					     const uint16_t *pal)
+{
+	SDL_Surface *copy;
+	uint16_t key;
+	uint16_t magic;
+	uint16_t w;
+	uint16_t h;
+	uint16_t bpp;
+	const uint8_t *body;
+	int painted;
+
+	if (!src || nbytes < 4)
+		return NULL;
+	key = 0;
+	if (host_menu_guest_ok(HOST_MENU_TSW_KEY, 2))
+		key = (uint16_t)host_menu_mem_u16(HOST_MENU_TSW_KEY);
+	magic = 0;
+	if (host_menu_guest_ok(HOST_MENU_TSW_MAGIC, 2))
+		magic = (uint16_t)host_menu_mem_u16(HOST_MENU_TSW_MAGIC);
+	w = 0;
+	h = 0;
+	bpp = 8;
+	body = src;
+	if (nbytes >= 8) {
+		uint16_t hw = host_menu_u16le(src + 2);
+		uint16_t hh = host_menu_u16le(src + 4);
+		uint16_t hb = (uint16_t)(host_menu_u16le(src + 6) & 0x7fff);
+		int hdr = 0;
+
+		if ((hb == 8 || hb == 16) && hw >= 1 && hh >= 1 && hw <= 4096 &&
+		    hh <= 4096)
+			hdr = 1;
+		if (magic && host_menu_u16le(src) == magic)
+			hdr = 1;
+		if (hdr && (hb == 8 || hb == 16) && hw >= 1 && hh >= 1 &&
+		    hw <= 4096 && hh <= 4096) {
+			w = hw;
+			h = hh;
+			bpp = hb;
+			body = src + 8;
+		}
+	}
+	if (w == 0 || h == 0) {
+		if (hint_w < 1 || hint_h < 1 || hint_w > 4096 || hint_h > 4096)
+			return NULL;
+		w = (uint16_t)hint_w;
+		h = (uint16_t)hint_h;
+		bpp = pal ? 8 : 16;
+		body = src;
+	}
+	if (bpp == 8 && !pal)
+		return NULL;
+	copy = SDL_CreateRGBSurfaceWithFormat(0, w, h, 32,
+					      SDL_PIXELFORMAT_ARGB8888);
+	if (!copy)
+		return NULL;
+	if (SDL_LockSurface(copy) != 0) {
+		SDL_FreeSurface(copy);
+		return NULL;
+	}
+	memset(copy->pixels, 0, (size_t)copy->h * (size_t)copy->pitch);
+	painted = host_menu_rle_rows(copy, w, h, bpp, pal, key, body,
+				     src + nbytes);
+	if (painted <= 0 && body != src) {
+		memset(copy->pixels, 0, (size_t)copy->h * (size_t)copy->pitch);
+		painted = host_menu_rle_rows(copy, w, h, bpp, pal, key, src,
+					     src + nbytes);
+	}
+	SDL_UnlockSurface(copy);
+	if (painted <= 0) {
+		SDL_FreeSurface(copy);
+		return NULL;
+	}
+	SDL_SetSurfaceBlendMode(copy, SDL_BLENDMODE_BLEND);
+	return copy;
+}
+
+static SDL_Surface *host_menu_surface_from_tsw(const void *data, int size)
+{
+	const unsigned char *p;
+	unsigned char dest[64];
+	int ok;
+	SDL_Surface *surf;
+	SDL_Surface *copy;
+	void *pixels;
+	void *palette;
+	uint16_t w;
+	uint16_t h;
+	uint32_t nbytes;
+
+	if (!data || size < 16)
+		return NULL;
+	p = (const unsigned char *)data;
+	memset(dest, 0, sizeof(dest));
+	if (p[0] == 't' && p[1] == 's' && p[2] == 'w' && p[3] == 'p')
+		ok = ((int (*)(const void *, int, void *))(
+			uintptr_t)HOST_MENU_TSW_TSWP)(data, size, dest);
+	else if (p[0] == 'H' && p[1] == 'G' && p[2] == 'A' && p[3] == '3')
+		ok = ((int (*)(const void *, int, void *))(
+			uintptr_t)HOST_MENU_TSW_HGA3)(data, size, dest);
+	else
+		return NULL;
+	memcpy(&surf, dest + 0x20, sizeof(surf));
+	memcpy(&pixels, dest, sizeof(pixels));
+	memcpy(&palette, dest + 0x10, sizeof(palette));
+	memcpy(&w, dest + 0x18, sizeof(w));
+	memcpy(&h, dest + 0x1a, sizeof(h));
+	memcpy(&nbytes, dest + 0x1c, sizeof(nbytes));
+	copy = NULL;
+	if (ok && surf && surf->w > 0 && surf->h > 0 && surf->w <= 4096 &&
+	    surf->h <= 4096 && surf->pixels)
+		copy = SDL_ConvertSurfaceFormat(surf, SDL_PIXELFORMAT_ARGB8888,
+						0);
+	if (!copy && ok && pixels && nbytes >= 4) {
+		const uint16_t *pal = NULL;
+		const uint8_t *raw = (const uint8_t *)pixels;
+
+		if (palette && host_menu_mem_ok((uintptr_t)palette, 512))
+			pal = (const uint16_t *)palette;
+		fprintf(stderr,
+			"sword3-sdl: tswp rle hdr %04x %04x %04x %04x n=%u %ux%u pal=%p flag=%u\n",
+			host_menu_u16le(raw),
+			nbytes >= 4 ? host_menu_u16le(raw + 2) : 0,
+			nbytes >= 6 ? host_menu_u16le(raw + 4) : 0,
+			nbytes >= 8 ? host_menu_u16le(raw + 6) : 0, nbytes,
+			(unsigned)w, (unsigned)h, palette,
+			(unsigned)dest[0x28]);
+		copy = host_menu_expand_tsw_rle(raw, nbytes, w, h, pal);
+	}
+	if (!copy && ok && pixels && w > 0 && h > 0 && w <= 4096 && h <= 4096) {
+		if (palette && host_menu_mem_ok((uintptr_t)palette, 512) &&
+		    nbytes >= (uint32_t)w * (uint32_t)h)
+			copy = host_menu_expand_index(
+				(const uint8_t *)pixels, w, h, w,
+				(const uint16_t *)palette);
+		else if (nbytes >= (uint32_t)w * (uint32_t)h * 2u)
+			copy = host_menu_expand_rgb555(
+				(const uint16_t *)pixels, w, h, w);
+	}
+	if (!copy)
+		fprintf(stderr,
+			"sword3-sdl: tswp decode ok=%d %ux%u nbytes=%u pix=%p pal=%p surf=%p\n",
+			ok, (unsigned)w, (unsigned)h, nbytes, pixels, palette,
+			(void *)surf);
+	if (pixels && pixels != (surf ? surf->pixels : NULL))
+		((void (*)(uintptr_t))(uintptr_t)HOST_MENU_TSW_FREE)(
+			(uintptr_t)pixels);
+	return copy;
+}
+
+static SDL_Surface *host_menu_tsw_surface(int act, int frame)
+{
+	uintptr_t obj;
+	uintptr_t sizes;
+	uintptr_t data;
+	int nframe;
+	int size;
+	const unsigned char *p;
+	SDL_Surface *surf;
+
+	obj = host_menu_tsw_obj(act);
+	if (!obj)
+		return NULL;
+	nframe = host_menu_mem_i32(obj);
+	if (frame < 0 || frame >= nframe || nframe > 64)
+		return NULL;
+	sizes = host_menu_mem_ptr(obj + 0x48);
+	if (!sizes || !host_menu_mem_ok(sizes + (uintptr_t)frame * 4, 4))
+		return NULL;
+	size = host_menu_mem_i32(sizes + (uintptr_t)frame * 4);
+	if (size < 16 || size > 8 * 1024 * 1024)
+		return NULL;
+	data = ((uintptr_t (*)(uintptr_t, int))(uintptr_t)HOST_MENU_TSW_GET)(
+		obj, frame);
+	if (!data || !host_menu_heap_ok(data, 16))
+		return NULL;
+	p = (const unsigned char *)(uintptr_t)data;
+	surf = host_menu_surface_from_png(p, size);
+	if (!surf)
+		surf = host_menu_surface_from_tsw(p, size);
+	if (!surf)
+		fprintf(stderr,
+			"sword3-sdl: tsw act=%d frame=%d magic=%02x%02x%02x%02x size=%d\n",
+			act, frame, p[0], p[1], p[2], p[3], size);
+	((void (*)(uintptr_t))(uintptr_t)HOST_MENU_TSW_FREE)(data);
+	return surf;
+}
+
+static SDL_Texture *host_menu_tex_from_surf(SDL_Renderer *renderer,
+					    SDL_Surface *surf)
+{
+	SDL_Texture *tex;
+
+	if (!renderer || !surf)
+		return NULL;
+	tex = SDL_CreateTextureFromSurface(renderer, surf);
+	SDL_FreeSurface(surf);
+	if (!tex)
+		return NULL;
+	SDL_SetTextureBlendMode(tex, SDL_BLENDMODE_BLEND);
+	return tex;
+}
+
+static SDL_Texture *host_menu_face_tex(SDL_Renderer *renderer, int slot)
+{
+	const struct host_menu_actor *a;
+	SDL_Surface *surf;
+	SDL_Texture *tex;
+	int frame;
+	int tw;
+	int th;
+
+	if (!renderer || slot < 0 || slot >= HOST_MENU_PARTY_N)
+		return NULL;
+	a = &g_party[slot];
+	if (!a->used || a->act <= 0)
+		return g_tex_face[slot];
+	if (g_face_act[slot] == a->act)
+		return g_tex_face[slot];
+	if (g_tex_face[slot]) {
+		SDL_DestroyTexture(g_tex_face[slot]);
+		g_tex_face[slot] = NULL;
+	}
+	g_face_act[slot] = a->act;
+	surf = NULL;
+	for (frame = 0; frame < 3 && !surf; frame++)
+		surf = host_menu_tsw_surface(a->act, frame);
+	tex = host_menu_tex_from_surf(renderer, surf);
+	g_tex_face[slot] = tex;
+	if (!tex && !host_menu_tsw_obj(a->act)) {
+		g_face_act[slot] = 0;
+		return NULL;
+	}
+	tw = 0;
+	th = 0;
+	if (tex)
+		SDL_QueryTexture(tex, NULL, NULL, &tw, &th);
+	fprintf(stderr, "sword3-sdl: face slot=%d act=%d %s %dx%d obj=%llx\n",
+		slot, a->act, tex ? "ok" : "miss", tw, th,
+		(unsigned long long)host_menu_tsw_obj(a->act));
+	return tex;
 }
 
 static void host_menu_vgrad(SDL_Renderer *renderer, SDL_Rect rect,
@@ -2419,6 +2929,13 @@ static void host_menu_draw_left(SDL_Renderer *renderer, int logical_w,
 	portrait.w = host_sx(118, logical_w);
 	portrait.h = host_sy(140, logical_h);
 	host_menu_fill(renderer, portrait, 32, 22, 12, 255);
+	if (act) {
+		SDL_Texture *face;
+
+		face = host_menu_face_tex(renderer, (int)(act - g_party));
+		if (face)
+			host_menu_blit_contain(renderer, face, portrait);
+	}
 	host_menu_frame(renderer, portrait, 2, 196, 164, 72, 255);
 
 	host_menu_text_left(renderer, name,
