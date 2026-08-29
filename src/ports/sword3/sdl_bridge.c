@@ -2023,6 +2023,43 @@ static void guest_keyboard_key(SDL_Scancode scancode, int down)
 	}
 }
 
+static void host_trace_action_members(int action, const char *why)
+{
+	uint8_t *pad;
+	uint8_t *slot;
+	uintptr_t node;
+	uintptr_t next;
+	uintptr_t slot_addr;
+	uintptr_t offset;
+	int i;
+
+	if (action < 1 || action > 24 || !guest_data_ok(GUEST_UIGAMEPAD))
+		return;
+	pad = (uint8_t *)(uintptr_t)GUEST_UIGAMEPAD;
+	node = *(volatile uintptr_t *)(pad + action * GUEST_KEY_STRIDE + 0x80);
+	for (i = 0; node && i < 128; i++, node = next) {
+		slot_addr = *(volatile uintptr_t *)node;
+		next = *(volatile uintptr_t *)(node + sizeof(uintptr_t));
+		if (slot_addr < (uintptr_t)pad ||
+		    slot_addr + GUEST_KEY_STRIDE >
+			    (uintptr_t)pad + 0x2498) {
+			fprintf(stderr,
+				"sword3-sdl: action-trace %s a%d bad-slot=%p\n",
+				why, action, (void *)slot_addr);
+			continue;
+		}
+		slot = (uint8_t *)slot_addr;
+		offset = slot_addr - (uintptr_t)pad;
+		fprintf(stderr,
+			"sword3-sdl: action-trace %s a%d slot=+%#lx "
+			"state=%u flag=%u mask=%#x mode=%u\n",
+			why, action, (unsigned long)offset,
+			(unsigned)slot[0], (unsigned)slot[8],
+			(unsigned)*(volatile uint32_t *)(slot + GUEST_SLOT_MASK),
+			(unsigned)*(volatile uint32_t *)(slot + 0x14));
+	}
+}
+
 /*
  * Action 7 is consumed at 0x1000731fc and calls 0x10005bd38, which writes
  * draw_gate=0x80000001 and opens the original menu. Return's stock mask is
@@ -2520,6 +2557,7 @@ static void menu_trace_run(char *line)
 	int x;
 	int y;
 	int ms;
+	int action;
 
 	if (nl)
 		*nl = 0;
@@ -2546,6 +2584,13 @@ static void menu_trace_run(char *line)
 		menu_trace_key(SDL_SCANCODE_DOWN);
 	else if (strcmp(line, "a") == 0)
 		menu_trace_key(SDL_SCANCODE_RETURN);
+	else if (sscanf(line, "action %d", &action) == 1)
+		host_trace_action_members(action, "manual");
+	else if (strcmp(line, "actions") == 0) {
+		host_trace_action_members(5, "manual");
+		host_trace_action_members(6, "manual");
+		host_trace_action_members(7, "manual");
+	}
 	else if (sscanf(line, "wait %d", &ms) == 1)
 		g_trace_wait_until = SDL_GetTicks() + (Uint32)ms;
 	else
