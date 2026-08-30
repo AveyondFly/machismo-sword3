@@ -100,6 +100,12 @@
 #define GUEST_ACTOR_STRIDE 0x39b8u
 #define GUEST_ACTOR_SKILLS 0x3928u
 #define GUEST_ACTOR_BAG 0x3938u
+#define GUEST_TIMEBAR_MAX 0x1002a52d4ull
+#define ACTOR_OFF_SKDATA 0x20
+#define ACTOR_OFF_FLAGS 0x304c
+#define ACTOR_OFF_CANUSE 0x304d
+#define ACTOR_OFF_MAGICBAR 0x33a6
+#define ACTOR_OFF_CANCAST 0x345e
 #define LUA_BIND 0x10030aef0ull
 #define LUA_INT 0x1001c6f70ull
 #define LUA_STR 0x1001c7168ull
@@ -202,6 +208,7 @@ static const int g_item_page[BATTLE_ITEM_CAT] = { 2, 1, 3, 0 };
 static const SDL_Color g_ink_body = { 237, 221, 172, 255 };
 static const SDL_Color g_ink_hint = { 168, 148, 96, 255 };
 static const SDL_Color g_ink_gold = { 232, 196, 96, 255 };
+static const SDL_Color g_ink_off = { 108, 96, 72, 255 };
 static struct {
 	int pt;
 	TTF_Font *font;
@@ -257,6 +264,13 @@ static unsigned battle_u16(uintptr_t addr)
 	if (!battle_mem_ok(addr, 2))
 		return 0;
 	return (unsigned)*(volatile uint16_t *)(uintptr_t)addr;
+}
+
+static unsigned battle_u8(uintptr_t addr)
+{
+	if (!battle_mem_ok(addr, 1))
+		return 0;
+	return (unsigned)*(volatile uint8_t *)(uintptr_t)addr;
 }
 
 static void battle_set_i32(uintptr_t addr, int value)
@@ -716,6 +730,11 @@ static int battle_rects_spread(const struct battle_cmd *r, int n)
 	return far_n >= 3;
 }
 
+static uintptr_t battle_actor_ptr(void);
+static int battle_cmd_enabled(int cmd);
+static void battle_snap_cmd_focus(void);
+static void battle_log_special(void);
+
 static void battle_capture_hide(void)
 {
 	int i;
@@ -783,6 +802,7 @@ static void battle_refresh_commands(void)
 	}
 	if (g_cmd_focus < 0 || g_cmd_focus >= BATTLE_CMD_N)
 		g_cmd_focus = 0;
+	battle_snap_cmd_focus();
 	battle_capture_hide();
 }
 
@@ -955,6 +975,92 @@ static uintptr_t battle_actor_ptr(void)
 	if (slot < 0)
 		return 0;
 	return GUEST_ACTOR_BASE + (uintptr_t)slot * GUEST_ACTOR_STRIDE;
+}
+
+static int battle_special_ready(uintptr_t actor)
+{
+	unsigned magic;
+	unsigned max;
+	unsigned can;
+
+	if (!actor)
+		return 0;
+	can = battle_u8(actor + ACTOR_OFF_CANCAST);
+	if (can)
+		return 1;
+	max = (unsigned)battle_i32(GUEST_TIMEBAR_MAX, 0);
+	if (max > 0xffffu)
+		max = 0xffffu;
+	magic = battle_u16(actor + ACTOR_OFF_MAGICBAR);
+	return max > 0 && magic >= max;
+}
+
+static int battle_cmd_enabled(int cmd)
+{
+	uintptr_t actor;
+	unsigned flags;
+
+	if (cmd < 0 || cmd >= BATTLE_CMD_N)
+		return 0;
+	actor = battle_actor_ptr();
+	if (!actor)
+		return cmd != CMD_SPECIAL;
+	flags = battle_u8(actor + ACTOR_OFF_FLAGS);
+	if (flags & 2)
+		return cmd == CMD_MAGIC || cmd == CMD_DEFENCE;
+	if (cmd == CMD_MAGIC)
+		return (battle_u8(actor + ACTOR_OFF_CANUSE) & 1) == 0;
+	if (cmd == CMD_SPECIAL)
+		return battle_special_ready(actor);
+	return 1;
+}
+
+static void battle_snap_cmd_focus(void)
+{
+	int i;
+
+	if (g_cmd_focus < 0 || g_cmd_focus >= BATTLE_CMD_N)
+		g_cmd_focus = 0;
+	if (battle_cmd_enabled(g_cmd_focus))
+		return;
+	for (i = 0; i < BATTLE_CMD_N; i++) {
+		if (battle_cmd_enabled(i)) {
+			g_cmd_focus = i;
+			return;
+		}
+	}
+}
+
+static void battle_log_special(void)
+{
+	static int last_ready = -1;
+	static int last_slot = -99;
+	uintptr_t actor;
+	uintptr_t sk;
+	uintptr_t chardata;
+	int ready;
+	int slot;
+
+	slot = battle_player_slot();
+	ready = battle_cmd_enabled(CMD_SPECIAL) ? 1 : 0;
+	if (ready == last_ready && slot == last_slot)
+		return;
+	last_ready = ready;
+	last_slot = slot;
+	actor = battle_actor_ptr();
+	sk = actor ? battle_ptr(actor + ACTOR_OFF_SKDATA) : 0;
+	chardata = actor ? battle_ptr(actor + 0x18) : 0;
+	fprintf(stderr,
+		"sword3-sdl: battle special ready=%d magic=%u max=%d cancast=%u sp=%d/%d sk=0x%llx type=0x%x freeze=%u\n",
+		ready,
+		actor ? battle_u16(actor + ACTOR_OFF_MAGICBAR) : 0,
+		battle_i32(GUEST_TIMEBAR_MAX, 0),
+		actor ? battle_u8(actor + ACTOR_OFF_CANCAST) : 0,
+		chardata ? battle_i32(chardata + 0xc, 0) : -1,
+		chardata ? battle_i32(chardata + 0x18, 0) : -1,
+		(unsigned long long)sk,
+		(sk && battle_mem_ok(sk, 4)) ? battle_i32(sk, 0) : -1,
+		actor ? (battle_u8(actor + ACTOR_OFF_FLAGS) & 2) : 0);
 }
 
 static uintptr_t battle_list_head(uintptr_t rec)
@@ -1231,6 +1337,7 @@ static void battle_enter(int layer)
 		}
 	} else if (layer == BATTLE_COMMAND) {
 		battle_refresh_commands();
+		battle_log_special();
 	}
 	battle_clamp_list();
 	if (old != layer) {
@@ -1330,18 +1437,27 @@ void host_battle_poll(void)
 
 static int battle_focus_cmd(int dir)
 {
+	int start;
 	int next;
+	int hops;
 
 	if (dir < 0 || dir >= 4)
 		return 0;
 	if (g_cmd_focus < 0 || g_cmd_focus >= BATTLE_CMD_N)
 		g_cmd_focus = 0;
-	next = g_cmd_move[dir][g_cmd_focus];
-	if (next == g_cmd_focus)
-		return 0;
-	g_cmd_focus = next;
-	battle_sound(0x2e);
-	return 1;
+	start = g_cmd_focus;
+	next = start;
+	for (hops = 0; hops < BATTLE_CMD_N; hops++) {
+		next = g_cmd_move[dir][next];
+		if (next == start)
+			break;
+		if (battle_cmd_enabled(next)) {
+			g_cmd_focus = next;
+			battle_sound(0x2e);
+			return 1;
+		}
+	}
+	return 0;
 }
 
 static void battle_move_cat(int delta)
@@ -1431,6 +1547,8 @@ static void battle_confirm_command(void)
 	int wanted;
 
 	if (g_cmd_focus < 0 || g_cmd_focus >= BATTLE_CMD_N)
+		return;
+	if (!battle_cmd_enabled(g_cmd_focus))
 		return;
 	if (g_cmd_focus == CMD_MAGIC) {
 		battle_enter(BATTLE_MAGIC);
@@ -1933,6 +2051,7 @@ static void battle_draw_command(SDL_Renderer *renderer, int logical_w,
 	int gh;
 	int pt;
 	int on;
+	int ok;
 	int inset;
 
 	for (i = 0; i < BATTLE_CMD_N; i++) {
@@ -1945,11 +2064,17 @@ static void battle_draw_command(SDL_Renderer *renderer, int logical_w,
 		btn.w = battle_sx(gw - inset * 2, logical_w);
 		btn.h = battle_sy(gh - inset * 2, logical_h);
 		on = (g_cmd_focus == i);
-		battle_fill(renderer, btn, 18, 14, 10, 255);
-		battle_frame(renderer, btn, on ? 3 : 2,
-			     on ? g_ink_gold.r : 160,
-			     on ? g_ink_gold.g : 128,
-			     on ? g_ink_gold.b : 64, 255);
+		ok = battle_cmd_enabled(i);
+		if (!ok) {
+			battle_fill(renderer, btn, 10, 8, 6, 255);
+			battle_frame(renderer, btn, 2, 72, 60, 40, 255);
+		} else {
+			battle_fill(renderer, btn, 18, 14, 10, 255);
+			battle_frame(renderer, btn, on ? 3 : 2,
+				     on ? g_ink_gold.r : 160,
+				     on ? g_ink_gold.g : 128,
+				     on ? g_ink_gold.b : 64, 255);
+		}
 		pt = gh / 4;
 		if (pt < 16)
 			pt = 16;
@@ -1957,7 +2082,8 @@ static void battle_draw_command(SDL_Renderer *renderer, int logical_w,
 			pt = 24;
 		battle_text_center(renderer, g_cmd_text[i],
 				   btn.x + btn.w / 2, btn.y + btn.h / 2, pt,
-				   on ? g_ink_gold : g_ink_body);
+				   !ok ? g_ink_off :
+				   (on ? g_ink_gold : g_ink_body));
 	}
 }
 
