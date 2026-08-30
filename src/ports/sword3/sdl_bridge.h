@@ -104,6 +104,7 @@ void sword3_SDL_PauseAudioDevice(SDL_AudioDeviceID dev, int pause_on);
 void sword3_SDL_LockAudioDevice(SDL_AudioDeviceID dev);
 void sword3_SDL_UnlockAudioDevice(SDL_AudioDeviceID dev);
 void sword3_SDL_CloseAudioDevice(SDL_AudioDeviceID dev);
+void sword3_field_install(void);
 int sword3_host_play_music_file(const char *path, int loops);
 int sword3_host_play_music_data(const void *data, size_t size, int loops);
 void sword3_host_stop_music(void);

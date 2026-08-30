@@ -1,6 +1,7 @@
 #include "host_prepare.h"
 #include "host_battle_menu.h"
 #include "host_cheat.h"
+#include "sdl_bridge.h"
 
 #include <SDL2/SDL.h>
 #include <stdio.h>
@@ -51,5 +52,6 @@ int sword3_host_prepare(void)
 	        getenv("XDG_RUNTIME_DIR") ? getenv("XDG_RUNTIME_DIR") : "(unset)");
 	host_battle_install();
 	host_cheat_install();
+	sword3_field_install();
 	return 0;
 }

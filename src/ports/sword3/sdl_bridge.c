@@ -11,6 +11,7 @@
 #include <string.h>
 #include <unistd.h>
 #include <limits.h>
+#include <sys/mman.h>
 #include <sys/stat.h>
 
 #include <SDL2/SDL_image.h>
@@ -202,8 +203,9 @@ static void owner_drop(enum sword3_sdl_kind kind, void *pointer)
  *   D-pad         -> native controller buttons (pad+0x20c0)
  *   A talks (Return); B back-only; SELECT host menu; L3 original menu
  * Guest analog writes hat slots that field GetDirState does not poll;
- * D-pad buttons are the bindings it actually walks. Walk vs run is the
- * slot state (1 vs 3). Each field frame promotes a hold to run.
+ * D-pad buttons are the bindings it actually walks. Walk vs run is
+ * decided in PlayerMove (speed 1 vs 16), not by rewriting every
+ * GetDirState slot; shop and title lists share that query.
  *
  * Battle commands are a host-drawn overlay (攻击/奇术/物品/绝招/防御,
  * plus host magic/item/special submenus). Native menus are not driven.
@@ -305,14 +307,25 @@ static void owner_drop(enum sword3_sdl_kind kind, void *pointer)
 #define GUEST_INPUT_CONTROLLER 4
 #define GUEST_HAT_SLOT 0x2048
 #define GUEST_HAT_N 5
-#define GUEST_SLOT_WALK 1
-#define GUEST_SLOT_RUN 3
+#define GUEST_PLAYER_SPEED0 0x100073294ull
+#define GUEST_PLAYER_SPEED1 0x1000734acull
+#define GUEST_PLAYER_SPEED2 0x10007352cull
+#define GUEST_PLAYER_SPEED3 0x100073580ull
+#define GUEST_CSINC_W22 0x1a9f0516u
+#define GUEST_CSINC_W8 0x1a9f0508u
+#define GUEST_MOV_W22_16 0x52800216u
+#define GUEST_MOV_W8_16 0x52800208u
+#define GUEST_GET_DIR 0x1001c1df4ull
+#define GUEST_PLAYER_DIR0_RA 0x100073284ull
+#define GUEST_PLAYER_DIR1_RA 0x10007349cull
+#define GUEST_PLAYER_DIR2_RA 0x10007351cull
+#define GUEST_PLAYER_DIR3_RA 0x100073570ull
+#define GUEST_ACTIVE_JOYSTICK 0x1c
 #define GUEST_FIGHT_FLAG 0x1002f27f8ull
 #define GUEST_TITLE_SELECTION 0x1002f40e0ull
 #define GUEST_TITLE_MODE 0x1002f40e4ull
 #define GUEST_NOW_MENU 0x1002f1f0cull
 #define GUEST_CMD_SEL 0x1002a5308ull
-#define GUEST_ACTIVE_JOYSTICK 0x1c
 #define GUEST_INPUT_TRANSITION 0x1001c15fcull
 #define GUEST_FIGHT_OK 0x10003ddf8ull
 #define GUEST_FIGHT_UP 0x10003f13cull
@@ -389,9 +402,7 @@ static Uint32 g_a_edge_ms;
 static unsigned g_a_chatter;
 static int g_field_mode_saved;
 static int g_field_mode_held;
-static int g_field_stick_down[4];
 static unsigned g_field_a_seen;
-static unsigned g_field_stick_seen;
 static unsigned g_finger_seen;
 static unsigned g_pad_seen[GUEST_PAD_BUTTONS];
 static Uint32 g_cursor_ticks;
@@ -744,7 +755,6 @@ static void menu_release_directions(void);
 static void fight_release_directions(void);
 static void release_guest_walk(void);
 static void field_restore_controller_mode(void);
-static void field_sync_run(void);
 static void push_finger_at(float x, float y, Uint32 type);
 static int menu_widget_rect(int id, int *x, int *y, int *w, int *h);
 static int menu_chrome_drawn(void);
@@ -988,7 +998,6 @@ static void release_guest_walk(void)
 	uint8_t *keystate;
 	int i;
 
-	memset(g_field_stick_down, 0, sizeof(g_field_stick_down));
 	if (!guest_data_ok(GUEST_UIGAMEPAD))
 		return;
 	pad = (uint8_t *)(uintptr_t)GUEST_UIGAMEPAD;
@@ -1019,111 +1028,154 @@ static void field_restore_controller_mode(void)
 	*(volatile int *)(pad + GUEST_INPUT_MODE) = GUEST_INPUT_CONTROLLER;
 }
 
-static void field_promote_run_slot(uint8_t *slot)
+static int field_patch_word(uintptr_t addr, uint32_t expect, uint32_t repl)
 {
-	/*
-	 * GetDirState: state 1 = walk (speed 1), state 3 = run (speed 16).
-	 * Analog InputKeyDown writes 1 and slot[8]=1, then only upgrades
-	 * to 3 if |axis|>=30000 and slot[8]==0. That second event never
-	 * arrives on Linux.
-	 */
-	if (slot[0] == GUEST_SLOT_WALK) {
-		slot[0] = GUEST_SLOT_RUN;
-		slot[8] = 1;
+	long page;
+	uintptr_t aligned;
+
+	if (*(volatile uint32_t *)addr != expect) {
+		fprintf(stderr,
+			"sword3-sdl: PlayerMove speed bytes mismatch at 0x%llx "
+			"(got 0x%08x)\n",
+			(unsigned long long)addr,
+			*(volatile uint32_t *)addr);
+		return -1;
 	}
+	page = sysconf(_SC_PAGESIZE);
+	if (page < 4096)
+		page = 4096;
+	aligned = addr & ~((uintptr_t)page - 1);
+	if (mprotect((void *)aligned, (size_t)page * 2,
+		     PROT_READ | PROT_WRITE | PROT_EXEC) != 0) {
+		fprintf(stderr,
+			"sword3-sdl: PlayerMove speed mprotect failed at 0x%llx\n",
+			(unsigned long long)addr);
+		return -1;
+	}
+	*(volatile uint32_t *)addr = repl;
+	__builtin___clear_cache((char *)addr, (char *)addr + 4);
+	return 0;
 }
 
-static void field_set_pad_dir(int button, int down)
+static int field_patch_jump(uintptr_t func, void *hook,
+			    const uint32_t expect[4])
 {
-	uint8_t *pad;
-	uint8_t *slot;
-	void (*transition)(void *, void *, int);
+	long page;
+	uintptr_t aligned;
+	uint32_t stub[4];
 
-	if (button < 0 || button >= GUEST_PAD_BUTTONS)
-		return;
-	if (!guest_data_ok(GUEST_UIGAMEPAD))
-		return;
-	pad = (uint8_t *)(uintptr_t)GUEST_UIGAMEPAD;
-	slot = pad + GUEST_PAD_SLOT + button * GUEST_KEY_STRIDE;
-	*(volatile int *)(pad + GUEST_INPUT_MODE) = GUEST_INPUT_CONTROLLER;
-	transition = (void (*)(void *, void *, int))(uintptr_t)
-		GUEST_INPUT_TRANSITION;
-	transition(pad, slot, down);
-	if (down) {
-		slot[0] = GUEST_SLOT_RUN;
-		slot[8] = 1;
-		*(volatile Uint32 *)(slot + 4) = SDL_GetTicks() - 0x209u;
+	if (memcmp((void *)func, expect, 16) != 0) {
+		fprintf(stderr,
+			"sword3-sdl: GetDirState bytes mismatch at 0x%llx\n",
+			(unsigned long long)func);
+		return -1;
 	}
+	page = sysconf(_SC_PAGESIZE);
+	if (page < 4096)
+		page = 4096;
+	aligned = func & ~((uintptr_t)page - 1);
+	if (mprotect((void *)aligned, (size_t)page * 2,
+		     PROT_READ | PROT_WRITE | PROT_EXEC) != 0) {
+		fprintf(stderr,
+			"sword3-sdl: GetDirState mprotect failed at 0x%llx\n",
+			(unsigned long long)func);
+		return -1;
+	}
+	stub[0] = 0x58000050u;
+	stub[1] = 0xd61f0200u;
+	memcpy(stub + 2, &hook, 8);
+	memcpy((void *)func, stub, 16);
+	__builtin___clear_cache((char *)func, (char *)func + 16);
+	return 0;
 }
 
-static void field_sync_run(void)
+/*
+ * Continue GetDirState after its displaced first four instructions.
+ * The original cbz is reproduced locally because copying that
+ * PC-relative branch into a generic trampoline would change its target.
+ */
+int field_get_dir_orig(void *pad, int direction, int edge);
+
+__asm__(
+	"	.text\n"
+	"	.align	2\n"
+	"	.globl	field_get_dir_orig\n"
+	"	.hidden	field_get_dir_orig\n"
+	"	.type	field_get_dir_orig, %function\n"
+	"field_get_dir_orig:\n"
+	"	mov	x8, x0\n"
+	"	mov	w0, #0\n"
+	"	cbz	w1, 1f\n"
+	"	ldr	w9, [x8]\n"
+	"	mov	x16, #0x1e04\n"
+	"	movk	x16, #0x1c, lsl #16\n"
+	"	movk	x16, #0x1, lsl #32\n"
+	"	br	x16\n"
+	"1:\n"
+	"	ret\n"
+	"	.size	field_get_dir_orig, .-field_get_dir_orig\n"
+);
+
+static int field_player_dir_call(uintptr_t ra)
 {
-	static const int dpad[] = {
-		SDL_CONTROLLER_BUTTON_DPAD_UP,
-		SDL_CONTROLLER_BUTTON_DPAD_DOWN,
-		SDL_CONTROLLER_BUTTON_DPAD_LEFT,
-		SDL_CONTROLLER_BUTTON_DPAD_RIGHT,
-	};
-	static const SDL_Scancode arrows[] = {
-		SDL_SCANCODE_UP,
-		SDL_SCANCODE_DOWN,
-		SDL_SCANCODE_LEFT,
-		SDL_SCANCODE_RIGHT,
-	};
-	uint8_t *pad;
-	int analog[4];
-	int wanted;
-	int i;
+	return ra == GUEST_PLAYER_DIR0_RA || ra == GUEST_PLAYER_DIR1_RA ||
+	       ra == GUEST_PLAYER_DIR2_RA || ra == GUEST_PLAYER_DIR3_RA;
+}
+
+static int field_get_dir_hook(void *pad, int direction, int edge)
+{
+	uintptr_t ra;
 	Sint16 lx;
 	Sint16 ly;
+	int result;
 
-	if (g_pointer_ui || g_title_keys || g_save_ui || g_fight_ui ||
-	    g_menu_keys || g_field_mode_held)
+	ra = (uintptr_t)__builtin_return_address(0);
+	result = field_get_dir_orig(pad, direction, edge);
+	if (!field_player_dir_call(ra) || !g_pad)
+		return result;
+	lx = SDL_GameControllerGetAxis(g_pad, SDL_CONTROLLER_AXIS_LEFTX);
+	ly = SDL_GameControllerGetAxis(g_pad, SDL_CONTROLLER_AXIS_LEFTY);
+	if ((direction == 1 && lx < -STICK_DEADZONE) ||
+	    (direction == 3 && lx > STICK_DEADZONE) ||
+	    (direction == 2 && ly < -STICK_DEADZONE) ||
+	    (direction == 4 && ly > STICK_DEADZONE))
+		return 1;
+	return result;
+}
+
+/*
+ * PlayerMove (0x100072a28) is the only place that turns GetDirState into
+ * character speed: GetDir==2 -> 16, else 1. Force those four local speed
+ * selections to 16. The GetDir hook supplements the left stick only for
+ * PlayerMove's four exact call sites, so no menu or shop sees it.
+ */
+void sword3_field_install(void)
+{
+	static const uint32_t dir_expect[4] = {
+		0xaa0003e8u, 0x52800000u, 0x340003e1u, 0xb9400109u
+	};
+	static int installed;
+
+	if (installed)
 		return;
-	if (host_menu_active() || host_cheat_active() ||
-	    host_battle_owns_pad())
+	if (field_patch_word(GUEST_PLAYER_SPEED0, GUEST_CSINC_W22,
+			     GUEST_MOV_W22_16) != 0)
 		return;
-	if (!guest_data_ok(GUEST_UIGAMEPAD))
+	if (field_patch_word(GUEST_PLAYER_SPEED1, GUEST_CSINC_W22,
+			     GUEST_MOV_W22_16) != 0)
 		return;
-	pad = (uint8_t *)(uintptr_t)GUEST_UIGAMEPAD;
-	field_restore_controller_mode();
-	analog[0] = analog[1] = analog[2] = analog[3] = 0;
-	if (g_pad) {
-		lx = SDL_GameControllerGetAxis(g_pad, SDL_CONTROLLER_AXIS_LEFTX);
-		ly = SDL_GameControllerGetAxis(g_pad, SDL_CONTROLLER_AXIS_LEFTY);
-		analog[0] = ly < -STICK_DEADZONE;
-		analog[1] = ly > STICK_DEADZONE;
-		analog[2] = lx < -STICK_DEADZONE;
-		analog[3] = lx > STICK_DEADZONE;
-	}
-	for (i = 0; i < 4; i++) {
-		wanted = analog[i];
-		if (g_pad)
-			wanted = wanted ||
-				 SDL_GameControllerGetButton(g_pad, dpad[i]);
-		if (wanted == g_field_stick_down[i])
-			continue;
-		field_set_pad_dir(dpad[i], wanted);
-		g_field_stick_down[i] = wanted;
-		if (g_field_stick_seen < 16) {
-			g_field_stick_seen++;
-			fprintf(stderr,
-				"sword3-sdl: field dir=%d %s analog=%d\n",
-				i, wanted ? "down" : "up", analog[i]);
-		}
-	}
-	for (i = 0; i < 4; i++)
-		field_promote_run_slot(pad + GUEST_DPAD_SLOT +
-				       i * GUEST_DPAD_STRIDE);
-	for (i = 0; i < GUEST_HAT_N; i++)
-		field_promote_run_slot(pad + GUEST_HAT_SLOT +
-				       i * GUEST_KEY_STRIDE);
-	for (i = 0; i < 4; i++) {
-		field_promote_run_slot(pad + GUEST_KEY_SLOT +
-				       arrows[i] * GUEST_KEY_STRIDE);
-		field_promote_run_slot(pad + GUEST_PAD_SLOT +
-				       dpad[i] * GUEST_KEY_STRIDE);
-	}
+	if (field_patch_word(GUEST_PLAYER_SPEED2, GUEST_CSINC_W8,
+			     GUEST_MOV_W8_16) != 0)
+		return;
+	if (field_patch_word(GUEST_PLAYER_SPEED3, GUEST_CSINC_W8,
+			     GUEST_MOV_W8_16) != 0)
+		return;
+	if (field_patch_jump(GUEST_GET_DIR, field_get_dir_hook,
+			     dir_expect) != 0)
+		return;
+	installed = 1;
+	fprintf(stderr,
+		"sword3-sdl: PlayerMove run speed and private stick hook installed\n");
 }
 
 static void warp_screen_center(void)
@@ -2651,6 +2703,7 @@ static void menu_set_dir_source(int index, int axis, int down)
 		 */
 		if (menu_syspage_active() || g_menu_nested) {
 			guest_keyboard_key(g_menu_dir_keys[index], 1);
+			g_menu_dir_release[index] = 1;
 			menu_log_state(index == 1 ? "right" : "left");
 			return;
 		}
@@ -2667,6 +2720,7 @@ static void menu_set_dir_source(int index, int axis, int down)
 			return;
 		}
 		guest_keyboard_key(g_menu_dir_keys[index], 1);
+		g_menu_dir_release[index] = 1;
 		menu_log_state(index == 1 ? "right" : "left");
 		return;
 	}
@@ -2688,6 +2742,7 @@ static void menu_set_dir_source(int index, int axis, int down)
 	}
 	g_menu_dir_down[index] = 1;
 	guest_keyboard_key(g_menu_dir_keys[index], 1);
+	g_menu_dir_release[index] = 1;
 	if (g_menu_key_seen++ < 32)
 		fprintf(stderr, "sword3-sdl: menu dir=%d key=%d down\n",
 			index, (int)g_menu_dir_keys[index]);
@@ -2985,7 +3040,6 @@ static void apply_pad_pointer(void)
 	ensure_cursor();
 	apply_cursor_move();
 	sync_game_pointer();
-	field_sync_run();
 }
 
 static int accept_a_edge(int down)
@@ -3052,12 +3106,6 @@ static void prepare_guest_controller(SDL_JoystickID which)
 	needed = (int)which + 1;
 	if (active >= needed)
 		return;
-	/*
-	 * UIGamePad's controller-axis handler rejects events whose instance id
-	 * is above this scalar. The embedded iOS SDL backend sees no Linux
-	 * devices, while the host SDL event carries a valid instance id.
-	 * Populate only that scalar; controller objects remain host-owned.
-	 */
 	*(volatile int *)(pad + GUEST_ACTIVE_JOYSTICK) = needed;
 	fprintf(stderr, "sword3-sdl: guest controller instance=%d\n",
 		(int)which);
@@ -3147,9 +3195,8 @@ static int rewrite_event(SDL_Event *event)
 			return 0;
 		}
 		/*
-		 * Field GetDirState walks CONTROLLER_DPAD button slots, not
-		 * the analog hat slots UIGamePad writes. Stick is polled
-		 * into those dpad slots in field_sync_run.
+		 * Guest analog hat slots are not used by PlayerMove. The
+		 * GetDirState hook polls the host stick only for PlayerMove.
 		 */
 		event->type = SDL_FIRSTEVENT;
 		return 0;
