@@ -64,6 +64,9 @@
 #define CHEAT_HIT_DAMAGE1 0x10007e62cull
 #define CHEAT_HIT_DAMAGE3 0x10007cb24ull
 #define CHEAT_CAL_LIFE 0x10007b398ull
+#define CHEAT_LOAD_BATTLE 0x100046188ull
+#define CHEAT_LOAD_BATTLE_PLAYERMOVE_RA 0x100073d1cull
+#define CHEAT_LOAD_BATTLE_PLAYERMOVE_SKIP 0x100073d4cull
 
 enum cheat_item {
 	CHEAT_MONEY = 0,
@@ -90,6 +93,7 @@ static int g_hooks_ready;
 static void (*g_cal_level_orig)(void);
 static int (*g_hit1_orig)(void *atk, void *def, int flag);
 static int (*g_hit3_orig)(void *atk, void *def, short *a, short *b, int flag);
+static void (*g_load_battle_orig)(void *script) __attribute__((used));
 static char g_status[64];
 static Uint32 g_status_until;
 static struct {
@@ -533,6 +537,45 @@ static int cheat_hit3_hook(void *atk, void *def, short *a, short *b, int flag)
 	return dmg;
 }
 
+/*
+ * iOS has no ChanceOfBattle. Random fights are Lua PlayerMove writing
+ * the battle-script pointer, then LoadBattle at 0x100073d18. Skip that
+ * call and resume at 0x100073d4c so InBattle is not set. Hand-written
+ * so the skip path can ret to a different guest address; GCC ignores
+ * naked and will restore the original x30 through a C epilogue.
+ */
+_Static_assert(CHEAT_LOAD_BATTLE_PLAYERMOVE_RA == 0x100073d1cull,
+	       "PlayerMove LoadBattle return address");
+_Static_assert(CHEAT_LOAD_BATTLE_PLAYERMOVE_SKIP == 0x100073d4cull,
+	       "PlayerMove LoadBattle skip address");
+void cheat_load_battle_hook(void *script);
+
+__asm__(
+	"	.text\n"
+	"	.align	2\n"
+	"	.globl	cheat_load_battle_hook\n"
+	"	.hidden	cheat_load_battle_hook\n"
+	"	.type	cheat_load_battle_hook, %function\n"
+	"cheat_load_battle_hook:\n"
+	"	adrp	x1, g_noenc\n"
+	"	ldr	w1, [x1, :lo12:g_noenc]\n"
+	"	cbz	w1, 1f\n"
+	"	mov	x1, #0x3d1c\n"
+	"	movk	x1, #0x7, lsl #16\n"
+	"	movk	x1, #0x1, lsl #32\n"
+	"	cmp	x30, x1\n"
+	"	b.ne	1f\n"
+	"	mov	x30, #0x3d4c\n"
+	"	movk	x30, #0x7, lsl #16\n"
+	"	movk	x30, #0x1, lsl #32\n"
+	"	ret\n"
+	"1:\n"
+	"	adrp	x1, g_load_battle_orig\n"
+	"	ldr	x1, [x1, :lo12:g_load_battle_orig]\n"
+	"	br	x1\n"
+	"	.size	cheat_load_battle_hook, .-cheat_load_battle_hook\n"
+);
+
 void host_cheat_install(void)
 {
 	static const uint32_t cal_expect[4] = {
@@ -544,13 +587,18 @@ void host_cheat_install(void)
 	static const uint32_t hit3_expect[4] = {
 		0xd10303ffu, 0xa9066ffcu, 0xa90767fau, 0xa9085ff8u
 	};
+	static const uint32_t load_expect[4] = {
+		0xd10243ffu, 0x6d0223e9u, 0xa9036ffcu, 0xa90467fau
+	};
 
 	if (g_hooks_ready)
 		return;
 	g_cal_level_orig = cheat_make_tramp(CHEAT_CAL_LEVEL);
 	g_hit1_orig = cheat_make_tramp(CHEAT_HIT_DAMAGE1);
 	g_hit3_orig = cheat_make_tramp(CHEAT_HIT_DAMAGE3);
-	if (!g_cal_level_orig || !g_hit1_orig || !g_hit3_orig) {
+	g_load_battle_orig = cheat_make_tramp(CHEAT_LOAD_BATTLE);
+	if (!g_cal_level_orig || !g_hit1_orig || !g_hit3_orig ||
+	    !g_load_battle_orig) {
 		fprintf(stderr, "sword3-sdl: cheat tramp mmap failed\n");
 		return;
 	}
@@ -564,7 +612,11 @@ void host_cheat_install(void)
 	if (cheat_patch_jump(CHEAT_HIT_DAMAGE3, cheat_hit3_hook,
 			     hit3_expect) != 0)
 		return;
-	fprintf(stderr, "sword3-sdl: cheat CalLevel/HitDamage hooks installed\n");
+	if (cheat_patch_jump(CHEAT_LOAD_BATTLE, cheat_load_battle_hook,
+			     load_expect) != 0)
+		return;
+	fprintf(stderr,
+		"sword3-sdl: cheat CalLevel/HitDamage/LoadBattle hooks installed\n");
 }
 
 void host_cheat_poll(void)
@@ -589,6 +641,11 @@ static void cheat_apply(void)
 	}
 	if (g_sel == CHEAT_HP) {
 		cheat_apply_hp();
+		return;
+	}
+	if (g_sel == CHEAT_NOENC) {
+		g_noenc = !g_noenc;
+		cheat_set_status(g_noenc ? "不遇敌已开" : "不遇敌已关");
 		return;
 	}
 	if (g_sel == CHEAT_LVUP) {

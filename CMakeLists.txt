@@ -184,6 +184,8 @@ add_library(sword3_host SHARED
 )
 target_include_directories(sword3_host PUBLIC src/ports/sword3)
 target_compile_options(sword3_host PRIVATE -Wall -Wextra -O2 -g)
+set_source_files_properties(src/ports/sword3/host_cheat.c PROPERTIES
+    COMPILE_FLAGS "-fno-omit-frame-pointer")
 target_link_libraries(sword3_host PRIVATE
     PkgConfig::SWORD3_SDL
     PkgConfig::SWORD3_FFMPEG
