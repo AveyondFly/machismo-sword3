@@ -173,11 +173,16 @@ static void owner_drop(enum sword3_sdl_kind kind, void *pointer)
  * real SDL2 keyboard (mode keys) and controller (mode 4) branches.
  * Do not stub that function.
  *
- * Title and save are tap UIs. There the pad is a virtual pointer:
+ * Title and the title-screen load list are tap UIs. There the pad is a
+ * virtual pointer:
  *   stick / D-pad -> on-screen cursor (MouseXY + input mode 3)
  *   A             -> SDL_FINGERDOWN/UP at the cursor
- *   B             -> mouse right
- *   START swallowed; SELECT -> Escape; SELECT+START exits
+ *   B / SELECT    -> Escape (leave 读取进度 / title)
+ *   START swallowed; SELECT+START exits
+ *
+ * In-game save/load is the host menu. Do not map field B to Escape:
+ * Escape opens the original iOS system menu. UI_FLAGS bit 1 stays set
+ * after Continue and after battle; it is not a save-screen flag.
  *
  * Field and system menu:
  *   SELECT        -> open the host-drawn system menu on the field
@@ -293,7 +298,6 @@ static void owner_drop(enum sword3_sdl_kind kind, void *pointer)
 #define GUEST_KEYSTATE_N 512
 #define GUEST_INPUT_KEYBOARD 1
 #define GUEST_INPUT_MOUSE 3
-#define GUEST_UI_SAVE 2
 #define GUEST_FIGHT_FLAG 0x1002f27f8ull
 #define GUEST_TITLE_SELECTION 0x1002f40e0ull
 #define GUEST_TITLE_MODE 0x1002f40e4ull
@@ -737,13 +741,6 @@ static void menu_open_field(void);
 static void guest_keyboard_key(SDL_Scancode scancode, int down);
 static void menu_trace_poll(void);
 
-static int guest_save_ui(void)
-{
-	if (!guest_data_ok(GUEST_UI_FLAGS))
-		return 0;
-	return (*(volatile int *)(uintptr_t)GUEST_UI_FLAGS & GUEST_UI_SAVE) != 0;
-}
-
 static int guest_load_ui(void)
 {
 	if (g_load_context_done)
@@ -990,7 +987,7 @@ static void warp_screen_center(void)
 static void sync_ui_mode(void)
 {
 	int on_title = guest_on_title();
-	int save_ui = guest_save_ui() || guest_load_ui();
+	int save_ui = guest_load_ui();
 	int title_ui = guest_title_visible() && !save_ui;
 	int menu_ui = guest_system_menu();
 	int pointer_ui;
@@ -1003,8 +1000,10 @@ static void sync_ui_mode(void)
 	menu_keys = !title_ui && !save_ui && menu_ui;
 	fight_ui = !pointer_ui && !menu_keys && guest_in_fight();
 	/*
-	 * Battle reuses UI_FLAGS bit 1 (GUEST_UI_SAVE). If we keep save_ui
-	 * on, D-pad/stick are stolen by the save mapper.
+	 * g_save_ui is only the title 读取进度 list. In-game save is the
+	 * host menu. UI_FLAGS bit 1 stays set on the field after Continue
+	 * and after battle; treating it as save_ui mapped B to Escape and
+	 * opened the original iOS menu.
 	 */
 	if (fight_ui)
 		save_ui = 0;
