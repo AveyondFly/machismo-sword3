@@ -9,9 +9,10 @@ extern "C" {
 
 /*
  * Host-drawn battle command UI, including magic / item / special submenus.
- * Native battle menus are not driven. Native code is only called to carry
- * out the chosen action (attack/target, cast, use item, special, defend).
- * Target picking stays native.
+ * The grid always keeps 攻击/奇术/物品/绝招/防御; extras append after
+ * that, and the last cell is 逃跑 (native 战术 is hidden). Native chrome
+ * is hidden; native code only carries out the chosen action. Target
+ * picking stays native.
  */
 void host_battle_install(void);
 int host_battle_active(void);

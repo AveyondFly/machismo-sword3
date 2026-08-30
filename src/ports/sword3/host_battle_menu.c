@@ -28,6 +28,11 @@
 #define GUEST_CMD_BUTTONS 0x1002ab900ull
 #define GUEST_CMD_EXTRA 0x1002abe40ull
 #define GUEST_CMD_TACTICS 0x1002ac380ull
+#define GUEST_CMD_RETREAT 0x1002ac2c0ull
+#define GUEST_CMD_ENABLE 0x1002f3568ull
+#define GUEST_CMD_FILL 0x10003d9f4ull
+#define GUEST_EXTRA_CAN 0x10007ec44ull
+#define GUEST_EXTRA_TYPE 0x1002f2a00ull
 #define GUEST_CMD_STRIDE 0xc0u
 #define GUEST_CMD_IMG 8
 #define GUEST_CMD_X 0x20
@@ -35,13 +40,32 @@
 #define GUEST_CMD_H 0x94
 #define GUEST_CMD_W 0x98
 #define GUEST_BTN_SHOW 0x9f
+#define GUEST_BTN_NAME 0x50
 #define GUEST_IMG_W 0x6c
 #define GUEST_IMG_H 0x70
 #define GUEST_CMD_EXTRA_N 4
+#define BATTLE_SLOT_N 9
+#define BATTLE_PACK_MAX 9
+#define BATTLE_COLS 3
+#define BATTLE_FB_X0 190
+#define BATTLE_FB_Y0 60
 #define BATTLE_FB_W 90
 #define BATTLE_FB_H 90
-#define BATTLE_HIDE_MAX (BATTLE_CMD_N + GUEST_CMD_EXTRA_N + 1)
+#define BATTLE_HIDE_MAX (BATTLE_CMD_N + GUEST_CMD_EXTRA_N + 2)
+#define SLOT_TACTICS 8
+#define SLOT_FLEE 9
 #define GUEST_PLAYER_ID 0x1002f1ff8ull
+#define GUEST_CANT_RETREAT 0x1002f27fcull
+#define GUEST_FLEE_FLAG 0x1002f3591ull
+#define GUEST_FLEE_BLOCK 0x10007c03cull
+#define GUEST_BATTLE_INPUT_CLICK 0x10003cbf8ull
+#define GUEST_FLEE_STEP 0x10000aab8ull
+#define GUEST_IMAGE_GET 0x1001ea094ull
+#define ACTOR_OFF_CURRENT_IMAGE_ID 0x46c
+#define ACTOR_OFF_CURRENT_IMAGE_FRAME 0x470
+#define ACTOR_OFF_CURRENT_IMAGE 0x2e98
+#define ACTOR_OFF_FLEE_IMAGE_ID 0x694
+#define ACTOR_OFF_FLEE_IMAGE_FRAME 0x698
 #define GUEST_UIGAMEPAD 0x100304e28ull
 #define GUEST_INPUT_MODE 0x23d4
 #define GUEST_INPUT_KEYBOARD 1
@@ -145,6 +169,12 @@ struct battle_cmd {
 	int h;
 };
 
+struct battle_pack {
+	int slot;
+	int grey;
+	char name[32];
+};
+
 struct battle_entry {
 	int used;
 	int temp;
@@ -173,7 +203,6 @@ static int g_ok_cmd;
 static unsigned g_seen;
 static int g_ttf_ready;
 static int g_hide_n = 6;
-static struct battle_cmd g_cmd[BATTLE_CMD_N];
 static struct battle_cmd g_hide[BATTLE_HIDE_MAX] = {
 	{ 1, 1, 178, 44, 114, 138 },
 	{ 1, 1, 268, 44, 114, 138 },
@@ -183,16 +212,10 @@ static struct battle_cmd g_hide[BATTLE_HIDE_MAX] = {
 	{ 1, 1, 358, 134, 114, 138 },
 };
 static struct battle_entry g_entry[BATTLE_ENTRY_MAX];
-static const char *g_cmd_text[BATTLE_CMD_N] = {
+static struct battle_pack g_pack[BATTLE_PACK_MAX];
+static int g_pack_n;
+static const char *g_slot_text[BATTLE_CMD_N] = {
 	"攻击", "奇术", "物品", "绝招", "防御"
-};
-static const int g_fb_x[BATTLE_CMD_N] = { 190, 280, 370, 190, 280 };
-static const int g_fb_y[BATTLE_CMD_N] = { 60, 60, 60, 150, 150 };
-static const int g_cmd_move[4][BATTLE_CMD_N] = {
-	{ 3, 4, 4, 0, 1 },
-	{ 1, 2, 0, 4, 3 },
-	{ 3, 4, 4, 0, 1 },
-	{ 2, 0, 1, 4, 3 }
 };
 static const char *g_magic_cat[BATTLE_MAGIC_CAT] = {
 	"攻击", "辅助", "恢复"
@@ -285,6 +308,13 @@ static void battle_set_u8(uintptr_t addr, int value)
 	if (!battle_mem_ok(addr, 1))
 		return;
 	*(volatile uint8_t *)(uintptr_t)addr = (uint8_t)value;
+}
+
+static void battle_set_u16(uintptr_t addr, unsigned value)
+{
+	if (!battle_mem_ok(addr, 2))
+		return;
+	*(volatile uint16_t *)(uintptr_t)addr = (uint16_t)value;
 }
 
 static void battle_set_ptr(uintptr_t addr, uintptr_t value)
@@ -395,6 +425,66 @@ static void battle_set_keyboard(void)
 		return;
 	pad = (uint8_t *)(uintptr_t)GUEST_UIGAMEPAD;
 	*(volatile int *)(pad + GUEST_INPUT_MODE) = GUEST_INPUT_KEYBOARD;
+}
+
+static uintptr_t battle_actor_ptr(void);
+
+/*
+ * Some converted role data has no flee-animation image. The native action
+ * runner assumes ImageGet never returns NULL and crashes at 0x10000acd4.
+ * Reuse the actor's current image in that case; only the visual changes,
+ * while the native escape roll and round transition remain untouched.
+ */
+static int battle_flee_image_ready(uintptr_t actor)
+{
+	uintptr_t image;
+	int flee_id;
+	int current_id;
+	unsigned flee_frame;
+	unsigned current_frame;
+
+	flee_id = battle_i32(actor + ACTOR_OFF_FLEE_IMAGE_ID, 0);
+	flee_frame = battle_u16(actor + ACTOR_OFF_FLEE_IMAGE_FRAME);
+	image = ((uintptr_t(*)(int, unsigned, int))(uintptr_t)GUEST_IMAGE_GET)(
+		flee_id, flee_frame, 1);
+	if (image)
+		return 1;
+	current_id = battle_i32(actor + ACTOR_OFF_CURRENT_IMAGE_ID, 0);
+	current_frame = battle_u16(actor + ACTOR_OFF_CURRENT_IMAGE_FRAME);
+	image = ((uintptr_t(*)(int, unsigned, int))(uintptr_t)GUEST_IMAGE_GET)(
+		current_id, current_frame, 1);
+	fprintf(stderr,
+		"sword3-sdl: battle flee image missing id=%d/%u fallback=%d/%u ptr=%p current=%p\n",
+		flee_id, flee_frame, current_id, current_frame, (void *)image,
+		(void *)battle_ptr(actor + ACTOR_OFF_CURRENT_IMAGE));
+	if (!image)
+		return 0;
+	battle_set_i32(actor + ACTOR_OFF_FLEE_IMAGE_ID, current_id);
+	battle_set_u16(actor + ACTOR_OFF_FLEE_IMAGE_FRAME, current_frame);
+	return 1;
+}
+
+/*
+ * The native retreat widget sets this click latch and then runs the complete
+ * battle input handler. That handler queues action 0x11; the normal battle
+ * loop performs the escape roll and advances the round after a failed roll.
+ */
+static void battle_flee(void)
+{
+	uintptr_t actor;
+
+	actor = battle_actor_ptr();
+	if (!actor || battle_player_slot() < 0)
+		return;
+	if (!battle_flee_image_ready(actor)) {
+		fprintf(stderr,
+			"sword3-sdl: battle flee aborted: no usable actor image\n");
+		return;
+	}
+	battle_set_u8(GUEST_FLEE_FLAG, 1);
+	fprintf(stderr, "sword3-sdl: battle host act cmd=逃跑 native\n");
+	((void (*)(void))(uintptr_t)GUEST_BATTLE_INPUT_CLICK)();
+	battle_set_u8(GUEST_FLEE_FLAG, 0);
 }
 
 static void battle_native_ok(void)
@@ -583,14 +673,6 @@ static int battle_read_obj_rect(uintptr_t obj, struct battle_cmd *out)
 	return 1;
 }
 
-static int battle_cmd_live(int index, struct battle_cmd *out)
-{
-	if (index < 0 || index >= BATTLE_CMD_N)
-		return 0;
-	return battle_read_obj_rect(GUEST_CMD_BUTTONS +
-				    (uintptr_t)index * GUEST_CMD_STRIDE, out);
-}
-
 static int battle_is_native_cmd_obj(uintptr_t obj)
 {
 	uintptr_t lo;
@@ -658,10 +740,18 @@ static int battle_patch_jump(uintptr_t func, void *hook, const uint32_t *expect)
 	return 0;
 }
 
+static int (*g_flee_step_orig)(void *actor, int phase);
 static int (*g_cmd_draw_orig)(void *btn, int x, int y);
 static void (*g_cmd_menu_orig)(void *a0, void *a1, void *a2, void *a3,
 			       void *a4, void *a5, void *a6, void *a7);
 static int g_native_hooked;
+
+static int battle_flee_step_hook(void *actor, int phase)
+{
+	if (!actor || !battle_flee_image_ready((uintptr_t)actor))
+		return 0;
+	return g_flee_step_orig(actor, phase);
+}
 
 static int battle_cmd_draw_hook(void *btn, int x, int y)
 {
@@ -686,13 +776,17 @@ void host_battle_install(void)
 	static const uint32_t menu_expect[4] = {
 		0xd101c3ffu, 0xa9016ffcu, 0xa90267fau, 0xa9035ff8u
 	};
+	static const uint32_t flee_step_expect[4] = {
+		0xd10103ffu, 0xa90157f6u, 0xa9024ff4u, 0xa9037bfdu
+	};
 
 	if (g_native_hooked)
 		return;
+	g_flee_step_orig = battle_make_tramp(GUEST_FLEE_STEP);
 	g_cmd_draw_orig = battle_make_tramp(GUEST_CMD_DRAW);
 	g_cmd_menu_orig = battle_make_tramp(GUEST_CMD_MENU_DRAW);
-	if (!g_cmd_draw_orig || !g_cmd_menu_orig) {
-		fprintf(stderr, "sword3-sdl: battle native draw tramp failed\n");
+	if (!g_flee_step_orig || !g_cmd_draw_orig || !g_cmd_menu_orig) {
+		fprintf(stderr, "sword3-sdl: battle native tramp failed\n");
 		return;
 	}
 	if (battle_patch_jump(GUEST_CMD_DRAW, battle_cmd_draw_hook,
@@ -701,8 +795,12 @@ void host_battle_install(void)
 	if (battle_patch_jump(GUEST_CMD_MENU_DRAW, battle_cmd_menu_hook,
 			      menu_expect) != 0)
 		return;
+	if (battle_patch_jump(GUEST_FLEE_STEP, battle_flee_step_hook,
+			      flee_step_expect) != 0)
+		return;
 	g_native_hooked = 1;
-	fprintf(stderr, "sword3-sdl: battle native cmd draw disabled for host UI\n");
+	fprintf(stderr,
+		"sword3-sdl: battle native cmd draw disabled; flee image guard installed\n");
 }
 
 static int battle_rects_spread(const struct battle_cmd *r, int n)
@@ -731,9 +829,145 @@ static int battle_rects_spread(const struct battle_cmd *r, int n)
 }
 
 static uintptr_t battle_actor_ptr(void);
-static int battle_cmd_enabled(int cmd);
+static int battle_special_ready(uintptr_t actor);
+static int battle_frozen(void);
+static int battle_slot_grey(int slot);
+static int battle_flee_grey(void);
 static void battle_snap_cmd_focus(void);
 static void battle_log_special(void);
+static void battle_capture_hide(void);
+
+static uintptr_t battle_slot_obj(int slot)
+{
+	if (slot < 0)
+		return 0;
+	if (slot < BATTLE_CMD_N)
+		return GUEST_CMD_BUTTONS + (uintptr_t)slot * GUEST_CMD_STRIDE;
+	if (slot < SLOT_TACTICS)
+		return GUEST_CMD_EXTRA +
+		       (uintptr_t)(slot - BATTLE_CMD_N) * GUEST_CMD_STRIDE;
+	if (slot == SLOT_TACTICS)
+		return GUEST_CMD_TACTICS;
+	if (slot == SLOT_FLEE)
+		return GUEST_CMD_RETREAT;
+	return 0;
+}
+
+static int battle_enable_at(int slot)
+{
+	if (slot < 0 || slot >= BATTLE_SLOT_N)
+		return 0;
+	if (!battle_guest_ok(GUEST_CMD_ENABLE + (uintptr_t)slot, 1))
+		return 0;
+	return *(volatile uint8_t *)(uintptr_t)(GUEST_CMD_ENABLE +
+						 (uintptr_t)slot) == 1;
+}
+
+static int battle_read_caption(uintptr_t obj, char *dst, size_t dstn)
+{
+	uintptr_t name;
+
+	if (!dst || dstn == 0)
+		return 0;
+	dst[0] = 0;
+	if (!obj)
+		return 0;
+	name = battle_ptr(obj + GUEST_BTN_NAME);
+	return battle_copy_name(dst, dstn, name);
+}
+
+static int battle_extra_usable(int slot)
+{
+	uintptr_t actor;
+	unsigned type;
+
+	if (slot < BATTLE_CMD_N || slot >= SLOT_TACTICS)
+		return 0;
+	type = battle_u16(GUEST_EXTRA_TYPE + (uintptr_t)slot * 2);
+	if (type == 0)
+		return 0;
+	actor = battle_actor_ptr();
+	if (!actor)
+		return 0;
+	return ((int (*)(void *, unsigned))(uintptr_t)GUEST_EXTRA_CAN)(
+		(void *)actor, type) != 0;
+}
+
+static void battle_pack_add(int slot, int grey, const char *name)
+{
+	struct battle_pack *it;
+
+	if (g_pack_n < 0 || g_pack_n >= BATTLE_PACK_MAX)
+		return;
+	it = &g_pack[g_pack_n];
+	memset(it, 0, sizeof(*it));
+	it->slot = slot;
+	it->grey = grey;
+	if (name && name[0])
+		snprintf(it->name, sizeof(it->name), "%s", name);
+	else if (slot >= 0 && slot < BATTLE_CMD_N)
+		snprintf(it->name, sizeof(it->name), "%s", g_slot_text[slot]);
+	else if (slot == SLOT_FLEE)
+		snprintf(it->name, sizeof(it->name), "逃跑");
+	else if (slot == SLOT_TACTICS)
+		snprintf(it->name, sizeof(it->name), "战术");
+	else
+		snprintf(it->name, sizeof(it->name), "指令");
+	g_pack_n++;
+}
+
+static void battle_refresh_commands(void)
+{
+	static char last[160];
+	char line[160];
+	char name[32];
+	uintptr_t obj;
+	int i;
+	int n;
+	int off;
+
+	memset(g_pack, 0, sizeof(g_pack));
+	g_pack_n = 0;
+	((void (*)(int))(uintptr_t)GUEST_CMD_FILL)(
+		battle_i32(GUEST_PLAYER_ID, 0));
+	/*
+	 * Native enable[3] is SKData type 0x38, not the 绝招 meter.
+	 * Keep 攻击..防御 always, grey 绝招/奇术 as before, then extras.
+	 * Native 战术 is hidden; that last cell is 逃跑.
+	 */
+	for (i = 0; i < BATTLE_CMD_N; i++)
+		battle_pack_add(i, battle_slot_grey(i), g_slot_text[i]);
+	if (!battle_frozen()) {
+		for (i = BATTLE_CMD_N; i < SLOT_TACTICS; i++) {
+			if (!battle_enable_at(i) || !battle_extra_usable(i))
+				continue;
+			obj = battle_slot_obj(i);
+			name[0] = 0;
+			battle_read_caption(obj, name, sizeof(name));
+			battle_pack_add(i, 0, name);
+		}
+	}
+	name[0] = 0;
+	battle_read_caption(GUEST_CMD_RETREAT, name, sizeof(name));
+	battle_pack_add(SLOT_FLEE, battle_flee_grey(), name);
+	g_cmd_n = g_pack_n;
+	if (g_cmd_focus < 0 || g_cmd_focus >= g_pack_n)
+		g_cmd_focus = 0;
+	battle_snap_cmd_focus();
+	battle_capture_hide();
+	n = 0;
+	off = 0;
+	off = snprintf(line, sizeof(line), "n=%d", g_pack_n);
+	for (i = 0; i < g_pack_n && off < (int)sizeof(line) - 8; i++) {
+		off += snprintf(line + off, sizeof(line) - (size_t)off, " %s%s",
+				g_pack[i].name, g_pack[i].grey ? "*" : "");
+		n++;
+	}
+	if (n && strcmp(last, line) != 0) {
+		snprintf(last, sizeof(last), "%s", line);
+		fprintf(stderr, "sword3-sdl: battle pack %s\n", line);
+	}
+}
 
 static void battle_capture_hide(void)
 {
@@ -759,6 +993,16 @@ static void battle_capture_hide(void)
 	if (n < BATTLE_HIDE_MAX &&
 	    battle_read_obj_rect(GUEST_CMD_TACTICS, &cmd))
 		got[n++] = cmd;
+	if (n < BATTLE_HIDE_MAX) {
+		if (!battle_read_obj_rect(GUEST_CMD_RETREAT, &cmd) ||
+		    cmd.w < 8 || cmd.h < 8) {
+			cmd.w = 114;
+			cmd.h = 90;
+		}
+		cmd.x = 320 - cmd.w / 2;
+		cmd.y = 384 - cmd.h;
+		got[n++] = cmd;
+	}
 	if (n < 3 || !battle_rects_spread(got, n))
 		return;
 	g_hide_n = n;
@@ -769,41 +1013,6 @@ static void battle_capture_hide(void)
 		g_hide[i].w += 24;
 		g_hide[i].h += 48;
 	}
-}
-
-static void battle_refresh_commands(void)
-{
-	int i;
-	int n = 0;
-	struct battle_cmd cmd;
-
-	memset(g_cmd, 0, sizeof(g_cmd));
-	for (i = 0; i < BATTLE_CMD_N; i++) {
-		if (!battle_cmd_live(i, &cmd))
-			continue;
-		g_cmd[i] = cmd;
-		n++;
-	}
-	g_cmd_n = n;
-	if (n == 0) {
-		for (i = 0; i < BATTLE_CMD_N; i++) {
-			g_cmd[i].live = 1;
-			g_cmd[i].fallback = 1;
-		}
-		g_cmd_n = BATTLE_CMD_N;
-	} else {
-		for (i = 0; i < BATTLE_CMD_N; i++) {
-			if (g_cmd[i].live)
-				continue;
-			g_cmd[i].live = 1;
-			g_cmd[i].fallback = 1;
-		}
-		g_cmd_n = BATTLE_CMD_N;
-	}
-	if (g_cmd_focus < 0 || g_cmd_focus >= BATTLE_CMD_N)
-		g_cmd_focus = 0;
-	battle_snap_cmd_focus();
-	battle_capture_hide();
 }
 
 static int battle_load_node(struct battle_entry *it, uintptr_t node)
@@ -995,35 +1204,68 @@ static int battle_special_ready(uintptr_t actor)
 	return max > 0 && magic >= max;
 }
 
-static int battle_cmd_enabled(int cmd)
+static int battle_frozen(void)
 {
 	uintptr_t actor;
-	unsigned flags;
 
-	if (cmd < 0 || cmd >= BATTLE_CMD_N)
+	actor = battle_actor_ptr();
+	if (!actor)
+		return 0;
+	return (battle_u8(actor + ACTOR_OFF_FLAGS) & 2) != 0;
+}
+
+static int battle_slot_grey(int slot)
+{
+	uintptr_t actor;
+
+	if (slot < 0 || slot >= BATTLE_CMD_N)
 		return 0;
 	actor = battle_actor_ptr();
 	if (!actor)
-		return cmd != CMD_SPECIAL;
-	flags = battle_u8(actor + ACTOR_OFF_FLAGS);
-	if (flags & 2)
-		return cmd == CMD_MAGIC || cmd == CMD_DEFENCE;
-	if (cmd == CMD_MAGIC)
-		return (battle_u8(actor + ACTOR_OFF_CANUSE) & 1) == 0;
-	if (cmd == CMD_SPECIAL)
-		return battle_special_ready(actor);
-	return 1;
+		return slot == CMD_SPECIAL;
+	if (battle_frozen())
+		return slot != CMD_MAGIC && slot != CMD_DEFENCE;
+	if (slot == CMD_MAGIC)
+		return (battle_u8(actor + ACTOR_OFF_CANUSE) & 1) != 0;
+	if (slot == CMD_SPECIAL)
+		return !battle_special_ready(actor);
+	return 0;
+}
+
+static int battle_flee_grey(void)
+{
+	uintptr_t actor;
+
+	if (battle_frozen() || battle_u8(GUEST_CANT_RETREAT))
+		return 1;
+	actor = battle_actor_ptr();
+	if (!actor)
+		return 1;
+	if (battle_u8(actor + ACTOR_OFF_CANUSE) & 8)
+		return 1;
+	return ((int (*)(void *))(uintptr_t)GUEST_FLEE_BLOCK)((void *)actor) != 0;
+}
+
+static int battle_cmd_enabled(int pack)
+{
+	if (pack < 0 || pack >= g_pack_n)
+		return 0;
+	return !g_pack[pack].grey;
 }
 
 static void battle_snap_cmd_focus(void)
 {
 	int i;
 
-	if (g_cmd_focus < 0 || g_cmd_focus >= BATTLE_CMD_N)
+	if (g_pack_n <= 0) {
+		g_cmd_focus = 0;
+		return;
+	}
+	if (g_cmd_focus < 0 || g_cmd_focus >= g_pack_n)
 		g_cmd_focus = 0;
 	if (battle_cmd_enabled(g_cmd_focus))
 		return;
-	for (i = 0; i < BATTLE_CMD_N; i++) {
+	for (i = 0; i < g_pack_n; i++) {
 		if (battle_cmd_enabled(i)) {
 			g_cmd_focus = i;
 			return;
@@ -1042,7 +1284,7 @@ static void battle_log_special(void)
 	int slot;
 
 	slot = battle_player_slot();
-	ready = battle_cmd_enabled(CMD_SPECIAL) ? 1 : 0;
+	ready = battle_special_ready(battle_actor_ptr()) ? 1 : 0;
 	if (ready == last_ready && slot == last_slot)
 		return;
 	last_ready = ready;
@@ -1363,6 +1605,7 @@ void host_battle_close(void)
 		return;
 	g_layer = BATTLE_OFF;
 	g_cmd_n = 0;
+	g_pack_n = 0;
 	g_entry_n = 0;
 	g_actor = -1;
 	memset(g_dir_down, 0, sizeof(g_dir_down));
@@ -1435,20 +1678,65 @@ void host_battle_poll(void)
 		g_layer = BATTLE_IDLE;
 }
 
+static int battle_pack_step(int from, int dir)
+{
+	int col;
+	int row;
+	int next;
+
+	if (g_pack_n <= 1)
+		return from;
+	if (from < 0 || from >= g_pack_n)
+		from = 0;
+	col = from % BATTLE_COLS;
+	row = from / BATTLE_COLS;
+	switch (dir) {
+	case 0:
+		next = from - BATTLE_COLS;
+		if (next < 0) {
+			next = col;
+			while (next + BATTLE_COLS < g_pack_n)
+				next += BATTLE_COLS;
+		}
+		break;
+	case 2:
+		next = from + BATTLE_COLS;
+		if (next >= g_pack_n)
+			next = col;
+		break;
+	case 1:
+		next = from + 1;
+		if (next >= g_pack_n || next / BATTLE_COLS != row)
+			next = row * BATTLE_COLS;
+		break;
+	case 3:
+		next = from - 1;
+		if (next < row * BATTLE_COLS) {
+			next = row * BATTLE_COLS + BATTLE_COLS - 1;
+			if (next >= g_pack_n)
+				next = g_pack_n - 1;
+		}
+		break;
+	default:
+		return from;
+	}
+	return next;
+}
+
 static int battle_focus_cmd(int dir)
 {
 	int start;
 	int next;
 	int hops;
 
-	if (dir < 0 || dir >= 4)
+	if (dir < 0 || dir >= 4 || g_pack_n <= 0)
 		return 0;
-	if (g_cmd_focus < 0 || g_cmd_focus >= BATTLE_CMD_N)
+	if (g_cmd_focus < 0 || g_cmd_focus >= g_pack_n)
 		g_cmd_focus = 0;
 	start = g_cmd_focus;
 	next = start;
-	for (hops = 0; hops < BATTLE_CMD_N; hops++) {
-		next = g_cmd_move[dir][next];
+	for (hops = 0; hops < g_pack_n; hops++) {
+		next = battle_pack_step(next, dir);
 		if (next == start)
 			break;
 		if (battle_cmd_enabled(next)) {
@@ -1545,26 +1833,32 @@ static void battle_set_dir(int index, int axis, int down)
 static void battle_confirm_command(void)
 {
 	int wanted;
+	int slot;
 
-	if (g_cmd_focus < 0 || g_cmd_focus >= BATTLE_CMD_N)
+	if (g_cmd_focus < 0 || g_cmd_focus >= g_pack_n)
 		return;
 	if (!battle_cmd_enabled(g_cmd_focus))
 		return;
-	if (g_cmd_focus == CMD_MAGIC) {
+	slot = g_pack[g_cmd_focus].slot;
+	if (slot == CMD_MAGIC) {
 		battle_enter(BATTLE_MAGIC);
 		return;
 	}
-	if (g_cmd_focus == CMD_ITEM) {
+	if (slot == CMD_ITEM) {
 		battle_enter(BATTLE_ITEM);
 		return;
 	}
-	if (g_cmd_focus == CMD_SPECIAL) {
+	if (slot == CMD_SPECIAL) {
 		battle_enter(BATTLE_SPECIAL);
 		return;
 	}
-	wanted = g_cmd_focus + 1;
-	fprintf(stderr, "sword3-sdl: battle host act cmd=%s\n",
-		g_cmd_text[g_cmd_focus]);
+	if (slot == SLOT_FLEE) {
+		battle_flee();
+		return;
+	}
+	wanted = slot + 1;
+	fprintf(stderr, "sword3-sdl: battle host act cmd=%s sel=%d\n",
+		g_pack[g_cmd_focus].name, wanted);
 	if (battle_i32(GUEST_CMD_SEL, -1) == wanted) {
 		battle_set_i32(GUEST_CMD_SEL, 0);
 		g_ok_cmd = wanted;
@@ -2000,10 +2294,15 @@ static void battle_frame(SDL_Renderer *renderer, SDL_Rect rect, int thick,
 
 static void battle_cmd_cell(int index, int *x, int *y, int *w, int *h)
 {
-	if (index < 0 || index >= BATTLE_CMD_N)
+	int col;
+	int row;
+
+	if (index < 0)
 		index = 0;
-	*x = g_fb_x[index];
-	*y = g_fb_y[index];
+	col = index % BATTLE_COLS;
+	row = index / BATTLE_COLS;
+	*x = BATTLE_FB_X0 + col * BATTLE_FB_W;
+	*y = BATTLE_FB_Y0 + row * BATTLE_FB_H;
 	*w = BATTLE_FB_W;
 	*h = BATTLE_FB_H;
 }
@@ -2019,11 +2318,13 @@ static void battle_cluster(int *x, int *y, int *w, int *h)
 	int y0;
 	int x1;
 	int y1;
+	int n;
 
+	n = g_pack_n > 0 ? g_pack_n : BATTLE_CMD_N;
 	battle_cmd_cell(0, &x0, &y0, &cw, &ch);
 	x1 = x0 + cw;
 	y1 = y0 + ch;
-	for (i = 1; i < BATTLE_CMD_N; i++) {
+	for (i = 1; i < n; i++) {
 		battle_cmd_cell(i, &cx, &cy, &cw, &ch);
 		if (cx < x0)
 			x0 = cx;
@@ -2054,7 +2355,7 @@ static void battle_draw_command(SDL_Renderer *renderer, int logical_w,
 	int ok;
 	int inset;
 
-	for (i = 0; i < BATTLE_CMD_N; i++) {
+	for (i = 0; i < g_pack_n; i++) {
 		battle_cmd_cell(i, &gx, &gy, &gw, &gh);
 		inset = gw / 12;
 		if (inset < 4)
@@ -2080,7 +2381,7 @@ static void battle_draw_command(SDL_Renderer *renderer, int logical_w,
 			pt = 16;
 		if (pt > 24)
 			pt = 24;
-		battle_text_center(renderer, g_cmd_text[i],
+		battle_text_center(renderer, g_pack[i].name,
 				   btn.x + btn.w / 2, btn.y + btn.h / 2, pt,
 				   !ok ? g_ink_off :
 				   (on ? g_ink_gold : g_ink_body));
