@@ -199,8 +199,13 @@ static void owner_drop(enum sword3_sdl_kind kind, void *pointer)
  *
  * In the field the physical pad is the pad:
  *   stick         -> SDL_CONTROLLERAXIS (UIGamePad mode 4 / virtual cross)
- *   D-pad         -> keyboard arrows (setting.lua KB_UP=82 etc.)
+ *   D-pad         -> native controller hat / keyboard arrows
  *   A talks (Return); B back-only; SELECT host menu; L3 original menu
+ * Walk vs run is the direction slot state (1 vs 3), not a separate
+ * button. Analog only upgrades 1→3 on a later event after |axis|>=30000
+ * and slot[8]==0; Linux SDL emits axis motion once per change, so the
+ * stick would stay at walk. Each field frame promotes held direction
+ * slots to run.
  *
  * Battle commands are a host-drawn overlay (攻击/奇术/物品/绝招/防御,
  * plus host magic/item/special submenus). Native menus are not driven.
@@ -299,6 +304,11 @@ static void owner_drop(enum sword3_sdl_kind kind, void *pointer)
 #define GUEST_KEYSTATE_N 512
 #define GUEST_INPUT_KEYBOARD 1
 #define GUEST_INPUT_MOUSE 3
+#define GUEST_INPUT_CONTROLLER 4
+#define GUEST_HAT_SLOT 0x2048
+#define GUEST_HAT_N 5
+#define GUEST_SLOT_WALK 1
+#define GUEST_SLOT_RUN 3
 #define GUEST_FIGHT_FLAG 0x1002f27f8ull
 #define GUEST_TITLE_SELECTION 0x1002f40e0ull
 #define GUEST_TITLE_MODE 0x1002f40e4ull
@@ -733,6 +743,8 @@ static void title_release_directions(void);
 static void menu_release_directions(void);
 static void fight_release_directions(void);
 static void release_guest_walk(void);
+static void field_restore_controller_mode(void);
+static void field_sync_run(void);
 static void push_finger_at(float x, float y, Uint32 type);
 static int menu_widget_rect(int id, int *x, int *y, int *w, int *h);
 static int menu_chrome_drawn(void);
@@ -888,6 +900,7 @@ static void fight_poll_ui(void)
 		release_guest_walk();
 		host_battle_close();
 		host_cheat_on_fight_end();
+		field_restore_controller_mode();
 	}
 	g_fight_ui = fight_ui;
 	if (g_fight_ui)
@@ -993,6 +1006,73 @@ static void release_guest_walk(void)
 	}
 }
 
+static void field_restore_controller_mode(void)
+{
+	uint8_t *pad;
+
+	if (g_field_mode_held)
+		return;
+	if (!guest_data_ok(GUEST_UIGAMEPAD))
+		return;
+	pad = (uint8_t *)(uintptr_t)GUEST_UIGAMEPAD;
+	*(volatile int *)(pad + GUEST_INPUT_MODE) = GUEST_INPUT_CONTROLLER;
+}
+
+static void field_promote_run_slot(uint8_t *slot)
+{
+	/*
+	 * GetDirState: state 1 = walk (speed 1), state 3 = run (speed 16).
+	 * Analog InputKeyDown writes 1 and slot[8]=1, then only upgrades
+	 * to 3 if |axis|>=30000 and slot[8]==0. That second event never
+	 * arrives on Linux.
+	 */
+	if (slot[0] == GUEST_SLOT_WALK) {
+		slot[0] = GUEST_SLOT_RUN;
+		slot[8] = 1;
+	}
+}
+
+static void field_sync_run(void)
+{
+	static const SDL_Scancode arrows[] = {
+		SDL_SCANCODE_UP,
+		SDL_SCANCODE_DOWN,
+		SDL_SCANCODE_LEFT,
+		SDL_SCANCODE_RIGHT,
+	};
+	static const int dpad[] = {
+		SDL_CONTROLLER_BUTTON_DPAD_UP,
+		SDL_CONTROLLER_BUTTON_DPAD_DOWN,
+		SDL_CONTROLLER_BUTTON_DPAD_LEFT,
+		SDL_CONTROLLER_BUTTON_DPAD_RIGHT,
+	};
+	uint8_t *pad;
+	int i;
+
+	if (g_pointer_ui || g_title_keys || g_save_ui || g_fight_ui ||
+	    g_menu_keys || g_field_mode_held)
+		return;
+	if (host_menu_active() || host_cheat_active() ||
+	    host_battle_owns_pad())
+		return;
+	if (!guest_data_ok(GUEST_UIGAMEPAD))
+		return;
+	pad = (uint8_t *)(uintptr_t)GUEST_UIGAMEPAD;
+	field_restore_controller_mode();
+	for (i = 0; i < 4; i++)
+		field_promote_run_slot(pad + GUEST_DPAD_SLOT +
+				       i * GUEST_DPAD_STRIDE);
+	for (i = 0; i < GUEST_HAT_N; i++)
+		field_promote_run_slot(pad + GUEST_HAT_SLOT +
+				       i * GUEST_KEY_STRIDE);
+	for (i = 0; i < 4; i++) {
+		field_promote_run_slot(pad + GUEST_KEY_SLOT +
+				       arrows[i] * GUEST_KEY_STRIDE);
+		field_promote_run_slot(pad + GUEST_PAD_SLOT +
+				       dpad[i] * GUEST_KEY_STRIDE);
+	}
+}
+
 static void warp_screen_center(void)
 {
 	if (g_logical_w <= 0 || g_logical_h <= 0)
@@ -1086,6 +1166,7 @@ static void sync_ui_mode(void)
 		release_guest_walk();
 		host_battle_close();
 		host_cheat_on_fight_end();
+		field_restore_controller_mode();
 	}
 	g_save_ui = save_ui;
 	g_title_keys = title_ui;
@@ -2804,6 +2885,8 @@ static void fight_skip_result(void)
 		if (slot[0] != 1)
 			transition(pad, slot, 1);
 		transition(pad, slot, 0);
+		*(volatile int *)(pad + GUEST_INPUT_MODE) =
+			GUEST_INPUT_CONTROLLER;
 	}
 }
 
@@ -2849,6 +2932,7 @@ static void apply_pad_pointer(void)
 	ensure_cursor();
 	apply_cursor_move();
 	sync_game_pointer();
+	field_sync_run();
 }
 
 static int accept_a_edge(int down)
