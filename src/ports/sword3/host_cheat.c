@@ -67,6 +67,12 @@
 #define CHEAT_LOAD_BATTLE 0x100046188ull
 #define CHEAT_LOAD_BATTLE_PLAYERMOVE_RA 0x100073d1cull
 #define CHEAT_LOAD_BATTLE_PLAYERMOVE_SKIP 0x100073d4cull
+#define CHEAT_UIGAMEPAD 0x100304e28ull
+#define CHEAT_CLICK_SLOT 0x2d8u
+#define CHEAT_CLICK_STRIDE 0x18u
+#define CHEAT_CLICK_N 3
+#define CHEAT_RESULT_TIMER 0x1002f1f64ull
+#define CHEAT_RESULT_GATE 0x1002f3f98ull
 
 enum cheat_item {
 	CHEAT_MONEY = 0,
@@ -463,8 +469,61 @@ static void cheat_cal_level_hook(void)
 	if (g_lvup && !g_lvup_applied) {
 		cheat_force_next_level_exp();
 		g_lvup_applied = 1;
+		fprintf(stderr, "sword3-sdl: cheat CalLevel apply next-level exp\n");
 	}
 	g_cal_level_orig();
+}
+
+void host_cheat_before_result_skip(void)
+{
+	if (!g_lvup || g_lvup_applied || !g_cal_level_orig)
+		return;
+	cheat_cal_level_hook();
+}
+
+/*
+ * A-skip writes the victory click slot and can leave the 150-frame
+ * timer / gate set. The next fight reuses NowMenu 100 for auto, so
+ * leftover skip state jumps straight to confirm and never shows
+ * settlement. Clear on fight end and again at LoadBattle.
+ */
+static void cheat_clear_result_latch(void)
+{
+	uint8_t *pad;
+	unsigned i;
+
+	if (cheat_guest_ok(CHEAT_RESULT_TIMER, 4))
+		cheat_set_i32(CHEAT_RESULT_TIMER, 0);
+	if (cheat_guest_ok(CHEAT_RESULT_GATE, 1))
+		*(volatile uint8_t *)(uintptr_t)CHEAT_RESULT_GATE = 0;
+	if (!cheat_guest_ok(CHEAT_UIGAMEPAD + CHEAT_CLICK_SLOT,
+			    CHEAT_CLICK_STRIDE * CHEAT_CLICK_N))
+		return;
+	pad = (uint8_t *)(uintptr_t)CHEAT_UIGAMEPAD + CHEAT_CLICK_SLOT;
+	for (i = 0; i < CHEAT_CLICK_N; i++)
+		memset(pad + i * CHEAT_CLICK_STRIDE, 0, CHEAT_CLICK_STRIDE);
+}
+
+void host_cheat_on_fight_end(void)
+{
+	cheat_clear_result_latch();
+}
+
+/*
+ * FightFlag bit 2 can stay set across a skipped result screen, so the
+ * poll edge never fires and the second fight would refuse to apply.
+ * LoadBattle is the real start of a fight (the no-encounter skip does
+ * not come through here).
+ */
+static void cheat_note_new_fight(void) __attribute__((used, noinline));
+static void cheat_note_new_fight(void)
+{
+	if (g_lvup_applied)
+		fprintf(stderr,
+			"sword3-sdl: cheat CalLevel reset for new fight\n");
+	g_lvup_applied = 0;
+	g_lvup_was_fight = 1;
+	cheat_clear_result_latch();
 }
 
 static int cheat_role_dead(void *role)
@@ -570,6 +629,9 @@ __asm__(
 	"	movk	x30, #0x1, lsl #32\n"
 	"	ret\n"
 	"1:\n"
+	"	stp	x0, x30, [sp, #-16]!\n"
+	"	bl	cheat_note_new_fight\n"
+	"	ldp	x0, x30, [sp], #16\n"
 	"	adrp	x1, g_load_battle_orig\n"
 	"	ldr	x1, [x1, :lo12:g_load_battle_orig]\n"
 	"	br	x1\n"

@@ -312,8 +312,13 @@ static void owner_drop(enum sword3_sdl_kind kind, void *pointer)
 #define GUEST_FIGHT_DOWN 0x10003f28cull
 #define GUEST_FIGHT_LEFT 0x10003dff8ull
 #define GUEST_FIGHT_CANCEL 0x10003f3ecull
+#define GUEST_CLICK_SLOT 0x2d8u
+#define GUEST_RESULT_TIMER 0x1002f1f64ull
+#define GUEST_RESULT_GATE 0x1002f3f98ull
 #define FIGHT_NOW_TURN 99
 #define FIGHT_NOW_AUTO 100
+#define FIGHT_NOW_RESULT0 96
+#define FIGHT_NOW_RESULT1 113
 
 static SDL_Window *g_window;
 static SDL_Renderer *g_renderer;
@@ -836,8 +841,20 @@ static int guest_cmd_sel(void)
 static int fight_now_active(int now)
 {
 	return (now > 0 && now < 0x40) ||
-	       now == FIGHT_NOW_TURN ||
-	       (now >= FIGHT_NOW_AUTO && now <= FIGHT_NOW_AUTO + 2);
+	       (now >= FIGHT_NOW_RESULT0 && now <= FIGHT_NOW_RESULT1);
+}
+
+static int fight_result_now(int now)
+{
+	/*
+	 * 99 is also the in-fight turn layer. Victory sets 0x1002f3f98
+	 * and then NowMenu 100..113; only that gate is a result skip.
+	 */
+	if (now < FIGHT_NOW_AUTO || now > FIGHT_NOW_RESULT1)
+		return 0;
+	if (!guest_data_ok(GUEST_RESULT_GATE))
+		return 0;
+	return *(volatile uint8_t *)(uintptr_t)GUEST_RESULT_GATE != 0;
 }
 
 static int guest_in_fight(void)
@@ -870,6 +887,7 @@ static void fight_poll_ui(void)
 		fight_release_directions();
 		release_guest_walk();
 		host_battle_close();
+		host_cheat_on_fight_end();
 	}
 	g_fight_ui = fight_ui;
 	if (g_fight_ui)
@@ -1067,6 +1085,7 @@ static void sync_ui_mode(void)
 		fight_release_directions();
 		release_guest_walk();
 		host_battle_close();
+		host_cheat_on_fight_end();
 	}
 	g_save_ui = save_ui;
 	g_title_keys = title_ui;
@@ -2763,6 +2782,31 @@ static void fight_confirm_target(void)
 	((void (*)(int))(uintptr_t)GUEST_FIGHT_OK)(0);
 }
 
+/*
+ * Victory wait (NowMenu 100+) looks at click slot 0x2d8 / a 150-frame
+ * timer, then the game itself calls confirm. Do not call that confirm
+ * from the host: from the wrong NowMenu it zeros the menu and skips
+ * CalLevel, which is 战后升级.
+ */
+static void fight_skip_result(void)
+{
+	uint8_t *pad;
+	uint8_t *slot;
+	void (*transition)(void *, void *, int);
+
+	host_cheat_before_result_skip();
+	if (guest_data_ok(GUEST_UIGAMEPAD)) {
+		pad = (uint8_t *)(uintptr_t)GUEST_UIGAMEPAD;
+		slot = pad + GUEST_CLICK_SLOT;
+		*(volatile int *)(pad + GUEST_INPUT_MODE) = GUEST_INPUT_MOUSE;
+		transition = (void (*)(void *, void *, int))(uintptr_t)
+			GUEST_INPUT_TRANSITION;
+		if (slot[0] != 1)
+			transition(pad, slot, 1);
+		transition(pad, slot, 0);
+	}
+}
+
 static void host_menu_run_pending(void)
 {
 	int action;
@@ -3202,23 +3246,45 @@ static int rewrite_event(SDL_Event *event)
 			return 0;
 		}
 		if (g_fight_ui) {
-			if (down) {
-				if (guest_now_menu() == 3)
-					fight_confirm_target();
+			if (down && guest_now_menu() == 3) {
+				fight_confirm_target();
 				g_fight_target_a_up = 1;
 				event->type = SDL_FIRSTEVENT;
 				if (g_fight_key_seen++ < 48)
 					fprintf(stderr,
-						"sword3-sdl: fight native confirm now=%d\n",
-						guest_now_menu());
+						"sword3-sdl: fight target confirm\n");
+				return 0;
+			}
+			if (fight_result_now(guest_now_menu())) {
+				if (down) {
+					fight_skip_result();
+					g_fight_target_a_up = 1;
+					if (g_fight_key_seen++ < 48)
+						fprintf(stderr,
+							"sword3-sdl: fight result skip now=%d\n",
+							guest_now_menu());
+				}
+				event->type = SDL_FIRSTEVENT;
 				return 0;
 			}
 			fill_key(event, SDL_SCANCODE_RETURN, down);
 			if (g_fight_key_seen++ < 48)
 				fprintf(stderr,
-					"sword3-sdl: fight A -> Return %s\n",
-					down ? "down" : "up");
+					"sword3-sdl: fight A -> Return %s now=%d\n",
+					down ? "down" : "up", guest_now_menu());
 			return 1;
+		}
+		if (fight_result_now(guest_now_menu())) {
+			if (down) {
+				fight_skip_result();
+				g_fight_target_a_up = 1;
+				if (g_fight_key_seen++ < 48)
+					fprintf(stderr,
+						"sword3-sdl: fight result skip now=%d\n",
+						guest_now_menu());
+			}
+			event->type = SDL_FIRSTEVENT;
+			return 0;
 		}
 		if (!g_pointer_ui && !g_title_keys && !g_save_ui) {
 			if (!accept_a_edge(down)) {

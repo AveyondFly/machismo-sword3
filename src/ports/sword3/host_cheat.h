@@ -16,6 +16,8 @@ extern "C" {
  */
 void host_cheat_install(void);
 void host_cheat_poll(void);
+void host_cheat_before_result_skip(void);
+void host_cheat_on_fight_end(void);
 int host_cheat_active(void);
 int host_cheat_button(int button, int down);
 void host_cheat_draw(SDL_Renderer *renderer, int logical_w, int logical_h);
