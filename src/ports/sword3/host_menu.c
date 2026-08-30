@@ -1,4 +1,5 @@
 #include "host_menu.h"
+#include "host_font.h"
 
 #include <limits.h>
 #include <stdint.h>
@@ -21,8 +22,6 @@
 #define HOST_MENU_SAV_THUMB_OFF 31
 #define HOST_MENU_SAV_THUMB_BYTES \
 	(HOST_MENU_SAV_THUMB_W * HOST_MENU_SAV_THUMB_H * 2)
-#define HOST_MENU_FONT "/usr/share/fonts/TTF/DejaVuSansMono.ttf"
-#define HOST_MENU_FONT_SLOTS 8
 #define HOST_MENU_TEXT_CACHE 160
 #define HOST_MENU_NATIVE_W 960
 #define HOST_MENU_NATIVE_H 720
@@ -154,11 +153,6 @@ static int g_pending_slot;
 static int g_dir_down[4];
 static int g_dir_axis[4];
 static int g_dir_held[4];
-static int g_ttf_ready;
-static struct {
-	int pt;
-	TTF_Font *font;
-} g_fonts[HOST_MENU_FONT_SLOTS];
 static struct {
 	SDL_Texture *tex;
 	SDL_Renderer *renderer;
@@ -1934,52 +1928,7 @@ int host_menu_axis(Uint8 axis, Sint16 value)
 
 static TTF_Font *host_menu_font(int pt)
 {
-	int i;
-	int empty;
-	TTF_Font *font;
-
-	if (pt < 11)
-		pt = 11;
-	if (pt > 72)
-		pt = 72;
-	if (!g_ttf_ready) {
-		if (TTF_Init() != 0) {
-			fprintf(stderr, "sword3-sdl: TTF_Init failed: %s\n",
-				TTF_GetError());
-			g_ttf_ready = -1;
-			return NULL;
-		}
-		g_ttf_ready = 1;
-	}
-	if (g_ttf_ready < 0)
-		return NULL;
-	for (i = 0; i < HOST_MENU_FONT_SLOTS; i++) {
-		if (g_fonts[i].font && g_fonts[i].pt == pt)
-			return g_fonts[i].font;
-	}
-	empty = -1;
-	for (i = 0; i < HOST_MENU_FONT_SLOTS; i++) {
-		if (!g_fonts[i].font) {
-			empty = i;
-			break;
-		}
-	}
-	if (empty < 0) {
-		empty = 0;
-		TTF_CloseFont(g_fonts[0].font);
-		g_fonts[0].font = NULL;
-	}
-	font = TTF_OpenFont(HOST_MENU_FONT, pt);
-	if (!font) {
-		fprintf(stderr, "sword3-sdl: TTF_OpenFont %s pt=%d failed: %s\n",
-			HOST_MENU_FONT, pt, TTF_GetError());
-		return NULL;
-	}
-	g_fonts[empty].pt = pt;
-	g_fonts[empty].font = font;
-	if (empty == 0)
-		fprintf(stderr, "sword3-sdl: host menu font %s\n", HOST_MENU_FONT);
-	return font;
+	return host_cjk_font(pt);
 }
 
 static Uint32 host_menu_rgba(SDL_Color c)

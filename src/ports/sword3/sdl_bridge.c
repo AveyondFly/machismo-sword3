@@ -1,6 +1,7 @@
 #include "sdl_bridge.h"
 #include "host_menu.h"
 #include "host_battle_menu.h"
+#include "host_cheat.h"
 #include "video_bridge.h"
 
 #include <pthread.h>
@@ -2923,6 +2924,10 @@ static int rewrite_event(SDL_Event *event)
 		return 0;
 	}
 	if (event->type == SDL_CONTROLLERAXISMOTION) {
+		if (host_cheat_active()) {
+			event->type = SDL_FIRSTEVENT;
+			return 0;
+		}
 		if (host_menu_active()) {
 			host_menu_axis(event->caxis.axis, event->caxis.value);
 			event->type = SDL_FIRSTEVENT;
@@ -2996,6 +3001,11 @@ static int rewrite_event(SDL_Event *event)
 	button = event->cbutton.button;
 	log_pad_button(button, down);
 	if (movie_consume_skip(button, down)) {
+		event->type = SDL_FIRSTEVENT;
+		return 0;
+	}
+	if (button == SDL_CONTROLLER_BUTTON_Y || host_cheat_active()) {
+		host_cheat_button(button, down);
 		event->type = SDL_FIRSTEVENT;
 		return 0;
 	}
@@ -3850,6 +3860,9 @@ void sword3_SDL_RenderPresent(SDL_Renderer *renderer)
 		SDL_SetRenderDrawColor(renderer, r, g, b, a);
 		SDL_SetRenderDrawBlendMode(renderer, blend);
 	}
+	host_cheat_poll();
+	if (host_cheat_active() && SDL_GetRenderTarget(renderer) == NULL)
+		host_cheat_draw(renderer, g_logical_w, g_logical_h);
 	SDL_RenderPresent(renderer);
 	save_flush_direction_releases();
 	menu_flush_direction_releases();

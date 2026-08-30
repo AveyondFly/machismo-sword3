@@ -1,4 +1,5 @@
 #include "host_battle_menu.h"
+#include "host_font.h"
 
 #include <limits.h>
 #include <stdint.h>
@@ -17,7 +18,6 @@
 #define BATTLE_MAGIC_CAT 3
 #define BATTLE_ITEM_CAT 4
 #define BATTLE_ENTRY_MAX 32
-#define BATTLE_FONT_SLOTS 6
 #define BATTLE_TEXT_CACHE 96
 #define BATTLE_GUEST_LO 0x100294000ull
 #define BATTLE_GUEST_HI 0x100380000ull
@@ -201,7 +201,6 @@ static int g_a_up;
 static int g_b_up;
 static int g_ok_cmd;
 static unsigned g_seen;
-static int g_ttf_ready;
 static int g_hide_n = 6;
 static struct battle_cmd g_hide[BATTLE_HIDE_MAX] = {
 	{ 1, 1, 178, 44, 114, 138 },
@@ -232,10 +231,6 @@ static const SDL_Color g_ink_body = { 237, 221, 172, 255 };
 static const SDL_Color g_ink_hint = { 168, 148, 96, 255 };
 static const SDL_Color g_ink_gold = { 232, 196, 96, 255 };
 static const SDL_Color g_ink_off = { 108, 96, 72, 255 };
-static struct {
-	int pt;
-	TTF_Font *font;
-} g_fonts[BATTLE_FONT_SLOTS];
 static struct {
 	SDL_Texture *tex;
 	SDL_Renderer *renderer;
@@ -2069,80 +2064,7 @@ static int battle_sy(int y, int logical_h)
 
 static TTF_Font *battle_font(int pt)
 {
-	int i;
-	int empty;
-	TTF_Font *font;
-	const char *bundle;
-	char path[PATH_MAX];
-	char path2[PATH_MAX];
-	char path3[PATH_MAX];
-	const char *try_path[6];
-	int t;
-
-	if (pt < 11)
-		pt = 11;
-	if (pt > 48)
-		pt = 48;
-	if (!g_ttf_ready) {
-		if (TTF_Init() != 0) {
-			fprintf(stderr, "sword3-sdl: battle TTF_Init failed: %s\n",
-				TTF_GetError());
-			g_ttf_ready = -1;
-			return NULL;
-		}
-		g_ttf_ready = 1;
-	}
-	if (g_ttf_ready < 0)
-		return NULL;
-	for (i = 0; i < BATTLE_FONT_SLOTS; i++) {
-		if (g_fonts[i].font && g_fonts[i].pt == pt)
-			return g_fonts[i].font;
-	}
-	empty = -1;
-	for (i = 0; i < BATTLE_FONT_SLOTS; i++) {
-		if (!g_fonts[i].font) {
-			empty = i;
-			break;
-		}
-	}
-	if (empty < 0) {
-		empty = 0;
-		TTF_CloseFont(g_fonts[0].font);
-		g_fonts[0].font = NULL;
-	}
-	bundle = getenv("SWORD3_BUNDLE_DIR");
-	try_path[0] = "/usr/share/fonts/TTF/DejaVuSansMono.ttf";
-	try_path[1] = NULL;
-	try_path[2] = NULL;
-	try_path[3] = NULL;
-	try_path[4] = "/usr/share/fonts/TTF/DroidSansFallback.ttf";
-	try_path[5] = "/usr/share/fonts/truetype/droid/DroidSansFallbackFull.ttf";
-	if (bundle && bundle[0] == '/') {
-		if (snprintf(path, sizeof(path),
-			     "%s/../../../assets/host_menu/cjk.ttf", bundle) <
-		    (int)sizeof(path))
-			try_path[1] = path;
-		if (snprintf(path2, sizeof(path2), "%s/CT.ttf", bundle) <
-		    (int)sizeof(path2))
-			try_path[2] = path2;
-		if (snprintf(path3, sizeof(path3), "%s/Resource/CT.ttf",
-			     bundle) < (int)sizeof(path3))
-			try_path[3] = path3;
-	}
-	font = NULL;
-	for (t = 0; t < 6 && !font; t++) {
-		if (!try_path[t])
-			continue;
-		font = TTF_OpenFont(try_path[t], pt);
-		if (font && empty == 0)
-			fprintf(stderr, "sword3-sdl: battle font %s pt=%d\n",
-				try_path[t], pt);
-	}
-	if (!font)
-		return NULL;
-	g_fonts[empty].pt = pt;
-	g_fonts[empty].font = font;
-	return font;
+	return host_cjk_font(pt);
 }
 
 static Uint32 battle_rgba(SDL_Color c)
