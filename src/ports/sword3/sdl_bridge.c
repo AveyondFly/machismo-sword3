@@ -198,14 +198,12 @@ static void owner_drop(enum sword3_sdl_kind kind, void *pointer)
  *                    Up on 天书 returns to the tab strip.
  *
  * In the field the physical pad is the pad:
- *   stick         -> SDL_CONTROLLERAXIS (UIGamePad mode 4 / virtual cross)
- *   D-pad         -> native controller hat / keyboard arrows
+ *   stick         -> same CONTROLLER_DPAD slots the D-pad uses (polled)
+ *   D-pad         -> native controller buttons (pad+0x20c0)
  *   A talks (Return); B back-only; SELECT host menu; L3 original menu
- * Walk vs run is the direction slot state (1 vs 3), not a separate
- * button. Analog only upgrades 1→3 on a later event after |axis|>=30000
- * and slot[8]==0; Linux SDL emits axis motion once per change, so the
- * stick would stay at walk. Each field frame promotes held direction
- * slots to run.
+ * Guest analog writes hat slots that field GetDirState does not poll;
+ * D-pad buttons are the bindings it actually walks. Walk vs run is the
+ * slot state (1 vs 3). Each field frame promotes a hold to run.
  *
  * Battle commands are a host-drawn overlay (攻击/奇术/物品/绝招/防御,
  * plus host magic/item/special submenus). Native menus are not driven.
@@ -391,7 +389,9 @@ static Uint32 g_a_edge_ms;
 static unsigned g_a_chatter;
 static int g_field_mode_saved;
 static int g_field_mode_held;
+static int g_field_stick_down[4];
 static unsigned g_field_a_seen;
+static unsigned g_field_stick_seen;
 static unsigned g_finger_seen;
 static unsigned g_pad_seen[GUEST_PAD_BUTTONS];
 static Uint32 g_cursor_ticks;
@@ -988,6 +988,7 @@ static void release_guest_walk(void)
 	uint8_t *keystate;
 	int i;
 
+	memset(g_field_stick_down, 0, sizeof(g_field_stick_down));
 	if (!guest_data_ok(GUEST_UIGAMEPAD))
 		return;
 	pad = (uint8_t *)(uintptr_t)GUEST_UIGAMEPAD;
@@ -1032,22 +1033,49 @@ static void field_promote_run_slot(uint8_t *slot)
 	}
 }
 
+static void field_set_pad_dir(int button, int down)
+{
+	uint8_t *pad;
+	uint8_t *slot;
+	void (*transition)(void *, void *, int);
+
+	if (button < 0 || button >= GUEST_PAD_BUTTONS)
+		return;
+	if (!guest_data_ok(GUEST_UIGAMEPAD))
+		return;
+	pad = (uint8_t *)(uintptr_t)GUEST_UIGAMEPAD;
+	slot = pad + GUEST_PAD_SLOT + button * GUEST_KEY_STRIDE;
+	*(volatile int *)(pad + GUEST_INPUT_MODE) = GUEST_INPUT_CONTROLLER;
+	transition = (void (*)(void *, void *, int))(uintptr_t)
+		GUEST_INPUT_TRANSITION;
+	transition(pad, slot, down);
+	if (down) {
+		slot[0] = GUEST_SLOT_RUN;
+		slot[8] = 1;
+		*(volatile Uint32 *)(slot + 4) = SDL_GetTicks() - 0x209u;
+	}
+}
+
 static void field_sync_run(void)
 {
-	static const SDL_Scancode arrows[] = {
-		SDL_SCANCODE_UP,
-		SDL_SCANCODE_DOWN,
-		SDL_SCANCODE_LEFT,
-		SDL_SCANCODE_RIGHT,
-	};
 	static const int dpad[] = {
 		SDL_CONTROLLER_BUTTON_DPAD_UP,
 		SDL_CONTROLLER_BUTTON_DPAD_DOWN,
 		SDL_CONTROLLER_BUTTON_DPAD_LEFT,
 		SDL_CONTROLLER_BUTTON_DPAD_RIGHT,
 	};
+	static const SDL_Scancode arrows[] = {
+		SDL_SCANCODE_UP,
+		SDL_SCANCODE_DOWN,
+		SDL_SCANCODE_LEFT,
+		SDL_SCANCODE_RIGHT,
+	};
 	uint8_t *pad;
+	int analog[4];
+	int wanted;
 	int i;
+	Sint16 lx;
+	Sint16 ly;
 
 	if (g_pointer_ui || g_title_keys || g_save_ui || g_fight_ui ||
 	    g_menu_keys || g_field_mode_held)
@@ -1059,6 +1087,31 @@ static void field_sync_run(void)
 		return;
 	pad = (uint8_t *)(uintptr_t)GUEST_UIGAMEPAD;
 	field_restore_controller_mode();
+	analog[0] = analog[1] = analog[2] = analog[3] = 0;
+	if (g_pad) {
+		lx = SDL_GameControllerGetAxis(g_pad, SDL_CONTROLLER_AXIS_LEFTX);
+		ly = SDL_GameControllerGetAxis(g_pad, SDL_CONTROLLER_AXIS_LEFTY);
+		analog[0] = ly < -STICK_DEADZONE;
+		analog[1] = ly > STICK_DEADZONE;
+		analog[2] = lx < -STICK_DEADZONE;
+		analog[3] = lx > STICK_DEADZONE;
+	}
+	for (i = 0; i < 4; i++) {
+		wanted = analog[i];
+		if (g_pad)
+			wanted = wanted ||
+				 SDL_GameControllerGetButton(g_pad, dpad[i]);
+		if (wanted == g_field_stick_down[i])
+			continue;
+		field_set_pad_dir(dpad[i], wanted);
+		g_field_stick_down[i] = wanted;
+		if (g_field_stick_seen < 16) {
+			g_field_stick_seen++;
+			fprintf(stderr,
+				"sword3-sdl: field dir=%d %s analog=%d\n",
+				i, wanted ? "down" : "up", analog[i]);
+		}
+	}
 	for (i = 0; i < 4; i++)
 		field_promote_run_slot(pad + GUEST_DPAD_SLOT +
 				       i * GUEST_DPAD_STRIDE);
@@ -3093,8 +3146,13 @@ static int rewrite_event(SDL_Event *event)
 			event->type = SDL_FIRSTEVENT;
 			return 0;
 		}
-		prepare_guest_controller(event->caxis.which);
-		return 1;
+		/*
+		 * Field GetDirState walks CONTROLLER_DPAD button slots, not
+		 * the analog hat slots UIGamePad writes. Stick is polled
+		 * into those dpad slots in field_sync_run.
+		 */
+		event->type = SDL_FIRSTEVENT;
+		return 0;
 	}
 	if (event->type == SDL_MOUSEMOTION) {
 		g_cursor_x = (float)event->motion.x;
