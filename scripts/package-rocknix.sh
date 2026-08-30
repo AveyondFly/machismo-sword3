@@ -53,6 +53,11 @@ if [ -d "$ROOT/assets/host_menu" ]; then
 		fi
 	done
 fi
+CJK_FONT=/usr/share/fonts/truetype/droid/DroidSansFallbackFull.ttf
+if [ -f "$CJK_FONT" ]; then
+	mkdir -p "$OUTPUT.new/assets/host_menu"
+	cp "$CJK_FONT" "$OUTPUT.new/assets/host_menu/cjk.ttf"
+fi
 chmod +x "$OUTPUT.new/machismo" "$OUTPUT.new/run-rocknix.sh"
 
 rm -rf "$OUTPUT"

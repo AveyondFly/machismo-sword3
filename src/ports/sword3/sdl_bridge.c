@@ -1,5 +1,6 @@
 #include "sdl_bridge.h"
 #include "host_menu.h"
+#include "host_battle_menu.h"
 #include "video_bridge.h"
 
 #include <pthread.h>
@@ -195,11 +196,10 @@ static void owner_drop(enum sword3_sdl_kind kind, void *pointer)
  *   D-pad         -> keyboard arrows (setting.lua KB_UP=82 etc.)
  *   A talks (Return); B back-only; SELECT host menu; L3 original menu
  *
- * Battle already consumes controller logical actions 1..6 (directions,
- * cancel, confirm). Keep those SDL_CONTROLLER events native. iOS 2022 has
- * no visible commButtonClass focus, so the host only adds a yellow frame
- * from the widget geometry written by 0x1001a8b84. Input state remains
- * entirely owned by the game.
+ * Battle commands are a host-drawn overlay (攻击/奇术/物品/绝招/防御,
+ * plus host magic/item/special submenus). Native menus are not driven.
+ * The game is called only to carry out the chosen action. Target picking
+ * stays on Battle_Input.
  *
  * After Continue, map 0 is no longer treated as the title so the
  * first field does not keep the mouse cursor.
@@ -291,6 +291,7 @@ static void owner_drop(enum sword3_sdl_kind kind, void *pointer)
 #define GUEST_FINGER_SCALE 0x1b8
 #define GUEST_KEYSTATE 0x10031ca82ull
 #define GUEST_KEYSTATE_N 512
+#define GUEST_INPUT_KEYBOARD 1
 #define GUEST_INPUT_MOUSE 3
 #define GUEST_UI_SAVE 2
 #define GUEST_FIGHT_FLAG 0x1002f27f8ull
@@ -298,18 +299,6 @@ static void owner_drop(enum sword3_sdl_kind kind, void *pointer)
 #define GUEST_TITLE_MODE 0x1002f40e4ull
 #define GUEST_NOW_MENU 0x1002f1f0cull
 #define GUEST_CMD_SEL 0x1002a5308ull
-#define GUEST_CMD_BUTTONS 0x1002ab900ull
-#define GUEST_CMD_EXTRA 0x1002abe40ull
-#define GUEST_CMD_STRIDE 0xc0u
-#define GUEST_CMD_IMG 8
-#define GUEST_CMD_X 0x20
-#define GUEST_CMD_Y 0x24
-#define GUEST_CMD_H 0x94
-#define GUEST_CMD_W 0x98
-#define GUEST_IMG_W 0x6c
-#define GUEST_IMG_H 0x70
-#define GUEST_CMD_MAIN_N 5
-#define GUEST_CMD_EXTRA_N 4
 #define GUEST_ACTIVE_JOYSTICK 0x1c
 #define GUEST_INPUT_TRANSITION 0x1001c15fcull
 #define GUEST_FIGHT_OK 0x10003ddf8ull
@@ -317,8 +306,9 @@ static void owner_drop(enum sword3_sdl_kind kind, void *pointer)
 #define GUEST_FIGHT_RIGHT 0x10003e668ull
 #define GUEST_FIGHT_DOWN 0x10003f28cull
 #define GUEST_FIGHT_LEFT 0x10003dff8ull
-#define FIGHT_DEST_MAX 16
-#define FIGHT_CMD_MAX 12
+#define GUEST_FIGHT_CANCEL 0x10003f3ecull
+#define FIGHT_NOW_TURN 99
+#define FIGHT_NOW_AUTO 100
 
 static SDL_Window *g_window;
 static SDL_Renderer *g_renderer;
@@ -376,12 +366,6 @@ static int g_menu_action_focus = -1;
 static int g_menu_action_a_up;
 static int g_menu_nested;
 static Uint32 g_menu_a_block_until;
-static SDL_FRect g_fight_dest_build[FIGHT_DEST_MAX];
-static int g_fight_ndest_build;
-static SDL_FRect g_fight_dests[FIGHT_DEST_MAX];
-static int g_fight_ndest;
-static SDL_FRect g_fight_cmds[8];
-static int g_fight_ncmd;
 static int g_a_down;
 static Uint32 g_a_edge_ms;
 static unsigned g_a_chatter;
@@ -738,6 +722,8 @@ static void save_release_directions(void);
 static void title_release_directions(void);
 static void menu_release_directions(void);
 static void fight_release_directions(void);
+static void release_guest_walk(void);
+static void push_finger_at(float x, float y, Uint32 type);
 static int menu_widget_rect(int id, int *x, int *y, int *w, int *h);
 static int menu_chrome_drawn(void);
 static int menu_widget_drawn(int id);
@@ -849,254 +835,47 @@ static int guest_cmd_sel(void)
 	return guest_read_i32(GUEST_CMD_SEL, 0);
 }
 
+static int fight_now_active(int now)
+{
+	return (now > 0 && now < 0x40) ||
+	       now == FIGHT_NOW_TURN ||
+	       (now >= FIGHT_NOW_AUTO && now <= FIGHT_NOW_AUTO + 2);
+}
+
 static int guest_in_fight(void)
 {
 	int flag;
 	int now;
 
 	/*
-	 * 0x100045510 is the game's inFight getter: FightFlag bit 1.
-	 * Other bits (observed 0x41) stay set outside battle, so flag!=0
-	 * falsely takes over the field: stick swallowed, D-pad rewritten.
-	 * NowMenu 1..0x3f is the command / target layer while a fight is
-	 * actually running.
+	 * inFight is FightFlag bit 1. Other bits stay set on the field, so
+	 * flag != 0 would steal the stick. NowMenu covers command / target
+	 * / turn / auto while a fight is actually running.
 	 */
 	flag = guest_read_i32(GUEST_FIGHT_FLAG, 0);
 	if (flag & 2)
 		return 1;
 	now = guest_now_menu();
-	return now > 0 && now < 0x40;
+	return fight_now_active(now);
 }
 
-static uint8_t *guest_cmd_for_sel(int sel)
+static void fight_poll_ui(void)
 {
-	uintptr_t addr;
+	int fight_ui;
 
-	if (sel < 1 || sel > FIGHT_CMD_MAX)
-		return NULL;
-	if (sel <= GUEST_CMD_MAIN_N) {
-		addr = GUEST_CMD_BUTTONS +
-		       (uintptr_t)(sel - 1) * GUEST_CMD_STRIDE;
-	} else if (sel <= GUEST_CMD_MAIN_N + GUEST_CMD_EXTRA_N) {
-		addr = GUEST_CMD_EXTRA +
-		       (uintptr_t)(sel - GUEST_CMD_MAIN_N - 1) *
-			       GUEST_CMD_STRIDE;
-	} else {
-		return NULL;
-	}
-	if (!guest_data_ok(addr) ||
-	    !guest_data_ok(addr + GUEST_CMD_STRIDE - 1))
-		return NULL;
-	return (uint8_t *)addr;
-}
-
-static int guest_cmd_rect(int index, int *x, int *y, int *w, int *h)
-{
-	uint8_t *btn;
-	uint8_t *img;
-	int bx;
-	int by;
-	int bw;
-	int bh;
-
-	btn = guest_cmd_for_sel(index);
-	if (!btn)
-		return 0;
-	bx = *(volatile int *)(btn + GUEST_CMD_X);
-	by = *(volatile int *)(btn + GUEST_CMD_Y);
-	if (bx == -1 || by == -1)
-		return 0;
-	if (bx <= 0 && by <= 0)
-		return 0;
-	bw = *(volatile int *)(btn + GUEST_CMD_W);
-	bh = *(volatile int *)(btn + GUEST_CMD_H);
-	if (bw < 24 || bw > 240 || bh < 24 || bh > 240) {
-		bw = 0;
-		bh = 0;
-		img = (uint8_t *)(uintptr_t)*(volatile uintptr_t *)(btn +
-								   GUEST_CMD_IMG);
-		if (img && guest_data_ok((uintptr_t)img) &&
-		    guest_data_ok((uintptr_t)img + GUEST_IMG_H + 4)) {
-			bw = *(volatile int *)(img + GUEST_IMG_W);
-			bh = *(volatile int *)(img + GUEST_IMG_H);
-		}
-	}
-	if (bw < 24 || bw > 240)
-		bw = 96;
-	if (bh < 24 || bh > 240)
-		bh = 96;
-	*x = bx;
-	*y = by;
-	*w = bw;
-	*h = bh;
-	return 1;
-}
-
-static int cmp_fight_dest(const void *a, const void *b)
-{
-	const SDL_FRect *pa = a;
-	const SDL_FRect *pb = b;
-
-	if (pa->y + 8.0f < pb->y)
-		return -1;
-	if (pa->y > pb->y + 8.0f)
-		return 1;
-	if (pa->x < pb->x)
-		return -1;
-	if (pa->x > pb->x)
-		return 1;
-	return 0;
-}
-
-static int fight_dest_candidate(SDL_Renderer *renderer, const SDL_FRect *dst)
-{
-	float lw;
-	float lh;
-
-	if (!g_fight_ui || !dst || !renderer)
-		return 0;
-	if (SDL_GetRenderTarget(renderer) != NULL)
-		return 0;
-	lw = g_logical_w > 0 ? (float)g_logical_w : (float)GAME_W;
-	lh = g_logical_h > 0 ? (float)g_logical_h : (float)GAME_H;
-	if (dst->w < 12.0f || dst->w > 160.0f)
-		return 0;
-	if (dst->h < 12.0f || dst->h > 110.0f)
-		return 0;
-	if (dst->x < lw * 0.22f)
-		return 0;
-	if (dst->y < lh * 0.06f || dst->y > lh * 0.62f)
-		return 0;
-	return 1;
-}
-
-static void fight_note_dest(SDL_Renderer *renderer, const SDL_FRect *dst)
-{
-	if (!fight_dest_candidate(renderer, dst))
+	if (g_pointer_ui || g_menu_keys || g_title_keys || host_menu_active())
 		return;
-	if (g_fight_ndest_build >= FIGHT_DEST_MAX)
-		return;
-	g_fight_dest_build[g_fight_ndest_build++] = *dst;
-}
-
-static int fight_rects_near(const SDL_FRect *a, const SDL_FRect *b, float gap)
-{
-	return a->x < b->x + b->w + gap && a->x + a->w + gap > b->x &&
-	       a->y < b->y + b->h + gap && a->y + a->h + gap > b->y;
-}
-
-static void fight_union_rect(SDL_FRect *dst, const SDL_FRect *src)
-{
-	float x2;
-	float y2;
-
-	x2 = dst->x + dst->w;
-	y2 = dst->y + dst->h;
-	if (src->x < dst->x)
-		dst->x = src->x;
-	if (src->y < dst->y)
-		dst->y = src->y;
-	if (src->x + src->w > x2)
-		x2 = src->x + src->w;
-	if (src->y + src->h > y2)
-		y2 = src->y + src->h;
-	dst->w = x2 - dst->x;
-	dst->h = y2 - dst->y;
-}
-
-static void fight_inflate_cmd(SDL_FRect *r)
-{
-	float cx;
-	float bottom;
-
-	cx = r->x + r->w * 0.5f;
-	bottom = r->y + r->h;
-	if (r->w < 92.0f)
-		r->w = 92.0f;
-	if (r->h < 96.0f)
-		r->h = 96.0f;
-	r->x = cx - r->w * 0.5f;
-	r->y = bottom - r->h + 8.0f;
-}
-
-static void fight_cluster_dests(void)
-{
-	int used[FIGHT_DEST_MAX];
-	int i;
-	int j;
-	int merged;
-	SDL_FRect u;
-
-	memset(used, 0, sizeof(used));
-	g_fight_ncmd = 0;
-	for (i = 0; i < g_fight_ndest; i++) {
-		if (used[i])
-			continue;
-		u = g_fight_dests[i];
-		used[i] = 1;
-		do {
-			merged = 0;
-			for (j = 0; j < g_fight_ndest; j++) {
-				if (used[j])
-					continue;
-				if (!fight_rects_near(&u, &g_fight_dests[j], 20.0f))
-					continue;
-				fight_union_rect(&u, &g_fight_dests[j]);
-				used[j] = 1;
-				merged = 1;
-			}
-		} while (merged);
-		if (u.w < 20.0f || u.h < 14.0f)
-			continue;
-		if (g_fight_ncmd >= 8)
-			break;
-		fight_inflate_cmd(&u);
-		g_fight_cmds[g_fight_ncmd++] = u;
+	fight_ui = guest_in_fight();
+	if (fight_ui)
+		g_save_ui = 0;
+	if (g_fight_ui && !fight_ui) {
+		fight_release_directions();
+		release_guest_walk();
+		host_battle_close();
 	}
-	if (g_fight_ncmd > 1)
-		qsort(g_fight_cmds, (size_t)g_fight_ncmd, sizeof(g_fight_cmds[0]),
-		      cmp_fight_dest);
-}
-
-static void fight_commit_dests(void)
-{
-	g_fight_ndest = g_fight_ndest_build;
-	if (g_fight_ndest > 0) {
-		memcpy(g_fight_dests, g_fight_dest_build,
-		       (size_t)g_fight_ndest * sizeof(g_fight_dests[0]));
-		qsort(g_fight_dests, (size_t)g_fight_ndest, sizeof(g_fight_dests[0]),
-		      cmp_fight_dest);
-	}
-	g_fight_ndest_build = 0;
-	fight_cluster_dests();
-}
-
-static int fight_select_rect(int *x, int *y, int *w, int *h)
-{
-	int sel;
-	int gx;
-	int gy;
-	int gw;
-	int gh;
-	int lw;
-	int lh;
-	int now;
-
-	now = guest_now_menu();
-	if (now != 1)
-		return 0;
-	sel = guest_cmd_sel();
-	if (sel < 1 || sel > FIGHT_CMD_MAX)
-		sel = 1;
-	if (!guest_cmd_rect(sel, &gx, &gy, &gw, &gh))
-		return 0;
-	lw = g_logical_w > 0 ? g_logical_w : GAME_W;
-	lh = g_logical_h > 0 ? g_logical_h : GAME_H;
-	*x = gx * lw / GAME_W;
-	*y = gy * lh / GAME_H;
-	*w = gw * lw / GAME_W;
-	*h = gh * lh / GAME_H;
-	return 1;
+	g_fight_ui = fight_ui;
+	if (g_fight_ui)
+		host_battle_poll();
 }
 
 static void draw_select_frame(SDL_Renderer *renderer, int x, int y, int w,
@@ -1223,8 +1002,18 @@ static void sync_ui_mode(void)
 	pointer_ui = 0;
 	menu_keys = !title_ui && !save_ui && menu_ui;
 	fight_ui = !pointer_ui && !menu_keys && guest_in_fight();
+	/*
+	 * Battle reuses UI_FLAGS bit 1 (GUEST_UI_SAVE). If we keep save_ui
+	 * on, D-pad/stick are stolen by the save mapper.
+	 */
+	if (fight_ui)
+		save_ui = 0;
 	if ((fight_ui || title_ui) && host_menu_active())
 		host_menu_close();
+	if (fight_ui)
+		host_battle_poll();
+	else
+		host_battle_close();
 	if (pointer_ui == g_pointer_ui && title_ui == g_title_keys &&
 	    save_ui == g_save_ui &&
 	    menu_ui == g_menu_ui && menu_keys == g_menu_keys &&
@@ -1274,8 +1063,11 @@ static void sync_ui_mode(void)
 		release_guest_walk();
 		g_a_down = 0;
 	}
-	if (g_fight_ui && !fight_ui)
+	if (g_fight_ui && !fight_ui) {
 		fight_release_directions();
+		release_guest_walk();
+		host_battle_close();
+	}
 	g_save_ui = save_ui;
 	g_title_keys = title_ui;
 	g_menu_ui = menu_ui;
@@ -1556,14 +1348,6 @@ static void apply_cursor_move(void)
 	}
 }
 
-static void push_key(SDL_Scancode scancode, int down)
-{
-	SDL_Event event;
-
-	fill_key(&event, scancode, down);
-	SDL_PushEvent(&event);
-}
-
 static const SDL_Scancode g_save_dir_keys[4] = {
 	SDL_SCANCODE_UP,
 	SDL_SCANCODE_RIGHT,
@@ -1787,14 +1571,29 @@ static int menu_page_visible(void)
 	 * around (592,20), so "menu up" is the tab strip / Tianshu actions.
 	 * Do not require the show flag; it is not the hide signal.
 	 */
-	return menu_widget_on_screen(menu_find_widget(GUEST_MENU_TAB0)) ||
-	       menu_widget_on_screen(menu_find_widget(GUEST_MENU_TAB1)) ||
-	       menu_widget_on_screen(menu_find_widget(GUEST_MENU_TAB2)) ||
-	       menu_widget_on_screen(menu_find_widget(3)) ||
-	       menu_widget_on_screen(menu_find_widget(4)) ||
-	       menu_widget_on_screen(menu_find_widget(5)) ||
-	       menu_widget_on_screen(menu_find_widget(6)) ||
-	       menu_widget_on_screen(menu_find_widget(7));
+	int y;
+	uint8_t *widget;
+	static const int ids[] = {
+		GUEST_MENU_TAB0, GUEST_MENU_TAB1, GUEST_MENU_TAB2,
+		3, 4, 5, 6, 7,
+	};
+	unsigned i;
+
+	/*
+	 * Tactics overlay reuses tab ids 0x2496..0x2498 at the bottom of
+	 * the screen. Only the top strip counts as the system menu.
+	 */
+	if (guest_in_fight())
+		return 0;
+	for (i = 0; i < sizeof(ids) / sizeof(ids[0]); i++) {
+		widget = menu_find_widget(ids[i]);
+		if (!menu_widget_on_screen(widget))
+			continue;
+		y = *(volatile int *)(widget + GUEST_WIDGET_Y);
+		if (y >= 0 && y < 160)
+			return 1;
+	}
+	return 0;
 }
 
 static int menu_chrome_drawn(void)
@@ -2823,23 +2622,6 @@ static void menu_flush_direction_releases(void)
 	}
 }
 
-/*
- * The binary has native SDL_CONTROLLER handling, but its embedded iOS SDL
- * backend never opens the Linux controller and therefore never builds the
- * physical-slot -> logical-action links consumed by Battle_Input. Translate
- * only while fighting to keyboard bindings that feed those same logical
- * actions. Battle_Input only checks logical directions through a delayed
- * repeat gate; its immediate edge ends in the four state-aware handlers below.
- * Call those handlers once on a new direction, while retaining the rotated
- * keyboard binding for the game's own long-press repeat.
- */
-static const SDL_Scancode g_fight_dir_keys[4] = {
-	SDL_SCANCODE_LEFT,
-	SDL_SCANCODE_UP,
-	SDL_SCANCODE_RIGHT,
-	SDL_SCANCODE_DOWN,
-};
-
 static void fight_direction_edge(int index)
 {
 	static const uintptr_t handlers[4] = {
@@ -2851,6 +2633,10 @@ static void fight_direction_edge(int index)
 
 	if (index < 0 || index >= 4)
 		return;
+	if (guest_data_ok(GUEST_UIGAMEPAD))
+		*(volatile int *)(uintptr_t)
+			(GUEST_UIGAMEPAD + GUEST_INPUT_MODE) =
+				GUEST_INPUT_KEYBOARD;
 	((void (*)(void))handlers[index])();
 }
 
@@ -2875,11 +2661,9 @@ static void fight_set_dir_source(int index, int axis, int down)
 	}
 	g_fight_dir_down[index] = wanted;
 	fight_direction_edge(index);
-	push_key(g_fight_dir_keys[index], wanted);
 	if (g_fight_key_seen++ < 48)
-		fprintf(stderr, "sword3-sdl: fight dir=%d key=%d %s\n",
-			index, (int)g_fight_dir_keys[index],
-			wanted ? "down" : "up");
+		fprintf(stderr, "sword3-sdl: fight native dir=%d %s\n",
+			index, wanted ? "down" : "up");
 }
 
 static void fight_axis_event(Uint8 axis, Sint16 value)
@@ -2942,7 +2726,6 @@ static void fight_release_directions(void)
 		if (!g_fight_dir_down[i])
 			continue;
 		g_fight_dir_down[i] = 0;
-		push_key(g_fight_dir_keys[i], 0);
 	}
 	g_fight_target_a_up = 0;
 }
@@ -2956,7 +2739,6 @@ static void fight_flush_direction_releases(void)
 			continue;
 		g_fight_dir_release[i] = 0;
 		g_fight_dir_down[i] = 0;
-		push_key(g_fight_dir_keys[i], 0);
 	}
 }
 
@@ -3129,6 +2911,10 @@ static int rewrite_event(SDL_Event *event)
 	if (!event)
 		return 0;
 	scale_pointer_event(event);
+	if (event->type == SDL_CONTROLLERAXISMOTION ||
+	    event->type == SDL_CONTROLLERBUTTONDOWN ||
+	    event->type == SDL_CONTROLLERBUTTONUP)
+		fight_poll_ui();
 	if (event->type == SDL_JOYAXISMOTION ||
 	    event->type == SDL_JOYHATMOTION ||
 	    event->type == SDL_JOYBALLMOTION ||
@@ -3140,6 +2926,16 @@ static int rewrite_event(SDL_Event *event)
 	if (event->type == SDL_CONTROLLERAXISMOTION) {
 		if (host_menu_active()) {
 			host_menu_axis(event->caxis.axis, event->caxis.value);
+			event->type = SDL_FIRSTEVENT;
+			return 0;
+		}
+		if (host_battle_owns_pad()) {
+			host_battle_axis(event->caxis.axis, event->caxis.value);
+			event->type = SDL_FIRSTEVENT;
+			return 0;
+		}
+		if (g_fight_ui) {
+			fight_axis_event(event->caxis.axis, event->caxis.value);
 			event->type = SDL_FIRSTEVENT;
 			return 0;
 		}
@@ -3158,11 +2954,6 @@ static int rewrite_event(SDL_Event *event)
 			return 0;
 		}
 		if (menu_opening()) {
-			event->type = SDL_FIRSTEVENT;
-			return 0;
-		}
-		if (g_fight_ui) {
-			fight_axis_event(event->caxis.axis, event->caxis.value);
 			event->type = SDL_FIRSTEVENT;
 			return 0;
 		}
@@ -3254,6 +3045,10 @@ static int rewrite_event(SDL_Event *event)
 			event->type = SDL_FIRSTEVENT;
 			return 0;
 		}
+		if (g_fight_ui || host_battle_owns_pad()) {
+			event->type = SDL_FIRSTEVENT;
+			return 0;
+		}
 		if (down && guest_on_title() && !g_after_continue)
 			warp_menu_item(0);
 		fill_key(event, SDL_SCANCODE_ESCAPE, down);
@@ -3266,6 +3061,27 @@ static int rewrite_event(SDL_Event *event)
 		return 0;
 	}
 	if (button == SDL_CONTROLLER_BUTTON_B) {
+		if (!down)
+			host_battle_button(button, 0);
+		if (host_battle_owns_pad()) {
+			if (down)
+				host_battle_button(button, down);
+			event->type = SDL_FIRSTEVENT;
+			return 0;
+		}
+		if (g_fight_ui) {
+			if (!down) {
+				event->type = SDL_FIRSTEVENT;
+				return 0;
+			}
+			((void (*)(void))(uintptr_t)GUEST_FIGHT_CANCEL)();
+			if (g_fight_key_seen++ < 48)
+				fprintf(stderr,
+					"sword3-sdl: fight B -> native cancel now=%d\n",
+					guest_now_menu());
+			event->type = SDL_FIRSTEVENT;
+			return 0;
+		}
 		if (g_save_ui) {
 			if (down) {
 				g_after_continue = 0;
@@ -3315,14 +3131,6 @@ static int rewrite_event(SDL_Event *event)
 			event->type = SDL_FIRSTEVENT;
 			return 0;
 		}
-		if (g_fight_ui) {
-			fill_key(event, SDL_SCANCODE_ESCAPE, down);
-			if (g_fight_key_seen++ < 48)
-				fprintf(stderr,
-					"sword3-sdl: fight B -> Escape %s\n",
-					down ? "down" : "up");
-			return 1;
-		}
 		if (g_pointer_ui) {
 			if (g_save_ui && down)
 				g_after_continue = 0;
@@ -3337,6 +3145,14 @@ static int rewrite_event(SDL_Event *event)
 	if (button == SDL_CONTROLLER_BUTTON_A) {
 		if (host_menu_active()) {
 			host_menu_button(button, down);
+			event->type = SDL_FIRSTEVENT;
+			return 0;
+		}
+		if (!down)
+			host_battle_button(button, 0);
+		if (host_battle_owns_pad()) {
+			if (down)
+				host_battle_button(button, down);
 			event->type = SDL_FIRSTEVENT;
 			return 0;
 		}
@@ -3377,13 +3193,15 @@ static int rewrite_event(SDL_Event *event)
 			return 0;
 		}
 		if (g_fight_ui) {
-			if (down && guest_now_menu() == 3) {
-				fight_confirm_target();
+			if (down) {
+				if (guest_now_menu() == 3)
+					fight_confirm_target();
 				g_fight_target_a_up = 1;
 				event->type = SDL_FIRSTEVENT;
 				if (g_fight_key_seen++ < 48)
 					fprintf(stderr,
-						"sword3-sdl: fight target confirm\n");
+						"sword3-sdl: fight native confirm now=%d\n",
+						guest_now_menu());
 				return 0;
 			}
 			fill_key(event, SDL_SCANCODE_RETURN, down);
@@ -3459,6 +3277,16 @@ static int rewrite_event(SDL_Event *event)
 			event->type = SDL_FIRSTEVENT;
 			return 0;
 		}
+		if (host_battle_owns_pad()) {
+			host_battle_button(button, down);
+			event->type = SDL_FIRSTEVENT;
+			return 0;
+		}
+		if (g_fight_ui) {
+			fight_dpad_event(button, down);
+			event->type = SDL_FIRSTEVENT;
+			return 0;
+		}
 		if (g_save_ui) {
 			save_dpad_event(button, down);
 			event->type = SDL_FIRSTEVENT;
@@ -3475,11 +3303,6 @@ static int rewrite_event(SDL_Event *event)
 			return 0;
 		}
 		if (menu_opening()) {
-			event->type = SDL_FIRSTEVENT;
-			return 0;
-		}
-		if (g_fight_ui) {
-			fight_dpad_event(button, down);
 			event->type = SDL_FIRSTEVENT;
 			return 0;
 		}
@@ -3524,6 +3347,11 @@ static int rewrite_event(SDL_Event *event)
 	}
 	if (host_menu_active()) {
 		host_menu_button(button, down);
+		event->type = SDL_FIRSTEVENT;
+		return 0;
+	}
+	if (host_battle_owns_pad()) {
+		host_battle_button(button, down);
 		event->type = SDL_FIRSTEVENT;
 		return 0;
 	}
@@ -3837,11 +3665,33 @@ int sword3_SDL_SetRenderDrawColor(SDL_Renderer *renderer, Uint8 r, Uint8 g,
 	return SDL_SetRenderDrawColor(renderer, r, g, b, a);
 }
 
+static int battle_skip_dst(int x, int y, int w, int h)
+{
+	int lw;
+	int lh;
+
+	if (w <= 0 || h <= 0)
+		return 0;
+	if (!host_battle_active())
+		return 0;
+	lw = g_logical_w > 0 ? g_logical_w : GAME_W;
+	lh = g_logical_h > 0 ? g_logical_h : GAME_H;
+	if (host_battle_skip_blit(x * GAME_W / lw, y * GAME_H / lh,
+				  w * GAME_W / lw, h * GAME_H / lh))
+		return 1;
+	if ((lw != GAME_W || lh != GAME_H) &&
+	    host_battle_skip_blit(x, y, w, h))
+		return 1;
+	return 0;
+}
+
 int sword3_SDL_RenderClear(SDL_Renderer *renderer)
 {
 	static unsigned seen;
 
 	owner_check("SDL_RenderClear", KIND_RENDERER, renderer);
+	if (SDL_GetRenderTarget(renderer) == NULL)
+		fight_poll_ui();
 	if (seen < 5) {
 		seen++;
 		fprintf(stderr, "sword3-sdl: RenderClear\n");
@@ -3852,17 +3702,11 @@ int sword3_SDL_RenderClear(SDL_Renderer *renderer)
 int sword3_SDL_RenderCopy(SDL_Renderer *renderer, SDL_Texture *texture,
 			  const SDL_Rect *srcrect, const SDL_Rect *dstrect)
 {
-	SDL_FRect dstf;
-
 	owner_check("SDL_RenderCopy", KIND_RENDERER, renderer);
 	owner_check("SDL_RenderCopy", KIND_TEXTURE, texture);
-	if (dstrect) {
-		dstf.x = (float)dstrect->x;
-		dstf.y = (float)dstrect->y;
-		dstf.w = (float)dstrect->w;
-		dstf.h = (float)dstrect->h;
-		fight_note_dest(renderer, &dstf);
-	}
+	if (dstrect &&
+	    battle_skip_dst(dstrect->x, dstrect->y, dstrect->w, dstrect->h))
+		return 0;
 	return SDL_RenderCopy(renderer, texture, srcrect, dstrect);
 }
 
@@ -3874,7 +3718,11 @@ int sword3_SDL_RenderCopyF(SDL_Renderer *renderer, SDL_Texture *texture,
 
 	owner_check("SDL_RenderCopyF", KIND_RENDERER, renderer);
 	owner_check("SDL_RenderCopyF", KIND_TEXTURE, texture);
-	fight_note_dest(renderer, dstrect);
+	if (dstrect &&
+	    battle_skip_dst((int)dstrect->x, (int)dstrect->y,
+			    (int)(dstrect->w + 0.5f),
+			    (int)(dstrect->h + 0.5f)))
+		return 0;
 	result = SDL_RenderCopyF(renderer, texture, srcrect, dstrect);
 	if (seen < 12 || result != 0) {
 		if (seen < 12)
@@ -3898,6 +3746,9 @@ int sword3_SDL_RenderCopyEx(SDL_Renderer *renderer, SDL_Texture *texture,
 {
 	owner_check("SDL_RenderCopyEx", KIND_RENDERER, renderer);
 	owner_check("SDL_RenderCopyEx", KIND_TEXTURE, texture);
+	if (dstrect &&
+	    battle_skip_dst(dstrect->x, dstrect->y, dstrect->w, dstrect->h))
+		return 0;
 	return SDL_RenderCopyEx(renderer, texture, srcrect, dstrect, angle,
 				center, flip);
 }
@@ -3912,6 +3763,11 @@ int sword3_SDL_RenderCopyExF(SDL_Renderer *renderer, SDL_Texture *texture,
 
 	owner_check("SDL_RenderCopyExF", KIND_RENDERER, renderer);
 	owner_check("SDL_RenderCopyExF", KIND_TEXTURE, texture);
+	if (dstrect &&
+	    battle_skip_dst((int)dstrect->x, (int)dstrect->y,
+			    (int)(dstrect->w + 0.5f),
+			    (int)(dstrect->h + 0.5f)))
+		return 0;
 	result = SDL_RenderCopyExF(renderer, texture, srcrect, dstrect, angle,
 				   center, flip);
 	if (seen < 8 || result != 0) {
@@ -3947,7 +3803,6 @@ void sword3_SDL_RenderPresent(SDL_Renderer *renderer)
 	owner_check("SDL_RenderPresent", KIND_RENDERER, renderer);
 	ensure_gamecontroller();
 	apply_pad_pointer();
-	fight_commit_dests();
 	seen++;
 	if (seen <= 8 || (seen % 120) == 0)
 		fprintf(stderr, "sword3-sdl: RenderPresent #%u\n", seen);
@@ -3958,9 +3813,9 @@ void sword3_SDL_RenderPresent(SDL_Renderer *renderer)
 	} else if (host_menu_active() &&
 		   SDL_GetRenderTarget(renderer) == NULL) {
 		host_menu_draw(renderer, g_logical_w, g_logical_h);
-	} else if (g_fight_ui && SDL_GetRenderTarget(renderer) == NULL &&
-		   fight_select_rect(&x, &y, &bw, &bh)) {
-		draw_select_frame(renderer, x, y, bw, bh);
+	} else if (host_battle_active() &&
+		   SDL_GetRenderTarget(renderer) == NULL) {
+		host_battle_draw(renderer, g_logical_w, g_logical_h);
 	} else if (g_menu_keys && SDL_GetRenderTarget(renderer) == NULL &&
 		   menu_action_select_rect(&x, &y, &bw, &bh)) {
 		draw_select_frame(renderer, x, y, bw, bh);

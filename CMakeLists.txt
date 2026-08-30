@@ -174,6 +174,7 @@ add_library(sword3_host SHARED
     src/ports/sword3/host_prepare.c
     src/ports/sword3/sdl_bridge.c
     src/ports/sword3/host_menu.c
+    src/ports/sword3/host_battle_menu.c
     src/ports/sword3/paths.c
     src/ports/sword3/input.c
     src/ports/sword3/audio_bridge.c
