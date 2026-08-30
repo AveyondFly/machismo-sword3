@@ -108,6 +108,9 @@
 #define HOST_MENU_WIDGET_BITS 0x10030f500ull
 #define HOST_MENU_W_PARTY0 0x1e
 #define HOST_MENU_EQUIP_SWAP 0x100080f64ull
+#define HOST_MENU_NEW_EQUIP 0x100082e38ull
+#define HOST_MENU_LOAD_ITEM 0x100081548ull
+#define HOST_MENU_ITEM_CLASS 0x1002f40c8ull
 #define HOST_MENU_STR_ADDATK 0x100272b10ull
 #define HOST_MENU_STR_ADDDEF 0x100272b17ull
 #define HOST_MENU_STR_ADDSPD 0x100272b1eull
@@ -1349,10 +1352,19 @@ static void host_menu_equip_open(void)
 		g_equip_focus, n, g_party_i);
 }
 
+static int host_menu_equip_node_temp(uintptr_t node)
+{
+	if (!node || !host_menu_heap_ok(node, HOST_MENU_ITEM_NODE))
+		return -1;
+	return host_menu_mem_i32(node + HOST_MENU_OFF_TEMP);
+}
+
 static int host_menu_equip_swap(uintptr_t bag_node, int slot)
 {
 	uintptr_t rec;
 	uintptr_t worn;
+	int temp;
+	int empty;
 
 	if (!bag_node || !host_menu_heap_ok(bag_node, HOST_MENU_ITEM_NODE))
 		return 0;
@@ -1365,10 +1377,42 @@ static int host_menu_equip_swap(uintptr_t bag_node, int slot)
 	worn = host_menu_guest_ptr(rec);
 	if (!worn)
 		return 0;
-	return ((int (*)(void *, void *, int, int))(uintptr_t)
-			HOST_MENU_EQUIP_SWAP)(
-		       (void *)(uintptr_t)worn, (void *)(uintptr_t)bag_node,
-		       g_party_i + 1, slot + 1) != 0;
+	temp = host_menu_equip_node_temp(bag_node);
+	if (temp < 1)
+		return 0;
+	empty = host_menu_equip_node_temp(worn) < 1;
+	if (empty)
+		((int (*)(void *, int, int, int))(uintptr_t)HOST_MENU_NEW_EQUIP)(
+			(void *)(uintptr_t)HOST_MENU_ITEM_CLASS, temp,
+			g_party_i + 1, slot + 1);
+	else
+		((int (*)(void *, void *, int, int))(uintptr_t)
+			 HOST_MENU_EQUIP_SWAP)(
+			(void *)(uintptr_t)worn, (void *)(uintptr_t)bag_node,
+			g_party_i + 1, slot + 1);
+	worn = host_menu_guest_ptr(rec);
+	if (worn && host_menu_equip_node_temp(worn) != temp)
+		((void (*)(void *, int))(uintptr_t)HOST_MENU_LOAD_ITEM)(
+			(void *)(uintptr_t)worn, temp);
+	if (empty) {
+		uintptr_t party;
+
+		party = HOST_MENU_PARTY +
+			(uintptr_t)g_party_i * HOST_MENU_PARTY_STRIDE;
+		if (host_menu_guest_ok(party, HOST_MENU_PARTY_STRIDE))
+			((void (*)(void *, void *))(uintptr_t)
+				 HOST_MENU_ITEM_APPLY)(
+				(void *)(uintptr_t)party,
+				(void *)(uintptr_t)(bag_node +
+						    HOST_MENU_OFF_INAME));
+	}
+	if (empty && host_menu_equip_node_temp(bag_node) == temp &&
+	    host_menu_mem_i32(bag_node + HOST_MENU_OFF_COUNT) +
+			    host_menu_mem_i32(bag_node +
+					      HOST_MENU_OFF_COUNT_NEW) >
+		    0)
+		host_menu_item_consume(bag_node, 0);
+	return host_menu_equip_node_temp(host_menu_guest_ptr(rec)) == temp;
 }
 
 static void host_menu_equip_commit(void)
@@ -1829,12 +1873,19 @@ static void host_menu_confirm(void)
 
 static void host_menu_back(void)
 {
+	if (g_layer == HOST_MENU_LAYER_EQUIP) {
+		g_layer = HOST_MENU_LAYER_INNER;
+		g_stub = -1;
+		host_menu_item_clear_hold();
+		host_menu_refresh_party();
+		host_menu_refresh_inv();
+		return;
+	}
 	if (g_layer == HOST_MENU_LAYER_STUB ||
 	    g_layer == HOST_MENU_LAYER_SLOTS ||
 	    g_layer == HOST_MENU_LAYER_BESTIARY ||
 	    g_layer == HOST_MENU_LAYER_PICK ||
-	    g_layer == HOST_MENU_LAYER_ASK ||
-	    g_layer == HOST_MENU_LAYER_EQUIP) {
+	    g_layer == HOST_MENU_LAYER_ASK) {
 		g_layer = HOST_MENU_LAYER_INNER;
 		g_stub = -1;
 		host_menu_item_clear_hold();
