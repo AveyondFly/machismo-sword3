@@ -195,11 +195,11 @@ static void owner_drop(enum sword3_sdl_kind kind, void *pointer)
  *   D-pad         -> keyboard arrows (setting.lua KB_UP=82 etc.)
  *   A talks (Return); B back-only; SELECT host menu; L3 original menu
  *
- * Battle already consumes controller logical actions 1..6 (directions,
- * cancel, confirm). Keep those SDL_CONTROLLER events native. iOS 2022 has
- * no visible commButtonClass focus, so the host only adds a yellow frame
- * from the widget geometry written by 0x1001a8b84. Input state remains
- * entirely owned by the game.
+ * Battle command grid (NowMenu==1) is a touch 2x3 drawn by 0x1001a8b84.
+ * The leftover keyboard handlers still walk a PC 4-column table (up/down
+ * change select by 4), so they only bounce between 攻击 and 防御. Host
+ * reads the draw-written button x/y, moves between those cells, and taps
+ * the focused cell. Spell/item/target layers keep the native handlers.
  *
  * After Continue, map 0 is no longer treated as the title so the
  * first field does not keep the mouse cursor.
@@ -300,6 +300,7 @@ static void owner_drop(enum sword3_sdl_kind kind, void *pointer)
 #define GUEST_CMD_SEL 0x1002a5308ull
 #define GUEST_CMD_BUTTONS 0x1002ab900ull
 #define GUEST_CMD_EXTRA 0x1002abe40ull
+#define GUEST_CMD_TACTICS 0x1002ac140ull
 #define GUEST_CMD_STRIDE 0xc0u
 #define GUEST_CMD_IMG 8
 #define GUEST_CMD_X 0x20
@@ -308,8 +309,9 @@ static void owner_drop(enum sword3_sdl_kind kind, void *pointer)
 #define GUEST_CMD_W 0x98
 #define GUEST_IMG_W 0x6c
 #define GUEST_IMG_H 0x70
-#define GUEST_CMD_MAIN_N 5
+#define GUEST_CMD_MAIN_N 7
 #define GUEST_CMD_EXTRA_N 4
+#define GUEST_CMD_TACTICS_N 6
 #define GUEST_ACTIVE_JOYSTICK 0x1c
 #define GUEST_INPUT_TRANSITION 0x1001c15fcull
 #define GUEST_FIGHT_OK 0x10003ddf8ull
@@ -317,8 +319,33 @@ static void owner_drop(enum sword3_sdl_kind kind, void *pointer)
 #define GUEST_FIGHT_RIGHT 0x10003e668ull
 #define GUEST_FIGHT_DOWN 0x10003f28cull
 #define GUEST_FIGHT_LEFT 0x10003dff8ull
-#define FIGHT_DEST_MAX 16
 #define FIGHT_CMD_MAX 12
+#define FIGHT_CELL_MAX 20
+#define FIGHT_OVERLAY_Y 280
+#define FIGHT_TACTICS_Y0 340
+#define FIGHT_TACTICS_Y1 455
+#define FIGHT_TACTICS_N 5
+#define FIGHT_TACTICS_SEL0 40
+#define FIGHT_TACTICS_X0 144
+#define FIGHT_TACTICS_DX 102
+#define FIGHT_TACTICS_Y 360
+#define FIGHT_TACTICS_WH 80
+#define GUEST_CMD_SCAN 0x1002ab840ull
+#define GUEST_FIGHT_TACTICS_BYTE 0x1002a5429ull
+#define GUEST_FIGHT_PARTY_BYTE 0x1002a5420ull
+#define GUEST_FIGHT_CLICK_BYTE 0x1002f2e68ull
+#define GUEST_FIGHT_SHOW_CMD 0x1002f2e48ull
+#define FIGHT_NOW_TURN 99
+#define FIGHT_NOW_AUTO 100
+#define GUEST_PARTY_BASE 0x1002d0608ull
+#define GUEST_PARTY_STRIDE 0x3490u
+#define GUEST_PARTY_N 0x1002f1eccu
+#define GUEST_BATTLE_BASE 0x1002ac4d8ull
+#define GUEST_BATTLE_STRIDE 0x39b8u
+#define GUEST_BATTLE_N 0x1002f1ed0ull
+#define GUEST_AI_COMMAND 0x3478u
+#define GUEST_AUTO_HALF 0x1002f27feull
+#define FIGHT_AI_AUTO_MAX 0x24
 
 static SDL_Window *g_window;
 static SDL_Renderer *g_renderer;
@@ -376,12 +403,24 @@ static int g_menu_action_focus = -1;
 static int g_menu_action_a_up;
 static int g_menu_nested;
 static Uint32 g_menu_a_block_until;
-static SDL_FRect g_fight_dest_build[FIGHT_DEST_MAX];
-static int g_fight_ndest_build;
-static SDL_FRect g_fight_dests[FIGHT_DEST_MAX];
-static int g_fight_ndest;
-static SDL_FRect g_fight_cmds[8];
-static int g_fight_ncmd;
+struct fight_cell {
+	int sel;
+	int x;
+	int y;
+	int w;
+	int h;
+};
+
+static struct fight_cell g_fight_cells[FIGHT_CELL_MAX];
+static int g_fight_ncell;
+static int g_fight_focus;
+static unsigned g_fight_grid_logged;
+static int g_fight_tactics;
+static unsigned g_fight_tactics_logged;
+static Uint32 g_fight_tactics_leave_until;
+static int g_fight_auto_b;
+static int g_fight_auto_armed;
+static Uint32 g_fight_menu_until;
 static int g_a_down;
 static Uint32 g_a_edge_ms;
 static unsigned g_a_chatter;
@@ -738,6 +777,9 @@ static void save_release_directions(void);
 static void title_release_directions(void);
 static void menu_release_directions(void);
 static void fight_release_directions(void);
+static void fight_collect_cells(void);
+static int fight_overlay_visible(void);
+static uint8_t *menu_find_widget(int id);
 static int menu_widget_rect(int id, int *x, int *y, int *w, int *h);
 static int menu_chrome_drawn(void);
 static int menu_widget_drawn(int id);
@@ -853,19 +895,32 @@ static int guest_in_fight(void)
 {
 	int flag;
 	int now;
+	Uint32 ticks;
 
 	/*
 	 * 0x100045510 is the game's inFight getter: FightFlag bit 1.
 	 * Other bits (observed 0x41) stay set outside battle, so flag!=0
-	 * falsely takes over the field: stick swallowed, D-pad rewritten.
-	 * NowMenu 1..0x3f is the command / target layer while a fight is
-	 * actually running.
+	 * falsely takes over the field. Opening 战术 sets NowMenu=0 and
+	 * clears bit 1; keep the fight pad while the overlay buttons are
+	 * on screen, and for a short time after the command grid.
 	 */
+	now = guest_now_menu();
+	if (now == 1 || g_fight_tactics)
+		g_fight_menu_until = SDL_GetTicks() + 800;
 	flag = guest_read_i32(GUEST_FIGHT_FLAG, 0);
 	if (flag & 2)
 		return 1;
-	now = guest_now_menu();
-	return now > 0 && now < 0x40;
+	if (now > 0 && now < 0x40)
+		return 1;
+	if (now == FIGHT_NOW_TURN || now == FIGHT_NOW_AUTO || now == 101 ||
+	    now == 102)
+		return 1;
+	if (g_fight_tactics)
+		return 1;
+	if (fight_overlay_visible())
+		return 1;
+	ticks = SDL_GetTicks();
+	return g_fight_menu_until && !SDL_TICKS_PASSED(ticks, g_fight_menu_until);
 }
 
 static uint8_t *guest_cmd_for_sel(int sel)
@@ -890,16 +945,14 @@ static uint8_t *guest_cmd_for_sel(int sel)
 	return (uint8_t *)addr;
 }
 
-static int guest_cmd_rect(int index, int *x, int *y, int *w, int *h)
+static int guest_cmd_rect_ptr(uint8_t *btn, int *x, int *y, int *w, int *h)
 {
-	uint8_t *btn;
 	uint8_t *img;
 	int bx;
 	int by;
 	int bw;
 	int bh;
 
-	btn = guest_cmd_for_sel(index);
 	if (!btn)
 		return 0;
 	bx = *(volatile int *)(btn + GUEST_CMD_X);
@@ -932,164 +985,804 @@ static int guest_cmd_rect(int index, int *x, int *y, int *w, int *h)
 	return 1;
 }
 
-static int cmp_fight_dest(const void *a, const void *b)
+static int guest_cmd_rect(int index, int *x, int *y, int *w, int *h)
 {
-	const SDL_FRect *pa = a;
-	const SDL_FRect *pb = b;
+	return guest_cmd_rect_ptr(guest_cmd_for_sel(index), x, y, w, h);
+}
 
-	if (pa->y + 8.0f < pb->y)
-		return -1;
-	if (pa->y > pb->y + 8.0f)
+static int fight_tactics_y(int y)
+{
+	return y >= FIGHT_TACTICS_Y0 && y <= FIGHT_TACTICS_Y1;
+}
+
+static int fight_count_capped(uintptr_t addr)
+{
+	int n;
+
+	n = guest_read_i32(addr, 0);
+	if (n < 1)
+		return 4;
+	if (n > 8)
+		return 8;
+	return n;
+}
+
+static int fight_read_ai_command(uintptr_t base, unsigned stride, int index)
+{
+	uintptr_t addr;
+
+	addr = base + (uintptr_t)index * stride + GUEST_AI_COMMAND;
+	if (!guest_data_ok(addr + 3))
+		return 0;
+	return *(volatile int *)(uintptr_t)addr;
+}
+
+static int fight_auto_command(void)
+{
+	int n;
+	int i;
+	int v;
+
+	n = fight_count_capped(GUEST_PARTY_N);
+	for (i = 0; i < n; i++) {
+		v = fight_read_ai_command(GUEST_PARTY_BASE, GUEST_PARTY_STRIDE, i);
+		if (v >= 1 && v <= FIGHT_AI_AUTO_MAX)
+			return v;
+	}
+	n = fight_count_capped(GUEST_BATTLE_N);
+	for (i = 0; i < n; i++) {
+		v = fight_read_ai_command(GUEST_BATTLE_BASE, GUEST_BATTLE_STRIDE, i);
+		if (v >= 1 && v <= FIGHT_AI_AUTO_MAX)
+			return v;
+	}
+	return 0;
+}
+
+static void fight_clear_auto_half(int index)
+{
+	uintptr_t addr;
+	uint16_t flag;
+
+	addr = GUEST_AUTO_HALF + (uintptr_t)index * 2u;
+	if (!guest_data_ok(addr + 1))
+		return;
+	flag = *(volatile uint16_t *)(uintptr_t)addr;
+	if (flag & 0x8000)
+		*(volatile uint16_t *)(uintptr_t)addr = (uint16_t)(flag & ~0x8000);
+}
+
+static void fight_zero_actor_ai(uintptr_t base, unsigned stride, int n)
+{
+	int i;
+	uintptr_t addr;
+	int v;
+
+	for (i = 0; i < n; i++) {
+		addr = base + (uintptr_t)i * stride + GUEST_AI_COMMAND;
+		if (!guest_data_ok(addr + 3))
+			continue;
+		v = *(volatile int *)(uintptr_t)addr;
+		if (v >= 1 && v <= FIGHT_AI_AUTO_MAX)
+			*(volatile int *)(uintptr_t)addr = 0;
+		fight_clear_auto_half(i);
+	}
+}
+
+static void fight_zero_auto_command(void)
+{
+	fight_zero_actor_ai(GUEST_PARTY_BASE, GUEST_PARTY_STRIDE,
+			    fight_count_capped(GUEST_PARTY_N));
+	fight_zero_actor_ai(GUEST_BATTLE_BASE, GUEST_BATTLE_STRIDE,
+			    fight_count_capped(GUEST_BATTLE_N));
+}
+
+static int fight_now_auto(int now)
+{
+	return now == FIGHT_NOW_AUTO || now == 101 || now == 102;
+}
+
+static int fight_live(void)
+{
+	int now;
+	int flag;
+
+	now = guest_now_menu();
+	flag = guest_read_i32(GUEST_FIGHT_FLAG, 0);
+	if (flag & 2)
 		return 1;
-	if (pa->x < pb->x)
-		return -1;
-	if (pa->x > pb->x)
+	if (now > 0 && now < 0x40)
+		return 1;
+	if (now == FIGHT_NOW_TURN || fight_now_auto(now))
 		return 1;
 	return 0;
 }
 
-static int fight_dest_candidate(SDL_Renderer *renderer, const SDL_FRect *dst)
+static int fight_in_auto_battle(void)
 {
-	float lw;
-	float lh;
+	if (!fight_live())
+		return 0;
+	return fight_now_auto(guest_now_menu()) || g_fight_auto_armed ||
+	       fight_auto_command();
+}
 
-	if (!g_fight_ui || !dst || !renderer)
+static int fight_tactics_leaving(void)
+{
+	return g_fight_tactics_leave_until &&
+	       !SDL_TICKS_PASSED(SDL_GetTicks(), g_fight_tactics_leave_until);
+}
+
+static void fight_leave_tactics(void)
+{
+	g_fight_tactics = 0;
+	g_fight_tactics_logged = 0;
+	g_fight_grid_logged = 0;
+	g_fight_focus = 0;
+	g_fight_tactics_leave_until = SDL_GetTicks() + 600;
+}
+
+static void fight_restore_manual(void)
+{
+	fight_zero_auto_command();
+	g_fight_auto_armed = 0;
+	fight_leave_tactics();
+}
+
+static int fight_overlay_widget_count(void)
+{
+	uintptr_t next;
+	uint8_t *widget;
+	int n;
+	int i;
+	int id;
+	int x;
+	int y;
+	int w;
+	int h;
+
+	n = 0;
+	if (!guest_data_ok(GUEST_MENU_WIDGET_ROOT))
 		return 0;
-	if (SDL_GetRenderTarget(renderer) != NULL)
+	next = *(volatile uintptr_t *)(uintptr_t)
+		(GUEST_MENU_WIDGET_ROOT + GUEST_WIDGET_NEXT);
+	for (i = 0; next && i < 192; i++) {
+		widget = (uint8_t *)next;
+		id = *(volatile int *)(widget + GUEST_WIDGET_ID);
+		x = *(volatile int *)(widget + GUEST_WIDGET_X);
+		y = *(volatile int *)(widget + GUEST_WIDGET_Y);
+		h = *(volatile int *)(widget + GUEST_WIDGET_H);
+		w = *(volatile int *)(widget + GUEST_WIDGET_W);
+		next = *(volatile uintptr_t *)(widget + GUEST_WIDGET_NEXT);
+		if (id == GUEST_MENU_BACK || (id >= 3 && id <= 7))
+			continue;
+		if (x < 0 || y < 0 || w <= 0 || h <= 0)
+			continue;
+		if (fight_tactics_y(y))
+			n++;
+	}
+	return n;
+}
+
+static int fight_overlay_visible(void)
+{
+	int i;
+	int n;
+	int x;
+	int y;
+	int w;
+	int h;
+	uint8_t *btn;
+	uintptr_t addr;
+
+	if (g_fight_tactics)
+		return 1;
+	if (fight_overlay_widget_count() >= 3)
+		return 1;
+	n = 0;
+	for (i = 0; i < GUEST_CMD_EXTRA_N; i++) {
+		addr = GUEST_CMD_EXTRA + (uintptr_t)i * GUEST_CMD_STRIDE;
+		if (!guest_data_ok(addr) ||
+		    !guest_data_ok(addr + GUEST_CMD_STRIDE - 1))
+			continue;
+		btn = (uint8_t *)addr;
+		if (guest_cmd_rect_ptr(btn, &x, &y, &w, &h) &&
+		    fight_tactics_y(y))
+			n++;
+	}
+	for (i = 0; i < GUEST_CMD_TACTICS_N; i++) {
+		addr = GUEST_CMD_TACTICS + (uintptr_t)i * GUEST_CMD_STRIDE;
+		if (!guest_data_ok(addr) ||
+		    !guest_data_ok(addr + GUEST_CMD_STRIDE - 1))
+			continue;
+		btn = (uint8_t *)addr;
+		if (guest_cmd_rect_ptr(btn, &x, &y, &w, &h) &&
+		    fight_tactics_y(y))
+			n++;
+	}
+	return n >= 2;
+}
+
+static void fight_write_sel(int sel)
+{
+	if (sel < 1 || sel > FIGHT_CMD_MAX)
+		return;
+	if (!guest_data_ok(GUEST_CMD_SEL))
+		return;
+	*(volatile int *)(uintptr_t)GUEST_CMD_SEL = sel;
+}
+
+static int fight_near_coord(int a, int b)
+{
+	int d;
+
+	d = a - b;
+	if (d < 0)
+		d = -d;
+	return d < 24;
+}
+
+static void fight_fill_grid_hole(struct fight_cell *cells, int *n)
+{
+	int xs[8];
+	int ys[8];
+	int nx;
+	int ny;
+	int i;
+	int j;
+	int found;
+	int x;
+	int y;
+	int w;
+	int h;
+	int sel;
+	int k;
+	int used;
+
+	if (*n < 5 || *n >= FIGHT_CELL_MAX)
+		return;
+	nx = 0;
+	ny = 0;
+	w = cells[0].w;
+	h = cells[0].h;
+	for (i = 0; i < *n; i++) {
+		found = 0;
+		for (j = 0; j < nx; j++) {
+			if (fight_near_coord(xs[j], cells[i].x)) {
+				found = 1;
+				break;
+			}
+		}
+		if (!found && nx < 8)
+			xs[nx++] = cells[i].x;
+		found = 0;
+		for (j = 0; j < ny; j++) {
+			if (fight_near_coord(ys[j], cells[i].y)) {
+				found = 1;
+				break;
+			}
+		}
+		if (!found && ny < 8)
+			ys[ny++] = cells[i].y;
+	}
+	if (nx != 3 || ny != 2)
+		return;
+	for (i = 0; i < ny; i++) {
+		for (j = 0; j < nx; j++) {
+			x = xs[j];
+			y = ys[i];
+			found = 0;
+			for (k = 0; k < *n; k++) {
+				if (fight_near_coord(cells[k].x, x) &&
+				    fight_near_coord(cells[k].y, y)) {
+					found = 1;
+					break;
+				}
+			}
+			if (found)
+				continue;
+			sel = 6;
+			for (k = 1; k <= GUEST_CMD_MAIN_N; k++) {
+				used = 0;
+				for (found = 0; found < *n; found++) {
+					if (cells[found].sel == k) {
+						used = 1;
+						break;
+					}
+				}
+				if (!used) {
+					sel = k;
+					break;
+				}
+			}
+			cells[*n].sel = sel;
+			cells[*n].x = x;
+			cells[*n].y = y;
+			cells[*n].w = w;
+			cells[*n].h = h;
+			(*n)++;
+			if (g_fight_grid_logged < 1)
+				fprintf(stderr,
+					"sword3-sdl: fight hole sel=%d xy=%d,%d\n",
+					sel, x, y);
+			return;
+		}
+	}
+}
+
+static int fight_add_cell(struct fight_cell *cells, int *n, int sel, int x,
+			 int y, int w, int h)
+{
+	int i;
+
+	if (*n >= FIGHT_CELL_MAX)
 		return 0;
-	lw = g_logical_w > 0 ? (float)g_logical_w : (float)GAME_W;
-	lh = g_logical_h > 0 ? (float)g_logical_h : (float)GAME_H;
-	if (dst->w < 12.0f || dst->w > 160.0f)
-		return 0;
-	if (dst->h < 12.0f || dst->h > 110.0f)
-		return 0;
-	if (dst->x < lw * 0.22f)
-		return 0;
-	if (dst->y < lh * 0.06f || dst->y > lh * 0.62f)
-		return 0;
+	for (i = 0; i < *n; i++) {
+		if (fight_near_coord(cells[i].x, x) &&
+		    fight_near_coord(cells[i].y, y))
+			return 0;
+	}
+	cells[*n].sel = sel;
+	cells[*n].x = x;
+	cells[*n].y = y;
+	cells[*n].w = w;
+	cells[*n].h = h;
+	(*n)++;
 	return 1;
 }
 
-static void fight_note_dest(SDL_Renderer *renderer, const SDL_FRect *dst)
+static int fight_add_addr(struct fight_cell *cells, int *n, int sel,
+			 uintptr_t addr)
 {
-	if (!fight_dest_candidate(renderer, dst))
+	uint8_t *btn;
+	int x;
+	int y;
+	int w;
+	int h;
+
+	if (!guest_data_ok(addr) ||
+	    !guest_data_ok(addr + GUEST_CMD_STRIDE - 1))
+		return 0;
+	btn = (uint8_t *)addr;
+	if (!guest_cmd_rect_ptr(btn, &x, &y, &w, &h))
+		return 0;
+	return fight_add_cell(cells, n, sel, x, y, w, h);
+}
+
+static void fight_dump_slots(void)
+{
+	int i;
+	uint8_t *btn;
+	int bx;
+	int by;
+	int bw;
+	int bh;
+	uintptr_t addr;
+
+	for (i = 1; i <= GUEST_CMD_MAIN_N + GUEST_CMD_EXTRA_N; i++) {
+		btn = guest_cmd_for_sel(i);
+		if (!btn) {
+			fprintf(stderr, "sword3-sdl: fight slot %d null\n", i);
+			continue;
+		}
+		bx = *(volatile int *)(btn + GUEST_CMD_X);
+		by = *(volatile int *)(btn + GUEST_CMD_Y);
+		bw = *(volatile int *)(btn + GUEST_CMD_W);
+		bh = *(volatile int *)(btn + GUEST_CMD_H);
+		fprintf(stderr,
+			"sword3-sdl: fight slot %d raw xy=%d,%d %dx%d\n",
+			i, bx, by, bw, bh);
+	}
+	for (i = 0; i < GUEST_CMD_TACTICS_N; i++) {
+		addr = GUEST_CMD_TACTICS + (uintptr_t)i * GUEST_CMD_STRIDE;
+		if (!guest_data_ok(addr) ||
+		    !guest_data_ok(addr + GUEST_CMD_STRIDE - 1)) {
+			fprintf(stderr, "sword3-sdl: fight tactics %d null\n", i);
+			continue;
+		}
+		btn = (uint8_t *)addr;
+		bx = *(volatile int *)(btn + GUEST_CMD_X);
+		by = *(volatile int *)(btn + GUEST_CMD_Y);
+		bw = *(volatile int *)(btn + GUEST_CMD_W);
+		bh = *(volatile int *)(btn + GUEST_CMD_H);
+		fprintf(stderr,
+			"sword3-sdl: fight tactics %d raw xy=%d,%d %dx%d\n",
+			i, bx, by, bw, bh);
+	}
+	addr = GUEST_CMD_SCAN;
+	if (guest_data_ok(addr) &&
+	    guest_data_ok(addr + GUEST_CMD_STRIDE - 1)) {
+		btn = (uint8_t *)addr;
+		bx = *(volatile int *)(btn + GUEST_CMD_X);
+		by = *(volatile int *)(btn + GUEST_CMD_Y);
+		bw = *(volatile int *)(btn + GUEST_CMD_W);
+		bh = *(volatile int *)(btn + GUEST_CMD_H);
+		fprintf(stderr,
+			"sword3-sdl: fight scan0 raw xy=%d,%d %dx%d\n",
+			bx, by, bw, bh);
+	}
+}
+
+static void fight_dump_overlay_state(void)
+{
+	uintptr_t next;
+	uint8_t *widget;
+	int i;
+	int id;
+	int x;
+	int y;
+	int w;
+	int h;
+	unsigned show;
+
+	fprintf(stderr,
+		"sword3-sdl: fight tactics flags party=%d byte=%d click=%d now=%d sel=%d ff=%d auto=%d ai=%d,%d,%d,%d\n",
+		guest_data_ok(GUEST_FIGHT_PARTY_BYTE)
+			? *(volatile uint8_t *)(uintptr_t)GUEST_FIGHT_PARTY_BYTE
+			: -1,
+		guest_data_ok(GUEST_FIGHT_TACTICS_BYTE)
+			? *(volatile uint8_t *)(uintptr_t)GUEST_FIGHT_TACTICS_BYTE
+			: -1,
+		guest_data_ok(GUEST_FIGHT_CLICK_BYTE)
+			? *(volatile uint8_t *)(uintptr_t)GUEST_FIGHT_CLICK_BYTE
+			: -1,
+		guest_now_menu(), guest_cmd_sel(),
+		guest_read_i32(GUEST_FIGHT_FLAG, -1),
+		fight_auto_command(),
+		fight_read_ai_command(GUEST_PARTY_BASE, GUEST_PARTY_STRIDE, 0),
+		fight_read_ai_command(GUEST_PARTY_BASE, GUEST_PARTY_STRIDE, 1),
+		fight_read_ai_command(GUEST_PARTY_BASE, GUEST_PARTY_STRIDE, 2),
+		fight_read_ai_command(GUEST_PARTY_BASE, GUEST_PARTY_STRIDE, 3));
+	if (!guest_data_ok(GUEST_MENU_WIDGET_ROOT))
 		return;
-	if (g_fight_ndest_build >= FIGHT_DEST_MAX)
-		return;
-	g_fight_dest_build[g_fight_ndest_build++] = *dst;
+	next = *(volatile uintptr_t *)(uintptr_t)
+		(GUEST_MENU_WIDGET_ROOT + GUEST_WIDGET_NEXT);
+	for (i = 0; next && i < 192; i++) {
+		widget = (uint8_t *)next;
+		id = *(volatile int *)(widget + GUEST_WIDGET_ID);
+		x = *(volatile int *)(widget + GUEST_WIDGET_X);
+		y = *(volatile int *)(widget + GUEST_WIDGET_Y);
+		h = *(volatile int *)(widget + GUEST_WIDGET_H);
+		w = *(volatile int *)(widget + GUEST_WIDGET_W);
+		show = *(volatile uint8_t *)(widget + GUEST_WIDGET_SHOW);
+		if (x >= 0 && y >= 0)
+			fprintf(stderr,
+				"sword3-sdl: fight widget id=%d xy=%d,%d %dx%d show=%u\n",
+				id, x, y, w, h, show);
+		next = *(volatile uintptr_t *)(widget + GUEST_WIDGET_NEXT);
+	}
 }
 
-static int fight_rects_near(const SDL_FRect *a, const SDL_FRect *b, float gap)
+static int fight_is_tactics_entry(const struct fight_cell *cell)
 {
-	return a->x < b->x + b->w + gap && a->x + a->w + gap > b->x &&
-	       a->y < b->y + b->h + gap && a->y + a->h + gap > b->y;
+	if (!cell)
+		return 0;
+	if (cell->sel == 23 || cell->sel == 6)
+		return 1;
+	return cell->y >= 120 && cell->y < 220 && cell->x >= 330;
 }
 
-static void fight_union_rect(SDL_FRect *dst, const SDL_FRect *src)
+static void fight_sort_cells_x(struct fight_cell *cells, int n)
 {
-	float x2;
-	float y2;
-
-	x2 = dst->x + dst->w;
-	y2 = dst->y + dst->h;
-	if (src->x < dst->x)
-		dst->x = src->x;
-	if (src->y < dst->y)
-		dst->y = src->y;
-	if (src->x + src->w > x2)
-		x2 = src->x + src->w;
-	if (src->y + src->h > y2)
-		y2 = src->y + src->h;
-	dst->w = x2 - dst->x;
-	dst->h = y2 - dst->y;
-}
-
-static void fight_inflate_cmd(SDL_FRect *r)
-{
-	float cx;
-	float bottom;
-
-	cx = r->x + r->w * 0.5f;
-	bottom = r->y + r->h;
-	if (r->w < 92.0f)
-		r->w = 92.0f;
-	if (r->h < 96.0f)
-		r->h = 96.0f;
-	r->x = cx - r->w * 0.5f;
-	r->y = bottom - r->h + 8.0f;
-}
-
-static void fight_cluster_dests(void)
-{
-	int used[FIGHT_DEST_MAX];
 	int i;
 	int j;
-	int merged;
-	SDL_FRect u;
+	struct fight_cell tmp;
 
-	memset(used, 0, sizeof(used));
-	g_fight_ncmd = 0;
-	for (i = 0; i < g_fight_ndest; i++) {
-		if (used[i])
-			continue;
-		u = g_fight_dests[i];
-		used[i] = 1;
-		do {
-			merged = 0;
-			for (j = 0; j < g_fight_ndest; j++) {
-				if (used[j])
-					continue;
-				if (!fight_rects_near(&u, &g_fight_dests[j], 20.0f))
-					continue;
-				fight_union_rect(&u, &g_fight_dests[j]);
-				used[j] = 1;
-				merged = 1;
-			}
-		} while (merged);
-		if (u.w < 20.0f || u.h < 14.0f)
-			continue;
-		if (g_fight_ncmd >= 8)
-			break;
-		fight_inflate_cmd(&u);
-		g_fight_cmds[g_fight_ncmd++] = u;
+	for (i = 1; i < n; i++) {
+		tmp = cells[i];
+		j = i;
+		while (j > 0 && cells[j - 1].x > tmp.x) {
+			cells[j] = cells[j - 1];
+			j--;
+		}
+		cells[j] = tmp;
 	}
-	if (g_fight_ncmd > 1)
-		qsort(g_fight_cmds, (size_t)g_fight_ncmd, sizeof(g_fight_cmds[0]),
-		      cmp_fight_dest);
 }
 
-static void fight_commit_dests(void)
+static int fight_collect_overlay_widgets(struct fight_cell *cells, int *n)
 {
-	g_fight_ndest = g_fight_ndest_build;
-	if (g_fight_ndest > 0) {
-		memcpy(g_fight_dests, g_fight_dest_build,
-		       (size_t)g_fight_ndest * sizeof(g_fight_dests[0]));
-		qsort(g_fight_dests, (size_t)g_fight_ndest, sizeof(g_fight_dests[0]),
-		      cmp_fight_dest);
+	uintptr_t next;
+	uint8_t *widget;
+	int i;
+	int id;
+	int x;
+	int y;
+	int w;
+	int h;
+	int added;
+
+	added = 0;
+	if (!guest_data_ok(GUEST_MENU_WIDGET_ROOT))
+		return 0;
+	next = *(volatile uintptr_t *)(uintptr_t)
+		(GUEST_MENU_WIDGET_ROOT + GUEST_WIDGET_NEXT);
+	for (i = 0; next && i < 192 && *n < FIGHT_CELL_MAX; i++) {
+		widget = (uint8_t *)next;
+		id = *(volatile int *)(widget + GUEST_WIDGET_ID);
+		x = *(volatile int *)(widget + GUEST_WIDGET_X);
+		y = *(volatile int *)(widget + GUEST_WIDGET_Y);
+		h = *(volatile int *)(widget + GUEST_WIDGET_H);
+		w = *(volatile int *)(widget + GUEST_WIDGET_W);
+		next = *(volatile uintptr_t *)(widget + GUEST_WIDGET_NEXT);
+		if (id == GUEST_MENU_BACK || (id >= 3 && id <= 7))
+			continue;
+		if (x < 0 || y < 0 || w < 24 || h < 24)
+			continue;
+		if (!fight_tactics_y(y))
+			continue;
+		if (w > 240)
+			w = FIGHT_TACTICS_WH;
+		if (h > 240)
+			h = FIGHT_TACTICS_WH;
+		if (fight_add_cell(cells, n, FIGHT_TACTICS_SEL0 + added,
+				   x, y, w, h))
+			added++;
 	}
-	g_fight_ndest_build = 0;
-	fight_cluster_dests();
+	return added;
+}
+
+static void fight_fill_tactics_row(struct fight_cell *cells, int *n)
+{
+	int i;
+
+	*n = 0;
+	for (i = 0; i < FIGHT_TACTICS_N && *n < FIGHT_CELL_MAX; i++)
+		fight_add_cell(cells, n, FIGHT_TACTICS_SEL0 + i,
+			       FIGHT_TACTICS_X0 + i * FIGHT_TACTICS_DX,
+			       FIGHT_TACTICS_Y, FIGHT_TACTICS_WH,
+			       FIGHT_TACTICS_WH);
+}
+
+static int fight_overlay_active(int now)
+{
+	if (now == 2 || now == 3 || now == 4) {
+		g_fight_tactics = 0;
+		return 0;
+	}
+	if (fight_tactics_leaving()) {
+		g_fight_tactics = 0;
+		return 0;
+	}
+	if (fight_overlay_widget_count() >= 3)
+		g_fight_tactics = 1;
+	if (fight_now_auto(now) || g_fight_auto_armed)
+		g_fight_tactics = 1;
+	return g_fight_tactics;
+}
+
+static void fight_collect_cells(void)
+{
+	struct fight_cell cells[FIGHT_CELL_MAX];
+	int n;
+	int i;
+	int j;
+	int x;
+	int y;
+	int w;
+	int h;
+	int want;
+	int keep;
+	int now;
+	int overlay;
+
+	n = 0;
+	if (!g_fight_ui) {
+		g_fight_ncell = 0;
+		g_fight_focus = 0;
+		return;
+	}
+	now = guest_now_menu();
+	overlay = fight_overlay_active(now);
+	if (overlay) {
+		n = 0;
+		fight_collect_overlay_widgets(cells, &n);
+		for (i = 1; i <= GUEST_CMD_MAIN_N + GUEST_CMD_EXTRA_N &&
+			    n < FIGHT_CELL_MAX; i++) {
+			if (!guest_cmd_rect(i, &x, &y, &w, &h))
+				continue;
+			if (!fight_tactics_y(y))
+				continue;
+			fight_add_cell(cells, &n, i, x, y, w, h);
+		}
+		for (i = 0; i < GUEST_CMD_TACTICS_N && n < FIGHT_CELL_MAX; i++)
+			fight_add_addr(cells, &n, 20 + i,
+				       GUEST_CMD_TACTICS +
+					       (uintptr_t)i * GUEST_CMD_STRIDE);
+		j = 0;
+		for (i = 0; i < n; i++) {
+			if (fight_tactics_y(cells[i].y))
+				cells[j++] = cells[i];
+		}
+		n = j;
+		if (n < 3)
+			fight_fill_tactics_row(cells, &n);
+		fight_sort_cells_x(cells, n);
+		if (n > FIGHT_TACTICS_N)
+			n = FIGHT_TACTICS_N;
+		for (i = 0; i < n; i++)
+			cells[i].sel = FIGHT_TACTICS_SEL0 + i;
+		g_fight_tactics = 1;
+	} else {
+		for (i = 1; i <= GUEST_CMD_MAIN_N + GUEST_CMD_EXTRA_N &&
+			    n < FIGHT_CELL_MAX; i++) {
+			if (!guest_cmd_rect(i, &x, &y, &w, &h))
+				continue;
+			fight_add_cell(cells, &n, i, x, y, w, h);
+		}
+		for (i = 0; i < GUEST_CMD_TACTICS_N && n < FIGHT_CELL_MAX; i++)
+			fight_add_addr(cells, &n, 20 + i,
+				       GUEST_CMD_TACTICS +
+					       (uintptr_t)i * GUEST_CMD_STRIDE);
+		fight_add_addr(cells, &n, 30, GUEST_CMD_SCAN);
+		if (now == 1) {
+			j = 0;
+			for (i = 0; i < n; i++) {
+				if (cells[i].y < FIGHT_OVERLAY_Y)
+					cells[j++] = cells[i];
+			}
+			n = j;
+			fight_fill_grid_hole(cells, &n);
+		} else {
+			n = 0;
+		}
+	}
+	want = guest_cmd_sel();
+	keep = -1;
+	if (g_fight_focus >= 0 && g_fight_focus < g_fight_ncell) {
+		for (i = 0; i < n; i++) {
+			if (cells[i].sel == g_fight_cells[g_fight_focus].sel) {
+				keep = i;
+				break;
+			}
+		}
+	}
+	if (keep < 0 && want >= 1 && want <= FIGHT_CMD_MAX) {
+		for (i = 0; i < n; i++) {
+			if (cells[i].sel == want) {
+				keep = i;
+				break;
+			}
+		}
+	}
+	if (keep < 0 && n > 0) {
+		keep = 0;
+		for (i = 1; i < n; i++) {
+			if (cells[i].x < cells[keep].x)
+				keep = i;
+		}
+	}
+	if (keep < 0)
+		keep = 0;
+	memcpy(g_fight_cells, cells, (size_t)n * sizeof(cells[0]));
+	if (overlay && g_fight_tactics_logged < 2) {
+		fight_dump_slots();
+		fight_dump_overlay_state();
+		g_fight_tactics_logged++;
+	}
+	if (n != g_fight_ncell || g_fight_grid_logged < 6) {
+		if (g_fight_grid_logged == 0)
+			fight_dump_slots();
+		g_fight_grid_logged++;
+		fprintf(stderr,
+			"sword3-sdl: fight grid n=%d now=%d overlay=%d want=%d focus=%d tactics=%d auto=%d\n",
+			n, now, overlay, want, n > 0 ? cells[keep].sel : 0,
+			g_fight_tactics, fight_auto_command());
+		for (i = 0; i < n; i++)
+			fprintf(stderr,
+				"sword3-sdl: fight cell %d sel=%d xy=%d,%d %dx%d\n",
+				i, cells[i].sel, cells[i].x, cells[i].y,
+				cells[i].w, cells[i].h);
+	}
+	g_fight_ncell = n;
+	g_fight_focus = n > 0 ? keep : 0;
+}
+
+static int fight_neighbor(int from, int dir)
+{
+	int i;
+	int best;
+	int best_score;
+	int cx;
+	int cy;
+	int ox;
+	int oy;
+	int dx;
+	int dy;
+	int along;
+	int across;
+	int score;
+
+	if (from < 0 || from >= g_fight_ncell)
+		return -1;
+	cx = g_fight_cells[from].x + g_fight_cells[from].w / 2;
+	cy = g_fight_cells[from].y + g_fight_cells[from].h / 2;
+	best = -1;
+	best_score = 0x7fffffff;
+	for (i = 0; i < g_fight_ncell; i++) {
+		if (i == from)
+			continue;
+		ox = g_fight_cells[i].x + g_fight_cells[i].w / 2;
+		oy = g_fight_cells[i].y + g_fight_cells[i].h / 2;
+		dx = ox - cx;
+		dy = oy - cy;
+		along = 0;
+		across = 0;
+		if (dir == 0) {
+			if (dy >= -4)
+				continue;
+			along = -dy;
+			across = dx < 0 ? -dx : dx;
+		} else if (dir == 1) {
+			if (dx <= 4)
+				continue;
+			along = dx;
+			across = dy < 0 ? -dy : dy;
+		} else if (dir == 2) {
+			if (dy <= 4)
+				continue;
+			along = dy;
+			across = dx < 0 ? -dx : dx;
+		} else {
+			if (dx >= -4)
+				continue;
+			along = -dx;
+			across = dy < 0 ? -dy : dy;
+		}
+		score = along + across * 2;
+		if (score < best_score) {
+			best_score = score;
+			best = i;
+		}
+	}
+	return best;
+}
+
+static void fight_move_grid(int dir)
+{
+	int next;
+	int from;
+
+	fight_collect_cells();
+	if (g_fight_ncell <= 0)
+		return;
+	from = g_fight_focus;
+	if (from < 0 || from >= g_fight_ncell)
+		from = 0;
+	next = fight_neighbor(from, dir);
+	if (next < 0) {
+		if (g_fight_key_seen++ < 48)
+			fprintf(stderr,
+				"sword3-sdl: fight grid dir=%d from sel=%d n=%d no-neighbor\n",
+				dir, g_fight_cells[from].sel, g_fight_ncell);
+		return;
+	}
+	g_fight_focus = next;
+	fight_write_sel(g_fight_cells[next].sel);
+	if (g_fight_key_seen++ < 48)
+		fprintf(stderr,
+			"sword3-sdl: fight grid dir=%d sel %d -> %d xy=%d,%d\n",
+			dir, g_fight_cells[from].sel,
+			g_fight_cells[next].sel,
+			g_fight_cells[next].x, g_fight_cells[next].y);
 }
 
 static int fight_select_rect(int *x, int *y, int *w, int *h)
 {
-	int sel;
+	const struct fight_cell *cell;
 	int gx;
 	int gy;
 	int gw;
 	int gh;
 	int lw;
 	int lh;
-	int now;
 
-	now = guest_now_menu();
-	if (now != 1)
+	fight_collect_cells();
+	if (g_fight_ncell <= 0 || g_fight_focus < 0 ||
+	    g_fight_focus >= g_fight_ncell)
 		return 0;
-	sel = guest_cmd_sel();
-	if (sel < 1 || sel > FIGHT_CMD_MAX)
-		sel = 1;
-	if (!guest_cmd_rect(sel, &gx, &gy, &gw, &gh))
-		return 0;
+	cell = &g_fight_cells[g_fight_focus];
+	gx = cell->x;
+	gy = cell->y;
+	gw = cell->w;
+	gh = cell->h;
 	lw = g_logical_w > 0 ? g_logical_w : GAME_W;
 	lh = g_logical_h > 0 ? g_logical_h : GAME_H;
 	*x = gx * lw / GAME_W;
@@ -1223,6 +1916,13 @@ static void sync_ui_mode(void)
 	pointer_ui = 0;
 	menu_keys = !title_ui && !save_ui && menu_ui;
 	fight_ui = !pointer_ui && !menu_keys && guest_in_fight();
+	/*
+	 * After Continue, UI_FLAGS bit 2 can stick on the field and in
+	 * battle. That made g_save_ui stay 1, so D-pad never reached the
+	 * command grid.
+	 */
+	if (fight_ui)
+		save_ui = 0;
 	if ((fight_ui || title_ui) && host_menu_active())
 		host_menu_close();
 	if (pointer_ui == g_pointer_ui && title_ui == g_title_keys &&
@@ -1283,7 +1983,7 @@ static void sync_ui_mode(void)
 	g_menu_keys = menu_keys;
 	g_fight_ui = fight_ui;
 	fprintf(stderr,
-		"sword3-sdl: ui pointer=%d menu=%d fight=%d save=%d detected=%d draw=%d in=%d layer=%d syspage=%d syslv=%d page=%d now=%d sel=%d after=%d map=%d flags=%d back=%d tabs=%d cursor=%.0f,%.0f\n",
+		"sword3-sdl: ui pointer=%d menu=%d fight=%d save=%d detected=%d draw=%d in=%d layer=%d syspage=%d syslv=%d page=%d now=%d sel=%d ff=%d after=%d map=%d flags=%d back=%d tabs=%d cursor=%.0f,%.0f\n",
 		pointer_ui, menu_keys, fight_ui, save_ui, menu_ui,
 		guest_read_i32(GUEST_DRAW_GATE, -1),
 		guest_menu_flag(),
@@ -1293,7 +1993,8 @@ static void sync_ui_mode(void)
 		guest_data_ok(GUEST_MENU_PAGE)
 			? *(volatile int *)(uintptr_t)GUEST_MENU_PAGE
 			: -1,
-		guest_now_menu(), guest_cmd_sel(), g_after_continue,
+		guest_now_menu(), guest_cmd_sel(),
+		guest_read_i32(GUEST_FIGHT_FLAG, -1), g_after_continue,
 		guest_map_id(), guest_data_ok(GUEST_UI_FLAGS)
 			? *(volatile int *)(uintptr_t)GUEST_UI_FLAGS
 			: -1,
@@ -1786,7 +2487,15 @@ static int menu_page_visible(void)
 	 * Game hides widgets with x == -1. Field leftover back icon stays
 	 * around (592,20), so "menu up" is the tab strip / Tianshu actions.
 	 * Do not require the show flag; it is not the hide signal.
+	 * Fight command / tactics overlay reuses 0x2496-0x2498, so ignore
+	 * those IDs while a fight menu is up.
 	 */
+	if (g_fight_tactics)
+		return 0;
+	if (guest_now_menu() > 0 && guest_now_menu() < 0x40)
+		return 0;
+	if (guest_now_menu() >= FIGHT_NOW_TURN && guest_now_menu() <= 104)
+		return 0;
 	return menu_widget_on_screen(menu_find_widget(GUEST_MENU_TAB0)) ||
 	       menu_widget_on_screen(menu_find_widget(GUEST_MENU_TAB1)) ||
 	       menu_widget_on_screen(menu_find_widget(GUEST_MENU_TAB2)) ||
@@ -2874,6 +3583,11 @@ static void fight_set_dir_source(int index, int axis, int down)
 		return;
 	}
 	g_fight_dir_down[index] = wanted;
+	fight_collect_cells();
+	if (g_fight_ncell > 0) {
+		fight_move_grid(index);
+		return;
+	}
 	fight_direction_edge(index);
 	push_key(g_fight_dir_keys[index], wanted);
 	if (g_fight_key_seen++ < 48)
@@ -2942,9 +3656,18 @@ static void fight_release_directions(void)
 		if (!g_fight_dir_down[i])
 			continue;
 		g_fight_dir_down[i] = 0;
-		push_key(g_fight_dir_keys[i], 0);
+		if (g_fight_ncell <= 0 && guest_now_menu() != 1)
+			push_key(g_fight_dir_keys[i], 0);
 	}
 	g_fight_target_a_up = 0;
+	g_fight_ncell = 0;
+	g_fight_focus = 0;
+	g_fight_grid_logged = 0;
+	g_fight_tactics = 0;
+	g_fight_tactics_logged = 0;
+	g_fight_tactics_leave_until = 0;
+	g_fight_auto_b = 0;
+	g_fight_auto_armed = 0;
 }
 
 static void fight_flush_direction_releases(void)
@@ -2956,7 +3679,8 @@ static void fight_flush_direction_releases(void)
 			continue;
 		g_fight_dir_release[i] = 0;
 		g_fight_dir_down[i] = 0;
-		push_key(g_fight_dir_keys[i], 0);
+		if (g_fight_ncell <= 0 && guest_now_menu() != 1)
+			push_key(g_fight_dir_keys[i], 0);
 	}
 }
 
@@ -2979,6 +3703,81 @@ static void fight_confirm_target(void)
 	transition(pad, slot, 0);
 	set_scancode_state(SDL_SCANCODE_RETURN, 0);
 	((void (*)(int))(uintptr_t)GUEST_FIGHT_OK)(0);
+}
+
+static void fight_tap_command_button(void)
+{
+	int x;
+	int y;
+
+	fight_collect_cells();
+	x = FIGHT_TACTICS_X0 + FIGHT_TACTICS_WH / 2;
+	y = FIGHT_TACTICS_Y + FIGHT_TACTICS_WH / 2;
+	if (g_fight_tactics && g_fight_ncell > 0) {
+		x = g_fight_cells[0].x + g_fight_cells[0].w / 2;
+		y = g_fight_cells[0].y + g_fight_cells[0].h / 2;
+	}
+	push_finger_at((float)x / (float)GAME_W, (float)y / (float)GAME_H,
+		       SDL_FINGERDOWN);
+	push_finger_at((float)x / (float)GAME_W, (float)y / (float)GAME_H,
+		       SDL_FINGERUP);
+}
+
+static void fight_cancel_auto(void)
+{
+	int auto_cmd;
+	int now;
+
+	if (!fight_live())
+		return;
+	auto_cmd = fight_auto_command();
+	now = guest_now_menu();
+	fight_tap_command_button();
+	fight_restore_manual();
+	if (g_fight_key_seen++ < 48)
+		fprintf(stderr,
+			"sword3-sdl: fight B -> 命令 cancel auto=%d now=%d->%d ff=%d armed=%d\n",
+			auto_cmd, now, guest_now_menu(),
+			guest_read_i32(GUEST_FIGHT_FLAG, -1),
+			g_fight_auto_armed);
+}
+
+static void fight_click_focus(void)
+{
+	struct fight_cell *cell;
+	int command;
+
+	fight_collect_cells();
+	if (g_fight_ncell <= 0 || g_fight_focus < 0 ||
+	    g_fight_focus >= g_fight_ncell)
+		return;
+	cell = &g_fight_cells[g_fight_focus];
+	command = g_fight_tactics && (g_fight_focus == 0 ||
+				      cell->sel == FIGHT_TACTICS_SEL0);
+	fight_write_sel(cell->sel);
+	push_finger_at((float)(cell->x + cell->w / 2) / (float)GAME_W,
+		       (float)(cell->y + cell->h / 2) / (float)GAME_H,
+		       SDL_FINGERDOWN);
+	push_finger_at((float)(cell->x + cell->w / 2) / (float)GAME_W,
+		       (float)(cell->y + cell->h / 2) / (float)GAME_H,
+		       SDL_FINGERUP);
+	if (!g_fight_tactics && fight_is_tactics_entry(cell)) {
+		g_fight_tactics = 1;
+		g_fight_tactics_logged = 0;
+		g_fight_grid_logged = 0;
+		g_fight_tactics_leave_until = 0;
+		g_fight_focus = 0;
+	} else if (command) {
+		fight_restore_manual();
+	} else if (g_fight_tactics && cell->sel > FIGHT_TACTICS_SEL0 &&
+		   cell->sel < FIGHT_TACTICS_SEL0 + FIGHT_TACTICS_N) {
+		g_fight_auto_armed = 1;
+	}
+	if (g_fight_key_seen++ < 48)
+		fprintf(stderr,
+			"sword3-sdl: fight cmd tap sel=%d xy=%d,%d tactics=%d auto=%d command=%d\n",
+			cell->sel, cell->x, cell->y, g_fight_tactics,
+			fight_auto_command(), command);
 }
 
 static void host_menu_run_pending(void)
@@ -3143,6 +3942,11 @@ static int rewrite_event(SDL_Event *event)
 			event->type = SDL_FIRSTEVENT;
 			return 0;
 		}
+		if (g_fight_ui) {
+			fight_axis_event(event->caxis.axis, event->caxis.value);
+			event->type = SDL_FIRSTEVENT;
+			return 0;
+		}
 		if (g_save_ui) {
 			event->type = SDL_FIRSTEVENT;
 			return 0;
@@ -3158,11 +3962,6 @@ static int rewrite_event(SDL_Event *event)
 			return 0;
 		}
 		if (menu_opening()) {
-			event->type = SDL_FIRSTEVENT;
-			return 0;
-		}
-		if (g_fight_ui) {
-			fight_axis_event(event->caxis.axis, event->caxis.value);
 			event->type = SDL_FIRSTEVENT;
 			return 0;
 		}
@@ -3266,6 +4065,40 @@ static int rewrite_event(SDL_Event *event)
 		return 0;
 	}
 	if (button == SDL_CONTROLLER_BUTTON_B) {
+		if (fight_in_auto_battle()) {
+			if (down) {
+				g_fight_auto_b = 1;
+				fight_cancel_auto();
+			} else
+				g_fight_auto_b = 0;
+			event->type = SDL_FIRSTEVENT;
+			return 0;
+		}
+		if (g_fight_auto_b) {
+			g_fight_auto_b = 0;
+			event->type = SDL_FIRSTEVENT;
+			return 0;
+		}
+		if (g_fight_ui) {
+			if (g_fight_tactics) {
+				if (down) {
+					fight_tap_command_button();
+					fight_restore_manual();
+					if (g_fight_key_seen++ < 48)
+						fprintf(stderr,
+							"sword3-sdl: fight B -> 命令 back now=%d\n",
+							guest_now_menu());
+				}
+				event->type = SDL_FIRSTEVENT;
+				return 0;
+			}
+			fill_key(event, SDL_SCANCODE_ESCAPE, down);
+			if (g_fight_key_seen++ < 48)
+				fprintf(stderr,
+					"sword3-sdl: fight B -> Escape %s\n",
+					down ? "down" : "up");
+			return 1;
+		}
 		if (g_save_ui) {
 			if (down) {
 				g_after_continue = 0;
@@ -3314,14 +4147,6 @@ static int rewrite_event(SDL_Event *event)
 				menu_leave_session();
 			event->type = SDL_FIRSTEVENT;
 			return 0;
-		}
-		if (g_fight_ui) {
-			fill_key(event, SDL_SCANCODE_ESCAPE, down);
-			if (g_fight_key_seen++ < 48)
-				fprintf(stderr,
-					"sword3-sdl: fight B -> Escape %s\n",
-					down ? "down" : "up");
-			return 1;
 		}
 		if (g_pointer_ui) {
 			if (g_save_ui && down)
@@ -3385,6 +4210,15 @@ static int rewrite_event(SDL_Event *event)
 					fprintf(stderr,
 						"sword3-sdl: fight target confirm\n");
 				return 0;
+			}
+			if (down && guest_now_menu() != 3) {
+				fight_collect_cells();
+				if (g_fight_ncell > 0) {
+					fight_click_focus();
+					g_fight_target_a_up = 1;
+					event->type = SDL_FIRSTEVENT;
+					return 0;
+				}
 			}
 			fill_key(event, SDL_SCANCODE_RETURN, down);
 			if (g_fight_key_seen++ < 48)
@@ -3459,6 +4293,11 @@ static int rewrite_event(SDL_Event *event)
 			event->type = SDL_FIRSTEVENT;
 			return 0;
 		}
+		if (g_fight_ui) {
+			fight_dpad_event(button, down);
+			event->type = SDL_FIRSTEVENT;
+			return 0;
+		}
 		if (g_save_ui) {
 			save_dpad_event(button, down);
 			event->type = SDL_FIRSTEVENT;
@@ -3475,11 +4314,6 @@ static int rewrite_event(SDL_Event *event)
 			return 0;
 		}
 		if (menu_opening()) {
-			event->type = SDL_FIRSTEVENT;
-			return 0;
-		}
-		if (g_fight_ui) {
-			fight_dpad_event(button, down);
 			event->type = SDL_FIRSTEVENT;
 			return 0;
 		}
@@ -3852,17 +4686,8 @@ int sword3_SDL_RenderClear(SDL_Renderer *renderer)
 int sword3_SDL_RenderCopy(SDL_Renderer *renderer, SDL_Texture *texture,
 			  const SDL_Rect *srcrect, const SDL_Rect *dstrect)
 {
-	SDL_FRect dstf;
-
 	owner_check("SDL_RenderCopy", KIND_RENDERER, renderer);
 	owner_check("SDL_RenderCopy", KIND_TEXTURE, texture);
-	if (dstrect) {
-		dstf.x = (float)dstrect->x;
-		dstf.y = (float)dstrect->y;
-		dstf.w = (float)dstrect->w;
-		dstf.h = (float)dstrect->h;
-		fight_note_dest(renderer, &dstf);
-	}
 	return SDL_RenderCopy(renderer, texture, srcrect, dstrect);
 }
 
@@ -3874,7 +4699,6 @@ int sword3_SDL_RenderCopyF(SDL_Renderer *renderer, SDL_Texture *texture,
 
 	owner_check("SDL_RenderCopyF", KIND_RENDERER, renderer);
 	owner_check("SDL_RenderCopyF", KIND_TEXTURE, texture);
-	fight_note_dest(renderer, dstrect);
 	result = SDL_RenderCopyF(renderer, texture, srcrect, dstrect);
 	if (seen < 12 || result != 0) {
 		if (seen < 12)
@@ -3947,7 +4771,7 @@ void sword3_SDL_RenderPresent(SDL_Renderer *renderer)
 	owner_check("SDL_RenderPresent", KIND_RENDERER, renderer);
 	ensure_gamecontroller();
 	apply_pad_pointer();
-	fight_commit_dests();
+	fight_collect_cells();
 	seen++;
 	if (seen <= 8 || (seen % 120) == 0)
 		fprintf(stderr, "sword3-sdl: RenderPresent #%u\n", seen);
