@@ -389,6 +389,21 @@ static void owner_drop(enum sword3_sdl_kind kind, void *pointer)
 #define GUEST_SAVE_DATE 0x1001b746cull
 #define GUEST_SAVE_LIST 0x100027834ull
 #define GUEST_SHOP_UI 0x10003992cull
+#define GUEST_SHOP_UP 0x100039220ull
+#define GUEST_SHOP_RIGHT 0x100038ef0ull
+#define GUEST_SHOP_DOWN 0x100039080ull
+#define GUEST_SHOP_LEFT 0x100038de8ull
+#define GUEST_SHOP_CONFIRM 0x1000384d0ull
+#define GUEST_SHOP_STATE 0x1002ab088ull
+#define GUEST_SHOP_SCROLL 0x1002ab07cull
+#define GUEST_SHOP_ROW 0x1002ab080ull
+#define GUEST_SHOP_VISIBLE 0x1002ab084ull
+#define GUEST_SHOP_LIST_HEAD 0x1002aae20ull
+#define GUEST_SHOP_DISPLAY_HEAD 0x1002aaf40ull
+#define GUEST_SHOP_HIGHLIGHT 0x10031ac5cull
+#define GUEST_SHOP_VIEW_H 0x10031ac88ull
+#define GUEST_SHOP_ROW_HEIGHT 25
+#define GUEST_SHOP_ITEM_NEXT 0x10
 #define GUEST_PLAYER_DIR0_RA 0x100073284ull
 #define GUEST_PLAYER_DIR1_RA 0x10007349cull
 #define GUEST_PLAYER_DIR2_RA 0x10007351cull
@@ -434,6 +449,9 @@ static Uint32 g_save_list_ms;
 static int g_shop_ui;
 static int g_shop_hit;
 static Uint32 g_shop_ms;
+static int g_shop_dir_dpad[4];
+static int g_shop_dir_axis[4];
+static int g_shop_dir_down[4];
 static int g_load_context_done;
 static int g_save_dir_down[4];
 static int g_save_dir_dpad[4];
@@ -846,6 +864,7 @@ static int guest_title_visible(void)
 static void fill_key(SDL_Event *event, SDL_Scancode scancode, int down);
 static void fill_finger(SDL_Event *event, Uint32 type);
 static void save_release_directions(void);
+static void shop_release_directions(void);
 static void title_release_directions(void);
 static void menu_release_directions(void);
 static void fight_release_directions(void);
@@ -904,6 +923,11 @@ static int save_slot_pad(void)
  */
 static int guest_shop(void)
 {
+	if (guest_data_ok(GUEST_SHOP_STATE) &&
+	    guest_data_ok(GUEST_SHOP_LIST_HEAD) &&
+	    *(volatile int *)(uintptr_t)GUEST_SHOP_STATE == 2 &&
+	    *(volatile uintptr_t *)(uintptr_t)GUEST_SHOP_LIST_HEAD != 0)
+		return 1;
 	if (!g_shop_hit)
 		return 0;
 	return !SDL_TICKS_PASSED(SDL_GetTicks(), g_shop_ms + 250u);
@@ -1196,6 +1220,7 @@ __asm__(
 );
 
 void save_list_orig(void);
+static void save_flush_direction_releases(void);
 
 __asm__(
 	"	.text\n"
@@ -1226,6 +1251,7 @@ static void save_list_hook(void)
 		fprintf(stderr, "sword3-sdl: save/load slot list\n");
 	}
 	save_list_orig();
+	save_flush_direction_releases();
 }
 
 void shop_ui_orig(void);
@@ -1247,8 +1273,6 @@ __asm__(
 	"1:	.quad	0x10003993c\n"
 	"	.size	shop_ui_orig, .-shop_ui_orig\n"
 );
-
-static void save_flush_direction_releases(void);
 
 static void shop_ui_hook(void)
 {
@@ -1550,6 +1574,7 @@ static void sync_ui_mode(void)
 	if (g_save_ui != save_ui || g_save_list_ui != list_ui ||
 	    g_shop_ui != shop_ui) {
 		save_release_directions();
+		shop_release_directions();
 		g_a_down = 0;
 	}
 	if ((list_ui && !g_save_list_ui) || (shop_ui && !g_shop_ui))
@@ -1877,6 +1902,12 @@ static void save_set_key_state(int index, int down)
 	transition(pad, slot, down);
 	set_scancode_state(g_save_dir_keys[index], down);
 	if (down) {
+		/*
+		 * Save/load and shop navigation only consults the native
+		 * held-key repeat path (0x1001c1d30), not its initial edge.
+		 * Pre-age one pulse; each hooked consumer releases it
+		 * immediately after one native update.
+		 */
 		slot[8] = 0;
 		*(volatile Uint32 *)(slot + 4) = SDL_GetTicks() - 0x209u;
 	}
@@ -1899,12 +1930,11 @@ static void save_set_dir_source(int index, int axis, int down)
 		g_save_dir_down[index] = 1;
 		save_set_key_state(index, 1);
 		/*
-		 * save_set_key_state pre-ages the 0x208ms action repeat, so
-		 * a held key steps every frame — field run speed. Shop
-		 * 0x1001c1d30 uses that helper for rows and 数量; keep the
-		 * first press and release on Present so hold is one step.
+		 * Lists and shops consume one edge per physical press. Holding
+		 * a guest key across updates lets the native 0x208ms repeat
+		 * path queue several moves and several copies of the move sound.
 		 */
-		g_save_dir_release[index] = guest_shop() ? 1 : 0;
+		g_save_dir_release[index] = 1;
 		return;
 	}
 	g_save_dir_release[index] = 1;
@@ -1957,6 +1987,199 @@ static void save_axis_event(Uint8 axis, Sint16 value)
 		save_set_dir_source(old_dir, 1, 0);
 	if (new_dir >= 0)
 		save_set_dir_source(new_dir, 1, 1);
+}
+
+static int shop_highlighted_row(int *row)
+{
+	uintptr_t display;
+	uintptr_t item;
+	int highlight;
+	int index;
+
+	if (!row)
+		return 0;
+	highlight = guest_read_i32(GUEST_SHOP_HIGHLIGHT, -1);
+	display = guest_read_ptr(GUEST_SHOP_DISPLAY_HEAD);
+	for (index = 0; display && index < highlight; index++) {
+		if (!guest_heap_ok(display, GUEST_SHOP_ITEM_NEXT + 8))
+			return 0;
+		display = *(volatile uintptr_t *)(display +
+						 GUEST_SHOP_ITEM_NEXT);
+	}
+	if (!display || index != highlight)
+		return 0;
+	item = guest_read_ptr(GUEST_SHOP_LIST_HEAD);
+	for (index = 0; item && index < 128; index++) {
+		if (item == display) {
+			*row = index -
+			       guest_read_i32(GUEST_SHOP_SCROLL, 0);
+			return 1;
+		}
+		if (!guest_heap_ok(item, GUEST_SHOP_ITEM_NEXT + 8))
+			return 0;
+		item = *(volatile uintptr_t *)(item +
+					      GUEST_SHOP_ITEM_NEXT);
+	}
+	return 0;
+}
+
+static int shop_display_count(void)
+{
+	uintptr_t item;
+	int count;
+
+	item = guest_read_ptr(GUEST_SHOP_DISPLAY_HEAD);
+	for (count = 0; item && count < 128; count++) {
+		if (!guest_heap_ok(item, GUEST_SHOP_ITEM_NEXT + 8))
+			break;
+		item = *(volatile uintptr_t *)(item +
+					      GUEST_SHOP_ITEM_NEXT);
+	}
+	return count;
+}
+
+static void shop_set_dir_source(int index, int axis, int down)
+{
+	static const uintptr_t handlers[4] = {
+		GUEST_SHOP_UP,
+		GUEST_SHOP_RIGHT,
+		GUEST_SHOP_DOWN,
+		GUEST_SHOP_LEFT,
+	};
+	int absolute;
+	int display_count;
+	int full_rows;
+	int last;
+	int row;
+	int view_h;
+	int visible;
+	int wanted;
+
+	if (index < 0 || index >= 4)
+		return;
+	if (axis)
+		g_shop_dir_axis[index] = down;
+	else
+		g_shop_dir_dpad[index] = down;
+	wanted = g_shop_dir_axis[index] || g_shop_dir_dpad[index];
+	if (wanted == g_shop_dir_down[index])
+		return;
+	g_shop_dir_down[index] = wanted;
+	if (!wanted || !guest_shop())
+		return;
+	if ((index == 0 || index == 2) &&
+	    guest_read_i32(GUEST_SHOP_STATE, 0) == 2) {
+		row = guest_read_i32(GUEST_SHOP_ROW, 0);
+		absolute = guest_read_i32(GUEST_SHOP_SCROLL, 0) + row;
+		display_count = shop_display_count();
+		last = display_count - 1;
+		if ((index == 0 && absolute <= 0) ||
+		    (index == 2 && (last < 0 || absolute >= last)))
+			return;
+		visible = guest_read_i32(GUEST_SHOP_VISIBLE, 0);
+		view_h = guest_read_i32(GUEST_SHOP_VIEW_H, 0);
+		full_rows = view_h > 0
+				  ? view_h / GUEST_SHOP_ROW_HEIGHT : visible;
+		/*
+		 * The linked-list count can include a partially clipped row.
+		 * Derive the number of fully visible rows from the native
+		 * viewport and row stride, then make the down handler scroll
+		 * before its highlight enters the clipped row. The handler
+		 * recounts and restores GUEST_SHOP_VISIBLE afterward.
+		 */
+		if (index == 2 && full_rows > 0 && full_rows < visible &&
+		    display_count > full_rows && row >= full_rows - 1)
+			*(volatile int *)(uintptr_t)GUEST_SHOP_VISIBLE =
+				full_rows;
+	}
+	if ((index == 1 || index == 3) &&
+	    guest_read_i32(GUEST_SHOP_STATE, 0) == 2) {
+		row = guest_read_i32(GUEST_SHOP_ROW, 0);
+		if (!shop_highlighted_row(&absolute))
+			absolute = row;
+		*(volatile int *)(uintptr_t)GUEST_SHOP_ROW = absolute;
+		((void (*)(void))(uintptr_t)handlers[index])();
+		if (guest_read_i32(GUEST_SHOP_STATE, 0) == 2)
+			*(volatile int *)(uintptr_t)GUEST_SHOP_ROW = row;
+		return;
+	}
+	((void (*)(void))(uintptr_t)handlers[index])();
+}
+
+static void shop_axis_event(Uint8 axis, Sint16 value)
+{
+	int old_dir;
+	int new_dir;
+
+	if (axis == SDL_CONTROLLER_AXIS_LEFTX) {
+		old_dir = g_shop_dir_axis[3] ? 3 :
+			  (g_shop_dir_axis[1] ? 1 : -1);
+		new_dir = value < -STICK_DEADZONE ? 3 :
+			  (value > STICK_DEADZONE ? 1 : -1);
+	} else if (axis == SDL_CONTROLLER_AXIS_LEFTY) {
+		old_dir = g_shop_dir_axis[0] ? 0 :
+			  (g_shop_dir_axis[2] ? 2 : -1);
+		new_dir = value < -STICK_DEADZONE ? 0 :
+			  (value > STICK_DEADZONE ? 2 : -1);
+	} else {
+		return;
+	}
+	if (old_dir == new_dir)
+		return;
+	if (old_dir >= 0)
+		shop_set_dir_source(old_dir, 1, 0);
+	if (new_dir >= 0)
+		shop_set_dir_source(new_dir, 1, 1);
+}
+
+static void shop_dpad_event(int button, int down)
+{
+	int index;
+
+	switch (button) {
+	case SDL_CONTROLLER_BUTTON_DPAD_UP:
+		index = 0;
+		break;
+	case SDL_CONTROLLER_BUTTON_DPAD_RIGHT:
+		index = 1;
+		break;
+	case SDL_CONTROLLER_BUTTON_DPAD_DOWN:
+		index = 2;
+		break;
+	case SDL_CONTROLLER_BUTTON_DPAD_LEFT:
+		index = 3;
+		break;
+	default:
+		return;
+	}
+	shop_set_dir_source(index, 0, down);
+}
+
+static void shop_release_directions(void)
+{
+	memset(g_shop_dir_dpad, 0, sizeof(g_shop_dir_dpad));
+	memset(g_shop_dir_axis, 0, sizeof(g_shop_dir_axis));
+	memset(g_shop_dir_down, 0, sizeof(g_shop_dir_down));
+}
+
+static void shop_confirm(void)
+{
+	int absolute;
+	int row;
+
+	if (!guest_shop())
+		return;
+	if (guest_read_i32(GUEST_SHOP_STATE, 0) != 2) {
+		((void (*)(void))(uintptr_t)GUEST_SHOP_CONFIRM)();
+		return;
+	}
+	row = guest_read_i32(GUEST_SHOP_ROW, 0);
+	if (!shop_highlighted_row(&absolute))
+		absolute = row;
+	*(volatile int *)(uintptr_t)GUEST_SHOP_ROW = absolute;
+	((void (*)(void))(uintptr_t)GUEST_SHOP_CONFIRM)();
+	if (guest_read_i32(GUEST_SHOP_STATE, 0) == 2)
+		*(volatile int *)(uintptr_t)GUEST_SHOP_ROW = row;
 }
 
 static void save_release_directions(void)
@@ -3229,10 +3452,6 @@ static void guest_keyboard_key(SDL_Scancode scancode, int down)
 		GUEST_INPUT_TRANSITION;
 	transition(pad, slot, down);
 	set_scancode_state(scancode, down);
-	if (down) {
-		slot[8] = 0;
-		*(volatile Uint32 *)(slot + 4) = SDL_GetTicks() - 0x209u;
-	}
 }
 
 static void host_trace_action_members(int action, const char *why)
@@ -4399,7 +4618,12 @@ static int rewrite_event(SDL_Event *event)
 			return 0;
 		}
 		if (list_arrow_pad()) {
-			save_axis_event(event->caxis.axis, event->caxis.value);
+			if (guest_shop())
+				shop_axis_event(event->caxis.axis,
+						event->caxis.value);
+			else
+				save_axis_event(event->caxis.axis,
+						event->caxis.value);
 			event->type = SDL_FIRSTEVENT;
 			return 0;
 		}
@@ -4681,6 +4905,12 @@ static int rewrite_event(SDL_Event *event)
 			event->type = SDL_FIRSTEVENT;
 			return 0;
 		}
+		if (guest_shop()) {
+			if (down)
+				shop_confirm();
+			event->type = SDL_FIRSTEVENT;
+			return 0;
+		}
 		if (!down)
 			host_battle_button(button, 0);
 		if (host_battle_owns_pad()) {
@@ -4954,7 +5184,10 @@ static int rewrite_event(SDL_Event *event)
 		if (list_arrow_pad()) {
 			static unsigned seen;
 
-			save_dpad_event(button, down);
+			if (guest_shop())
+				shop_dpad_event(button, down);
+			else
+				save_dpad_event(button, down);
 			if (seen < 16) {
 				seen++;
 				fprintf(stderr,
