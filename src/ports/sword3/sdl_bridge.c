@@ -259,6 +259,7 @@ static void owner_drop(enum sword3_sdl_kind kind, void *pointer)
 #define GUEST_FEX_EQUIP 0x100034da8ull
 #define GUEST_FEX_SKILL 0x100057eacull
 #define GUEST_FEX_STATUS 0x10005a7b4ull
+#define GUEST_FEX_REFINING 0x10001f708ull
 #define GUEST_EQUIP_BACK 0x1000351e4ull
 #define GUEST_SKILL_BACK 0x100058364ull
 #define GUEST_SKILL_OK 0x1000584c4ull
@@ -269,6 +270,16 @@ static void owner_drop(enum sword3_sdl_kind kind, void *pointer)
 #define GUEST_SKILL_NEXT_PERSON 0x100058a48ull
 #define GUEST_STATUS_BACK 0x10005a920ull
 #define GUEST_STATUS_REBUILD 0x10005a55cull
+#define GUEST_REFINING_LIST_NEXT 0x100020370ull
+#define GUEST_REFINING_LIST_PREV 0x10002044cull
+#define GUEST_REFINING_PREVIEW_RIGHT 0x10002052cull
+#define GUEST_REFINING_PREVIEW_LEFT 0x100020608ull
+#define GUEST_REFINING_CATEGORY_PREV 0x10001fb74ull
+#define GUEST_REFINING_CATEGORY_NEXT 0x10001fc58ull
+#define GUEST_REFINING_SLOT_RIGHT 0x1000206e8ull
+#define GUEST_REFINING_SLOT_LEFT 0x10001fe10ull
+#define GUEST_REFINING_OK 0x10001ffc4ull
+#define GUEST_REFINING_BACK 0x10001fec4ull
 #define GUEST_ITEM_OK 0x100030a20ull
 #define GUEST_ITEM_CATEGORY_PREV 0x1000314a8ull
 #define GUEST_ITEM_CATEGORY_NEXT 0x1000315f0ull
@@ -288,6 +299,10 @@ static void owner_drop(enum sword3_sdl_kind kind, void *pointer)
 #define GUEST_PARTY_EQUIPMENT 0x1002ab628ull
 #define GUEST_STATUS_BASE 0x1002f37f0ull
 #define GUEST_STATUS_TOTAL 0x1002f37f8ull
+#define GUEST_REFINING_MODE 0x1002a8500ull
+#define GUEST_REFINING_SIDE 0x1002a8504ull
+#define GUEST_REFINING_CATEGORY 0x1002a8508ull
+#define GUEST_REFINING_RESULT 0x1002a850cull
 #define GUEST_REBIND_ACTIONS 0x1001fa5e8ull
 #define GUEST_PAD_READY 0x248c
 #define GUEST_SLOT_MASK 0x10
@@ -456,6 +471,7 @@ static int g_menu_close_pending;
 static Sword3NativeMenuInput g_native_menu_input;
 static Uint32 g_menu_a_block_until;
 static int g_menu_captured_a;
+static int g_menu_captured_b;
 static int g_a_down;
 static Uint32 g_a_edge_ms;
 static unsigned g_a_chatter;
@@ -2684,6 +2700,132 @@ static int menu_status_move_person(int delta)
 	return 1;
 }
 
+static int menu_refining_native_active(void)
+{
+	int route = guest_read_i32(GUEST_MAP_ID, -1);
+
+	return menu_drawn() &&
+	       guest_read_i32(GUEST_MENU_SELECTION, -1) == 15 &&
+	       route >= 54 && route <= 58 &&
+	       guest_read_i32(GUEST_SYS_LAYER, 0) == 2 &&
+	       guest_read_ptr(GUEST_FEXECUTE) == GUEST_FEX_REFINING &&
+	       guest_read_ptr(GUEST_FEXECUTE + 0x48) ==
+		       GUEST_REFINING_OK &&
+	       guest_read_ptr(GUEST_FEXECUTE + 0x50) ==
+		       GUEST_REFINING_BACK;
+}
+
+static int menu_refining_route_active(void)
+{
+	return g_menu_session && g_menu_keys &&
+	       g_native_menu_input.focus ==
+		       SWORD3_NATIVE_MENU_FOCUS_CONTENT &&
+	       menu_refining_native_active();
+}
+
+static void menu_reconcile_refining_focus(void)
+{
+	if (!g_menu_session)
+		return;
+	if (menu_refining_native_active()) {
+		g_native_menu_input.tab = 4;
+		g_native_menu_input.focus =
+			SWORD3_NATIVE_MENU_FOCUS_CONTENT;
+		return;
+	}
+	if (g_native_menu_input.tab == 4 &&
+	    g_native_menu_input.focus ==
+		    SWORD3_NATIVE_MENU_FOCUS_CONTENT &&
+	    menu_drawn() && guest_read_i32(GUEST_SYS_LAYER, 0) == 1)
+		g_native_menu_input.focus = SWORD3_NATIVE_MENU_FOCUS_TABS;
+}
+
+static int menu_refining_call(unsigned offset, uintptr_t expected)
+{
+	uintptr_t callback;
+
+	if (!menu_refining_route_active())
+		return 0;
+	callback = guest_read_ptr(GUEST_FEXECUTE + offset);
+	if (callback != expected)
+		return 0;
+	((void (*)(void))callback)();
+	return 1;
+}
+
+static int menu_refining_set_side(int side)
+{
+	int current;
+
+	if (!menu_refining_route_active() ||
+	    guest_read_i32(GUEST_REFINING_MODE, 0) != 1)
+		return 0;
+	side = side != 0;
+	current = guest_read_i32(GUEST_REFINING_SIDE, 0) != 0;
+	if (current == side)
+		return 1;
+	if (side)
+		return menu_refining_call(0x38,
+					  GUEST_REFINING_SLOT_RIGHT);
+	return menu_refining_call(0x40, GUEST_REFINING_SLOT_LEFT);
+}
+
+static int menu_refining_move_direction(int index)
+{
+	static const unsigned material_offsets[4] = {
+		0x10, 0x30, 0x08, 0x28,
+	};
+	static const uintptr_t material_expected[4] = {
+		GUEST_REFINING_LIST_PREV,
+		GUEST_REFINING_CATEGORY_NEXT,
+		GUEST_REFINING_LIST_NEXT,
+		GUEST_REFINING_CATEGORY_PREV,
+	};
+	int mode;
+
+	if (!menu_refining_route_active() || index < 0 || index >= 4)
+		return 0;
+	mode = guest_read_i32(GUEST_REFINING_MODE, 0);
+	if (mode == 1)
+		return menu_refining_call(material_offsets[index],
+					  material_expected[index]);
+	if (mode == 2 && index == 3)
+		return menu_refining_call(0x20,
+					  GUEST_REFINING_PREVIEW_LEFT);
+	if (mode == 2 && index == 1)
+		return menu_refining_call(0x18,
+					  GUEST_REFINING_PREVIEW_RIGHT);
+	return 1;
+}
+
+static int menu_refining_confirm(void)
+{
+	int mode;
+	int side;
+
+	if (!menu_refining_route_active())
+		return 0;
+	mode = guest_read_i32(GUEST_REFINING_MODE, 0);
+	side = guest_read_i32(GUEST_REFINING_SIDE, 0);
+	if (mode == 1 && side == 0)
+		return menu_refining_set_side(1);
+	return menu_refining_call(0x48, GUEST_REFINING_OK);
+}
+
+static int menu_refining_back(void)
+{
+	int mode;
+	int side;
+
+	if (!menu_refining_route_active())
+		return 0;
+	mode = guest_read_i32(GUEST_REFINING_MODE, 0);
+	side = guest_read_i32(GUEST_REFINING_SIDE, 0);
+	if (mode == 1 && side != 0)
+		return menu_refining_set_side(0);
+	return menu_refining_call(0x50, GUEST_REFINING_BACK);
+}
+
 static int menu_content_is_nested(void)
 {
 	if (guest_read_i32(GUEST_SYS_LAYER, 0) > 2)
@@ -2696,6 +2838,9 @@ static int menu_content_is_nested(void)
 
 		return state != 0 && state != 1;
 	}
+	if (menu_refining_native_active())
+		return guest_read_i32(GUEST_REFINING_MODE, 1) != 1 ||
+		       guest_read_i32(GUEST_REFINING_SIDE, 0) != 0;
 	return 0;
 }
 
@@ -2849,6 +2994,26 @@ static void menu_draw_focus(SDL_Renderer *renderer, int logical_w,
 		 */
 		menu_native_tab_geometry(g_native_menu_input.tab_count, index,
 					 &rect, NULL);
+	} else if (menu_refining_route_active()) {
+		int mode = guest_read_i32(GUEST_REFINING_MODE, 0);
+		int selected;
+
+		if (mode == 1) {
+			selected = guest_read_i32(GUEST_REFINING_SIDE, 0) != 0;
+			rect.x = selected ? 465 : 254;
+			rect.y = 70;
+			rect.w = selected ? 139 : 140;
+			rect.h = 268;
+		} else if (mode == 2) {
+			selected =
+				guest_read_i32(GUEST_REFINING_RESULT, 0) != 0;
+			rect.x = selected ? 333 : 13;
+			rect.y = 41;
+			rect.w = 279;
+			rect.h = 249;
+		} else {
+			return;
+		}
 	} else if (menu_item_content_active()) {
 		index = g_native_menu_input.item_action;
 		widget = menu_find_widget(GUEST_MENU_TAB0 + index);
@@ -3043,6 +3208,7 @@ static void menu_leave_session(void)
 	g_menu_reenter_until = SDL_GetTicks() + MENU_BACK_GRACE_MS;
 	g_field_mode_held = 0;
 	g_menu_captured_a = 0;
+	g_menu_captured_b = 0;
 	sword3_native_menu_input_reset(&g_native_menu_input,
 					menu_native_tab_count(), 0);
 	menu_release_directions();
@@ -3062,6 +3228,7 @@ static void menu_begin_open(int button)
 	g_menu_seen_chrome = 0;
 	g_menu_gone_at = 0;
 	g_menu_captured_a = 0;
+	g_menu_captured_b = 0;
 	sword3_native_menu_input_reset(&g_native_menu_input,
 					menu_native_tab_count(), 0);
 	g_menu_logged_postopen = 0;
@@ -3171,6 +3338,7 @@ static void menu_poll_open_pulse(void)
 	menu_reconcile_equip_focus();
 	menu_reconcile_skill_focus();
 	menu_reconcile_status_focus();
+	menu_reconcile_refining_focus();
 }
 
 static int menu_field_button_rect(int *x, int *y, int *w, int *h)
@@ -3588,6 +3756,12 @@ static void menu_set_dir_source(int index, int axis, int down)
 		g_menu_dir_down[index] = wanted;
 		if (wanted && (index == 1 || index == 3))
 			menu_move_tab_focus(index == 1 ? 1 : -1);
+		return;
+	}
+	if (menu_refining_route_active()) {
+		g_menu_dir_down[index] = wanted;
+		if (wanted)
+			(void)menu_refining_move_direction(index);
 		return;
 	}
 	if (menu_status_route_active()) {
@@ -4210,6 +4384,11 @@ static int rewrite_event(SDL_Event *event)
 	if (button == SDL_CONTROLLER_BUTTON_B) {
 		if (!down)
 			host_battle_button(button, 0);
+		if (!down && g_menu_captured_b) {
+			g_menu_captured_b = 0;
+			event->type = SDL_FIRSTEVENT;
+			return 0;
+		}
 		if (host_battle_owns_pad()) {
 			if (down)
 				host_battle_button(button, down);
@@ -4247,6 +4426,17 @@ static int rewrite_event(SDL_Event *event)
 		}
 		if (host_menu_active()) {
 			host_menu_button(button, down);
+			event->type = SDL_FIRSTEVENT;
+			return 0;
+		}
+		if (menu_refining_route_active()) {
+			if (down) {
+				g_menu_captured_a = 0;
+				g_menu_captured_b = 1;
+				g_a_down = 0;
+				menu_release_directions();
+				(void)menu_refining_back();
+			}
 			event->type = SDL_FIRSTEVENT;
 			return 0;
 		}
@@ -4355,6 +4545,14 @@ static int rewrite_event(SDL_Event *event)
 					menu_release_directions();
 					g_menu_captured_a = 1;
 					(void)menu_activate_tab();
+				}
+				event->type = SDL_FIRSTEVENT;
+				return 0;
+			}
+			if (menu_refining_route_active()) {
+				if (down) {
+					g_menu_captured_a = 1;
+					(void)menu_refining_confirm();
 				}
 				event->type = SDL_FIRSTEVENT;
 				return 0;
@@ -4506,6 +4704,10 @@ static int rewrite_event(SDL_Event *event)
 		}
 		if (host_battle_owns_pad()) {
 			host_battle_button(button, down);
+			event->type = SDL_FIRSTEVENT;
+			return 0;
+		}
+		if (menu_refining_route_active()) {
 			event->type = SDL_FIRSTEVENT;
 			return 0;
 		}
