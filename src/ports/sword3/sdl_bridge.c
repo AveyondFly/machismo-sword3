@@ -11,6 +11,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <time.h>
 #include <unistd.h>
 #include <limits.h>
 #include <sys/mman.h>
@@ -384,6 +385,7 @@ static void owner_drop(enum sword3_sdl_kind kind, void *pointer)
 #define GUEST_MOV_W8_16 0x52800208u
 #define GUEST_FEATURE_ENABLED 0x1001b7014ull
 #define GUEST_GET_DIR 0x1001c1df4ull
+#define GUEST_SAVE_DATE 0x1001b746cull
 #define GUEST_SAVE_LIST 0x100027834ull
 #define GUEST_SHOP_UI 0x10003992cull
 #define GUEST_PLAYER_DIR0_RA 0x100073284ull
@@ -1290,6 +1292,21 @@ static int field_get_dir_hook(void *pad, int direction, int edge)
 	return result;
 }
 
+static void save_date_hook(char *dst)
+{
+	static const char fallback[] = "197001010000";
+	struct tm local;
+	time_t now;
+
+	if (!dst)
+		return;
+	now = time(NULL);
+	if (now != (time_t)-1 && localtime_r(&now, &local) &&
+	    strftime(dst, sizeof(fallback), "%Y%m%d%H%M", &local) == 12)
+		return;
+	memcpy(dst, fallback, sizeof(fallback));
+}
+
 /*
  * PlayerMove (0x100072a28) is the only place that turns GetDirState into
  * character speed: GetDir==2 -> 16, else 1. Force those four local speed
@@ -1320,6 +1337,16 @@ void sword3_field_install(void)
 	if (field_patch_jump(GUEST_GET_DIR, field_get_dir_hook,
 			     dir_expect, "GetDirState") != 0)
 		return;
+	{
+		static const uint32_t date_expect[4] = {
+			0xa9bd57f6u, 0xa9014ff4u, 0xa9027bfdu, 0x910083fdu
+		};
+
+		if (field_patch_jump(GUEST_SAVE_DATE, save_date_hook,
+				     date_expect, "save date") == 0)
+			fprintf(stderr,
+				"sword3-sdl: host save-date formatter installed\n");
+	}
 	{
 		static const uint32_t list_expect[4] = {
 			0xd101c3ffu, 0xa90267fau, 0xa9035ff8u, 0xa90457f6u
