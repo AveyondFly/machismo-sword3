@@ -192,6 +192,8 @@ static void owner_drop(enum sword3_sdl_kind kind, void *pointer)
  *                    still send Escape. SWORD3_NATIVE_MENU=1 restores
  *                    the old tap / draw_gate path on SELECT.
  *   L3            -> open the original iOS system menu (compare only).
+ *                    Tabs still tap-switch; 天书 buttons are not
+ *                    host-focused or host-clicked.
  *   B             -> close/back in the host menu. Original menu: tap
  *                    the back icon. Field: swallowed.
  *   A             -> confirm in the host menu; field Return talks.
@@ -324,6 +326,7 @@ static void owner_drop(enum sword3_sdl_kind kind, void *pointer)
 #define GUEST_MOV_W22_16 0x52800216u
 #define GUEST_MOV_W8_16 0x52800208u
 #define GUEST_GET_DIR 0x1001c1df4ull
+#define GUEST_SAVE_LIST 0x100027834ull
 #define GUEST_PLAYER_DIR0_RA 0x100073284ull
 #define GUEST_PLAYER_DIR1_RA 0x10007349cull
 #define GUEST_PLAYER_DIR2_RA 0x10007351cull
@@ -363,8 +366,13 @@ static int g_btn_start;
 static int g_menu_item;
 static int g_pointer_ui = 1;
 static int g_save_ui;
+static int g_save_list_ui;
+static int g_save_list_hit;
+static Uint32 g_save_list_ms;
 static int g_load_context_done;
 static int g_save_dir_down[4];
+static int g_save_dir_dpad[4];
+static int g_save_dir_axis[4];
 static int g_save_dir_release[4];
 static int g_after_continue;
 static int g_title_keys;
@@ -405,9 +413,6 @@ static int g_menu_open_button = -1;
 static int g_menu_close_widget;
 static int g_menu_close_pending;
 static int g_menu_tab_index;
-static int g_menu_action_focus = -1;
-static int g_menu_action_a_up;
-static int g_menu_nested;
 static Uint32 g_menu_a_block_until;
 static int g_a_down;
 static Uint32 g_a_edge_ms;
@@ -783,7 +788,6 @@ static void caption_clear_dirs(void);
 static void release_guest_walk(void);
 static void field_restore_controller_mode(void);
 static void push_finger_at(float x, float y, Uint32 type);
-static int menu_widget_rect(int id, int *x, int *y, int *w, int *h);
 static int menu_chrome_drawn(void);
 static int menu_widget_drawn(int id);
 static int menu_opening(void);
@@ -807,6 +811,23 @@ static int guest_load_ui(void)
 	return *(volatile uint8_t *)(uintptr_t)GUEST_LOAD_ACTIVE != 0 &&
 	       *(volatile int *)(uintptr_t)GUEST_TITLE_MODE == 2 &&
 	       *(volatile int *)(uintptr_t)GUEST_MENU_PAGE == 3;
+}
+
+/*
+ * 0x100027834 is the save/load slot list (title 读取 and in-script 存盘).
+ * The hook stamps a timestamp; pad mapping follows that function, not
+ * menu_page / draw_gate / map.
+ */
+static int guest_save_list(void)
+{
+	if (!g_save_list_hit)
+		return 0;
+	return !SDL_TICKS_PASSED(SDL_GetTicks(), g_save_list_ms + 250u);
+}
+
+static int save_slot_pad(void)
+{
+	return g_save_ui || guest_save_list();
 }
 
 static int guest_menu_flag(void)
@@ -944,67 +965,6 @@ static void fight_poll_ui(void)
 		host_battle_poll();
 }
 
-static void draw_select_frame(SDL_Renderer *renderer, int x, int y, int w,
-			      int h)
-{
-	SDL_Rect arm[4];
-	Uint8 r;
-	Uint8 g;
-	Uint8 b;
-	Uint8 a;
-	SDL_BlendMode blend;
-	int t = 3;
-	int i;
-
-	if (w < 12)
-		w = 12;
-	if (h < 12)
-		h = 12;
-	SDL_GetRenderDrawColor(renderer, &r, &g, &b, &a);
-	SDL_GetRenderDrawBlendMode(renderer, &blend);
-	SDL_SetRenderDrawBlendMode(renderer, SDL_BLENDMODE_BLEND);
-	SDL_SetRenderDrawColor(renderer, 0, 0, 0, 200);
-	arm[0].x = x - 1;
-	arm[0].y = y - 1;
-	arm[0].w = w + 2;
-	arm[0].h = t + 1;
-	arm[1].x = x - 1;
-	arm[1].y = y + h - t;
-	arm[1].w = w + 2;
-	arm[1].h = t + 1;
-	arm[2].x = x - 1;
-	arm[2].y = y - 1;
-	arm[2].w = t + 1;
-	arm[2].h = h + 2;
-	arm[3].x = x + w - t;
-	arm[3].y = y - 1;
-	arm[3].w = t + 1;
-	arm[3].h = h + 2;
-	for (i = 0; i < 4; i++)
-		SDL_RenderFillRect(renderer, &arm[i]);
-	SDL_SetRenderDrawColor(renderer, 255, 220, 64, 255);
-	arm[0].x = x;
-	arm[0].y = y;
-	arm[0].w = w;
-	arm[0].h = t;
-	arm[1].x = x;
-	arm[1].y = y + h - t;
-	arm[1].w = w;
-	arm[1].h = t;
-	arm[2].x = x;
-	arm[2].y = y;
-	arm[2].w = t;
-	arm[2].h = h;
-	arm[3].x = x + w - t;
-	arm[3].y = y;
-	arm[3].w = t;
-	arm[3].h = h;
-	for (i = 0; i < 4; i++)
-		SDL_RenderFillRect(renderer, &arm[i]);
-	SDL_SetRenderDrawColor(renderer, r, g, b, a);
-	SDL_SetRenderDrawBlendMode(renderer, blend);
-}
-
 static void clear_input_slot(uint8_t *slot)
 {
 	slot[0] = 0;
@@ -1085,7 +1045,7 @@ static int field_patch_word(uintptr_t addr, uint32_t expect, uint32_t repl)
 }
 
 static int field_patch_jump(uintptr_t func, void *hook,
-			    const uint32_t expect[4])
+			    const uint32_t expect[4], const char *name)
 {
 	long page;
 	uintptr_t aligned;
@@ -1093,8 +1053,8 @@ static int field_patch_jump(uintptr_t func, void *hook,
 
 	if (memcmp((void *)func, expect, 16) != 0) {
 		fprintf(stderr,
-			"sword3-sdl: GetDirState bytes mismatch at 0x%llx\n",
-			(unsigned long long)func);
+			"sword3-sdl: %s bytes mismatch at 0x%llx\n",
+			name, (unsigned long long)func);
 		return -1;
 	}
 	page = sysconf(_SC_PAGESIZE);
@@ -1104,8 +1064,8 @@ static int field_patch_jump(uintptr_t func, void *hook,
 	if (mprotect((void *)aligned, (size_t)page * 2,
 		     PROT_READ | PROT_WRITE | PROT_EXEC) != 0) {
 		fprintf(stderr,
-			"sword3-sdl: GetDirState mprotect failed at 0x%llx\n",
-			(unsigned long long)func);
+			"sword3-sdl: %s mprotect failed at 0x%llx\n",
+			name, (unsigned long long)func);
 		return -1;
 	}
 	stub[0] = 0x58000050u;
@@ -1142,6 +1102,39 @@ __asm__(
 	"	ret\n"
 	"	.size	field_get_dir_orig, .-field_get_dir_orig\n"
 );
+
+void save_list_orig(void);
+
+__asm__(
+	"	.text\n"
+	"	.align	2\n"
+	"	.globl	save_list_orig\n"
+	"	.hidden	save_list_orig\n"
+	"	.type	save_list_orig, %function\n"
+	"save_list_orig:\n"
+	"	sub	sp, sp, #0x70\n"
+	"	stp	x26, x25, [sp, #0x20]\n"
+	"	stp	x24, x23, [sp, #0x30]\n"
+	"	stp	x22, x21, [sp, #0x40]\n"
+	"	ldr	x16, 1f\n"
+	"	br	x16\n"
+	"	.align	3\n"
+	"1:	.quad	0x100027844\n"
+	"	.size	save_list_orig, .-save_list_orig\n"
+);
+
+static void save_list_hook(void)
+{
+	static unsigned seen;
+
+	g_save_list_hit = 1;
+	g_save_list_ms = SDL_GetTicks();
+	if (seen < 4) {
+		seen++;
+		fprintf(stderr, "sword3-sdl: save/load slot list\n");
+	}
+	save_list_orig();
+}
 
 static int field_player_dir_call(uintptr_t ra)
 {
@@ -1198,8 +1191,18 @@ void sword3_field_install(void)
 			     GUEST_MOV_W8_16) != 0)
 		return;
 	if (field_patch_jump(GUEST_GET_DIR, field_get_dir_hook,
-			     dir_expect) != 0)
+			     dir_expect, "GetDirState") != 0)
 		return;
+	{
+		static const uint32_t list_expect[4] = {
+			0xd101c3ffu, 0xa90267fau, 0xa9035ff8u, 0xa90457f6u
+		};
+
+		if (field_patch_jump(GUEST_SAVE_LIST, save_list_hook,
+				     list_expect, "save/load list") == 0)
+			fprintf(stderr,
+				"sword3-sdl: save/load slot list pad hook installed\n");
+	}
 	installed = 1;
 	fprintf(stderr,
 		"sword3-sdl: PlayerMove run speed and private stick hook installed\n");
@@ -1219,6 +1222,7 @@ static void sync_ui_mode(void)
 {
 	int on_title = guest_on_title();
 	int save_ui = guest_load_ui();
+	int list_ui = guest_save_list();
 	int title_ui = guest_title_visible() && !save_ui;
 	int menu_ui = guest_system_menu();
 	int pointer_ui;
@@ -1228,13 +1232,15 @@ static void sync_ui_mode(void)
 	if (!on_title && !save_ui)
 		g_after_continue = 0;
 	pointer_ui = 0;
-	menu_keys = !title_ui && !save_ui && menu_ui;
-	fight_ui = !pointer_ui && !menu_keys && guest_in_fight();
+	menu_keys = !title_ui && !save_ui && !list_ui && menu_ui;
+	fight_ui = !pointer_ui && !menu_keys && !list_ui && guest_in_fight();
 	/*
-	 * g_save_ui is only the title 读取进度 list. In-game save is the
-	 * host menu. UI_FLAGS bit 1 stays set on the field after Continue
-	 * and after battle; treating it as save_ui mapped B to Escape and
-	 * opened the original iOS menu.
+	 * g_save_ui is only the title 读取进度 list (page==3). Script 存盘
+	 * uses the same slot-list function 0x100027834; pad mapping follows
+	 * that hook (guest_save_list), not menu_page or draw_gate. UI_FLAGS
+	 * bit 1 stays set on the field after Continue and after battle;
+	 * treating it as save_ui mapped B to Escape and opened the original
+	 * iOS menu.
 	 */
 	if (fight_ui)
 		save_ui = 0;
@@ -1245,7 +1251,7 @@ static void sync_ui_mode(void)
 	else
 		host_battle_close();
 	if (pointer_ui == g_pointer_ui && title_ui == g_title_keys &&
-	    save_ui == g_save_ui &&
+	    save_ui == g_save_ui && list_ui == g_save_list_ui &&
 	    menu_ui == g_menu_ui && menu_keys == g_menu_keys &&
 	    fight_ui == g_fight_ui)
 		return;
@@ -1279,10 +1285,12 @@ static void sync_ui_mode(void)
 	}
 	if (g_title_keys && !title_ui)
 		title_release_directions();
-	if (g_save_ui != save_ui) {
+	if (g_save_ui != save_ui || g_save_list_ui != list_ui) {
 		save_release_directions();
 		g_a_down = 0;
 	}
+	if (list_ui && !g_save_list_ui)
+		release_guest_walk();
 	if (menu_keys && !g_menu_keys) {
 		release_guest_walk();
 		menu_release_directions();
@@ -1301,14 +1309,15 @@ static void sync_ui_mode(void)
 		field_restore_controller_mode();
 	}
 	g_save_ui = save_ui;
+	g_save_list_ui = list_ui;
 	g_title_keys = title_ui;
 	g_menu_ui = menu_ui;
 	g_pointer_ui = pointer_ui;
 	g_menu_keys = menu_keys;
 	g_fight_ui = fight_ui;
 	fprintf(stderr,
-		"sword3-sdl: ui pointer=%d menu=%d fight=%d save=%d detected=%d draw=%d in=%d layer=%d syspage=%d syslv=%d page=%d now=%d sel=%d after=%d map=%d flags=%d back=%d tabs=%d cursor=%.0f,%.0f\n",
-		pointer_ui, menu_keys, fight_ui, save_ui, menu_ui,
+		"sword3-sdl: ui pointer=%d menu=%d fight=%d save=%d list=%d detected=%d draw=%d in=%d layer=%d syspage=%d syslv=%d page=%d now=%d sel=%d after=%d map=%d flags=%d back=%d tabs=%d cursor=%.0f,%.0f\n",
+		pointer_ui, menu_keys, fight_ui, save_ui, list_ui, menu_ui,
 		guest_read_i32(GUEST_DRAW_GATE, -1),
 		guest_menu_flag(),
 		guest_read_i32(GUEST_SYS_LAYER, -1),
@@ -1609,6 +1618,28 @@ static void save_set_key_state(int index, int down)
 	}
 }
 
+static void save_set_dir_source(int index, int axis, int down)
+{
+	int wanted;
+
+	if (index < 0 || index >= 4)
+		return;
+	if (axis)
+		g_save_dir_axis[index] = down;
+	else
+		g_save_dir_dpad[index] = down;
+	wanted = g_save_dir_axis[index] || g_save_dir_dpad[index];
+	if (wanted == g_save_dir_down[index])
+		return;
+	if (wanted) {
+		g_save_dir_release[index] = 0;
+		g_save_dir_down[index] = 1;
+		save_set_key_state(index, 1);
+		return;
+	}
+	g_save_dir_release[index] = 1;
+}
+
 static void save_dpad_event(int button, int down)
 {
 	int index;
@@ -1629,15 +1660,33 @@ static void save_dpad_event(int button, int down)
 	default:
 		return;
 	}
-	if (down) {
-		g_save_dir_release[index] = 0;
-		if (!g_save_dir_down[index]) {
-			g_save_dir_down[index] = 1;
-			save_set_key_state(index, 1);
-		}
-	} else if (g_save_dir_down[index]) {
-		g_save_dir_release[index] = 1;
+	save_set_dir_source(index, 0, down);
+}
+
+static void save_axis_event(Uint8 axis, Sint16 value)
+{
+	int old_dir;
+	int new_dir;
+
+	if (axis == SDL_CONTROLLER_AXIS_LEFTX) {
+		old_dir = g_save_dir_axis[3] ? 3 :
+			  (g_save_dir_axis[1] ? 1 : -1);
+		new_dir = value < -STICK_DEADZONE ? 3 :
+			  (value > STICK_DEADZONE ? 1 : -1);
+	} else if (axis == SDL_CONTROLLER_AXIS_LEFTY) {
+		old_dir = g_save_dir_axis[0] ? 0 :
+			  (g_save_dir_axis[2] ? 2 : -1);
+		new_dir = value < -STICK_DEADZONE ? 0 :
+			  (value > STICK_DEADZONE ? 2 : -1);
+	} else {
+		return;
 	}
+	if (old_dir == new_dir)
+		return;
+	if (old_dir >= 0)
+		save_set_dir_source(old_dir, 1, 0);
+	if (new_dir >= 0)
+		save_set_dir_source(new_dir, 1, 1);
 }
 
 static void save_release_directions(void)
@@ -1645,6 +1694,8 @@ static void save_release_directions(void)
 	int i;
 
 	memset(g_save_dir_release, 0, sizeof(g_save_dir_release));
+	memset(g_save_dir_dpad, 0, sizeof(g_save_dir_dpad));
+	memset(g_save_dir_axis, 0, sizeof(g_save_dir_axis));
 	for (i = 0; i < 4; i++) {
 		if (!g_save_dir_down[i])
 			continue;
@@ -1949,14 +2000,13 @@ static int menu_page_visible(void)
 {
 	/*
 	 * Game hides widgets with x == -1. Field leftover back icon stays
-	 * around (592,20), so "menu up" is the tab strip / Tianshu actions.
-	 * Do not require the show flag; it is not the hide signal.
+	 * around (592,20), so "menu up" is the tab strip only. Do not treat
+	 * leftover 天书 button ids 3..7 as chrome.
 	 */
 	int y;
 	uint8_t *widget;
 	static const int ids[] = {
 		GUEST_MENU_TAB0, GUEST_MENU_TAB1, GUEST_MENU_TAB2,
-		3, 4, 5, 6, 7,
 	};
 	unsigned i;
 
@@ -1986,7 +2036,7 @@ static void menu_log_icons(const char *why)
 {
 	static const int ids[] = {
 		GUEST_MENU_BACK, GUEST_MENU_TAB0, GUEST_MENU_TAB1,
-		GUEST_MENU_TAB2, 3, 4, 5,
+		GUEST_MENU_TAB2,
 	};
 	uint8_t *widget;
 	unsigned i;
@@ -2051,20 +2101,6 @@ static int menu_opening(void)
 	       g_menu_open_pending;
 }
 
-static int menu_widget_rect(int id, int *x, int *y, int *w, int *h)
-{
-	uint8_t *widget;
-
-	widget = menu_find_widget(id);
-	if (!widget_is_drawn(widget))
-		return 0;
-	*x = *(volatile int *)(widget + GUEST_WIDGET_X);
-	*y = *(volatile int *)(widget + GUEST_WIDGET_Y);
-	*h = *(volatile int *)(widget + GUEST_WIDGET_H);
-	*w = *(volatile int *)(widget + GUEST_WIDGET_W);
-	return 1;
-}
-
 static void push_finger_at(float x, float y, Uint32 type)
 {
 	SDL_Event event;
@@ -2081,74 +2117,9 @@ static void push_finger_at(float x, float y, Uint32 type)
 	SDL_PushEvent(&event);
 }
 
-static int menu_click_widget(int id)
-{
-	int x;
-	int y;
-	int w;
-	int h;
-
-	if (!menu_widget_rect(id, &x, &y, &w, &h))
-		return 0;
-	push_finger_at((float)(x + w / 2) / (float)GAME_W,
-		       (float)(y + h / 2) / (float)GAME_H,
-		       SDL_FINGERDOWN);
-	push_finger_at((float)(x + w / 2) / (float)GAME_W,
-		       (float)(y + h / 2) / (float)GAME_H,
-		       SDL_FINGERUP);
-	fprintf(stderr, "sword3-sdl: menu widget id=%d xy=%d,%d\n",
-		id, x, y);
-	return 1;
-}
-
 static int menu_syspage_active(void)
 {
 	return guest_read_ptr(GUEST_FEXECUTE) == GUEST_FEX_SYSPAGE;
-}
-
-static int menu_tianshu_active(void)
-{
-	/*
-	 * Host-driven 存盘/读取 row. After tapping one, click becomes
-	 * SysPage 0x10002d018 and those widgets stay on screen; D-pad
-	 * must then move save slots, not the parent row.
-	 */
-	return g_menu_tab_index == 4 && !menu_syspage_active() &&
-	       !g_menu_nested;
-}
-
-static void menu_click_action(int index)
-{
-	if (index < 0 || index >= 5 ||
-	    !menu_click_widget(index + 3))
-		return;
-	g_menu_nested = 1;
-	g_menu_action_focus = -1;
-	fprintf(stderr, "sword3-sdl: Tianshu action=%d id=%d nested\n",
-		index, index + 3);
-}
-
-static int menu_action_select_rect(int *x, int *y, int *w, int *h)
-{
-	int gx;
-	int gy;
-	int gw;
-	int gh;
-	int lw;
-	int lh;
-
-	if (!g_menu_keys || !menu_tianshu_active() ||
-	    g_menu_action_focus < 0 ||
-	    !menu_widget_rect(g_menu_action_focus + 3,
-			      &gx, &gy, &gw, &gh))
-		return 0;
-	lw = g_logical_w > 0 ? g_logical_w : GAME_W;
-	lh = g_logical_h > 0 ? g_logical_h : GAME_H;
-	*x = gx * lw / GAME_W;
-	*y = gy * lh / GAME_H;
-	*w = gw * lw / GAME_W;
-	*h = gh * lh / GAME_H;
-	return 1;
 }
 
 static void menu_switch_tab(int delta)
@@ -2160,13 +2131,6 @@ static void menu_switch_tab(int delta)
 
 	index = (g_menu_tab_index + delta + 5) % 5;
 	g_menu_tab_index = index;
-	/*
-	 * 天书's 存盘/读取/记载/设置/离开 row is selected immediately so
-	 * left/right can cycle those buttons without pressing Down first.
-	 * Up still returns to the tab strip (focus -1) to leave this page.
-	 */
-	g_menu_action_focus = index == 4 ? 0 : -1;
-	g_menu_nested = 0;
 	push_finger_at(tab_x[index], 0.058f, SDL_FINGERDOWN);
 	push_finger_at(tab_x[index], 0.058f, SDL_FINGERUP);
 	fprintf(stderr, "sword3-sdl: menu tab=%d touch=%.3f,0.058\n",
@@ -2302,8 +2266,6 @@ static void menu_enter_session(void)
 	g_menu_ui = 1;
 	g_menu_open_pending = 0;
 	g_menu_tab_index = 0;
-	g_menu_action_focus = -1;
-	g_menu_nested = 0;
 	fprintf(stderr, "sword3-sdl: menu session start\n");
 }
 
@@ -2327,7 +2289,6 @@ static void menu_leave_session(void)
 	g_menu_back_until = 0;
 	g_menu_reenter_until = SDL_GetTicks() + MENU_BACK_GRACE_MS;
 	g_field_mode_held = 0;
-	g_menu_nested = 0;
 	menu_release_directions();
 	release_guest_walk();
 	if (guest_data_ok(GUEST_UIGAMEPAD)) {
@@ -2345,7 +2306,6 @@ static void menu_begin_open(int button)
 	g_menu_seen_chrome = 0;
 	g_menu_gone_at = 0;
 	g_menu_tab_index = 0;
-	g_menu_action_focus = -1;
 	g_menu_logged_postopen = 0;
 	g_menu_saw_draw = 0;
 	menu_log_icons("open");
@@ -2836,9 +2796,6 @@ static int menu_begin_close(void)
 {
 	menu_log_icons("close");
 	g_menu_close_pending = 1;
-	if (g_menu_nested && g_menu_tab_index == 4)
-		g_menu_action_focus = 0;
-	g_menu_nested = 0;
 	if (menu_try_close())
 		return 1;
 	fprintf(stderr, "sword3-sdl: menu B waiting for back icon\n");
@@ -2874,19 +2831,13 @@ static void menu_set_dir_source(int index, int axis, int down)
 		g_menu_dir_down[index] = 1;
 		/*
 		 * Nested pages (save slots, item bag) keep the tab strip
-		 * and Tianshu buttons drawn. The game has installed the
-		 * SysPage table; send keyboard arrows into that list.
+		 * drawn. The game has installed the SysPage table; send
+		 * keyboard arrows into that list.
 		 */
-		if (menu_syspage_active() || g_menu_nested) {
+		if (menu_syspage_active()) {
 			guest_keyboard_key(g_menu_dir_keys[index], 1);
 			g_menu_dir_release[index] = 1;
 			menu_log_state(index == 1 ? "right" : "left");
-			return;
-		}
-		if (menu_tianshu_active() && g_menu_action_focus >= 0) {
-			g_menu_action_focus =
-				(g_menu_action_focus +
-				 (index == 1 ? 1 : 4)) % 5;
 			return;
 		}
 		if (menu_widget_on_screen(menu_find_widget(GUEST_MENU_TAB0)) ||
@@ -2898,18 +2849,6 @@ static void menu_set_dir_source(int index, int axis, int down)
 		guest_keyboard_key(g_menu_dir_keys[index], 1);
 		g_menu_dir_release[index] = 1;
 		menu_log_state(index == 1 ? "right" : "left");
-		return;
-	}
-	if (menu_tianshu_active()) {
-		g_menu_dir_down[index] = wanted;
-		if (!wanted)
-			return;
-		if (index == 2) {
-			if (g_menu_action_focus < 0)
-				g_menu_action_focus = 0;
-		} else if (index == 0) {
-			g_menu_action_focus = -1;
-		}
 		return;
 	}
 	if (!wanted) {
@@ -2980,8 +2919,6 @@ static void menu_release_directions(void)
 	memset(g_menu_dir_dpad, 0, sizeof(g_menu_dir_dpad));
 	memset(g_menu_dir_axis, 0, sizeof(g_menu_dir_axis));
 	memset(g_menu_dir_release, 0, sizeof(g_menu_dir_release));
-	g_menu_action_focus = -1;
-	g_menu_action_a_up = 0;
 	for (i = 0; i < 4; i++) {
 		if (!g_menu_dir_down[i])
 			continue;
@@ -3348,7 +3285,8 @@ static int rewrite_event(SDL_Event *event)
 			event->type = SDL_FIRSTEVENT;
 			return 0;
 		}
-		if (g_save_ui) {
+		if (save_slot_pad()) {
+			save_axis_event(event->caxis.axis, event->caxis.value);
 			event->type = SDL_FIRSTEVENT;
 			return 0;
 		}
@@ -3434,6 +3372,10 @@ static int rewrite_event(SDL_Event *event)
 			fill_key(event, SDL_SCANCODE_ESCAPE, down);
 			return 1;
 		}
+		if (guest_save_list()) {
+			event->type = SDL_FIRSTEVENT;
+			return 0;
+		}
 		if (host_menu_active()) {
 			event->type = SDL_FIRSTEVENT;
 			return 0;
@@ -3513,6 +3455,10 @@ static int rewrite_event(SDL_Event *event)
 			fill_key(event, SDL_SCANCODE_ESCAPE, down);
 			return 1;
 		}
+		if (guest_save_list()) {
+			fill_key(event, SDL_SCANCODE_ESCAPE, down);
+			return 1;
+		}
 		if (g_title_keys) {
 			fill_key(event, SDL_SCANCODE_ESCAPE, down);
 			return 1;
@@ -3582,19 +3528,6 @@ static int rewrite_event(SDL_Event *event)
 		if (g_menu_keys && menu_drawn()) {
 			Uint32 now = SDL_GetTicks();
 
-			if (!down && g_menu_action_a_up) {
-				g_menu_action_a_up = 0;
-				event->type = SDL_FIRSTEVENT;
-				return 0;
-			}
-			if (down && menu_tianshu_active() &&
-			    g_menu_action_focus >= 0) {
-				menu_click_action(g_menu_action_focus);
-				g_menu_action_a_up = 1;
-				g_menu_a_block_until = now + 350;
-				event->type = SDL_FIRSTEVENT;
-				return 0;
-			}
 			if (down &&
 			    !SDL_TICKS_PASSED(now, g_menu_a_block_until)) {
 				event->type = SDL_FIRSTEVENT;
@@ -3656,7 +3589,7 @@ static int rewrite_event(SDL_Event *event)
 			event->type = SDL_FIRSTEVENT;
 			return 0;
 		}
-		if (!g_pointer_ui && !g_title_keys && !g_save_ui) {
+		if (!g_pointer_ui && !g_title_keys && !save_slot_pad()) {
 			if (!accept_a_edge(down)) {
 				if (!down && g_field_mode_held)
 					field_talk_key(0);
@@ -3686,6 +3619,15 @@ static int rewrite_event(SDL_Event *event)
 						       0) != 0;
 			} else if (g_save_ui && !down) {
 				g_load_context_done = 1;
+			} else if (guest_save_list()) {
+				static unsigned seen;
+
+				if (seen < 16) {
+					seen++;
+					fprintf(stderr,
+						"sword3-sdl: save list A -> Return %s\n",
+						down ? "down" : "up");
+				}
 			}
 			return 1;
 		}
@@ -3732,8 +3674,17 @@ static int rewrite_event(SDL_Event *event)
 			event->type = SDL_FIRSTEVENT;
 			return 0;
 		}
-		if (g_save_ui) {
+		if (save_slot_pad()) {
+			static unsigned seen;
+
 			save_dpad_event(button, down);
+			if (seen < 16) {
+				seen++;
+				fprintf(stderr,
+					"sword3-sdl: save list pad %s %s\n",
+					pad_button_name(button),
+					down ? "down" : "up");
+			}
 			event->type = SDL_FIRSTEVENT;
 			return 0;
 		}
@@ -3764,7 +3715,7 @@ static int rewrite_event(SDL_Event *event)
 		return 1;
 	}
 	if (button == SDL_CONTROLLER_BUTTON_LEFTSTICK) {
-		if (g_save_ui || g_title_keys || g_fight_ui ||
+		if (save_slot_pad() || g_title_keys || g_fight_ui ||
 		    g_pointer_ui) {
 			event->type = SDL_FIRSTEVENT;
 			return 0;
@@ -4247,8 +4198,6 @@ void sword3_SDL_RenderPresent(SDL_Renderer *renderer)
 	SDL_BlendMode blend;
 	int x;
 	int y;
-	int bw;
-	int bh;
 
 	owner_check("SDL_RenderPresent", KIND_RENDERER, renderer);
 	ensure_gamecontroller();
@@ -4266,9 +4215,6 @@ void sword3_SDL_RenderPresent(SDL_Renderer *renderer)
 	} else if (host_battle_active() &&
 		   SDL_GetRenderTarget(renderer) == NULL) {
 		host_battle_draw(renderer, g_logical_w, g_logical_h);
-	} else if (g_menu_keys && SDL_GetRenderTarget(renderer) == NULL &&
-		   menu_action_select_rect(&x, &y, &bw, &bh)) {
-		draw_select_frame(renderer, x, y, bw, bh);
 	} else if (g_pointer_ui && g_cursor_ready && g_logical_w > 0 &&
 	    SDL_GetRenderTarget(renderer) == NULL) {
 		x = (int)g_cursor_x;

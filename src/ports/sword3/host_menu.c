@@ -332,7 +332,7 @@ static const char *g_stub_text[HOST_MENU_ACTIONS] = {
 	"读取（尚未接入）",
 	"记载（尚未接入）",
 	"设置（尚未接入）",
-	"存盘（尚未接入）",
+	"离开（尚未接入）",
 };
 
 static const SDL_Color g_ink_title = { 237, 221, 172, 255 };
