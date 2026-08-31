@@ -361,6 +361,7 @@ static void owner_drop(enum sword3_sdl_kind kind, void *pointer)
 #define GUEST_CAPTION_BTNS 0x30
 #define GUEST_CAPTION_ACTIVE 0x7c
 #define GUEST_CAPTION_SEL 0x80
+#define GUEST_CAPTION_NEXT 0x118
 #define GUEST_CAPTION_SKIP 0x128
 #define GUEST_CAPTION_BTN_NEXT 0x18
 #define GUEST_VIEW_ORIGIN 0x1c0
@@ -2089,27 +2090,34 @@ static uintptr_t caption_choice_widget(int *count)
 	if (guest_read_i32(GUEST_DLG_MGR + GUEST_DLG_DIR_GATE, 0) == 0)
 		return 0;
 	widget = guest_read_ptr(GUEST_DLG_MGR + GUEST_DLG_WIDGETS);
-	if (!widget || !guest_heap_ok(widget, GUEST_CAPTION_SKIP + 1))
-		return 0;
-	if (*(volatile uint8_t *)(widget + GUEST_CAPTION_SKIP) != 0)
-		return 0;
-	if (*(volatile uint8_t *)(widget + GUEST_CAPTION_ACTIVE) == 0)
-		return 0;
-	button = *(volatile uintptr_t *)(widget + GUEST_CAPTION_BTNS);
-	if (!button || !guest_heap_ok(button, GUEST_CAPTION_BTN_NEXT + 8))
-		return 0;
-	n = 0;
-	for (i = 0, next = button; next && i < 8; i++) {
-		if (!guest_heap_ok(next, GUEST_CAPTION_BTN_NEXT + 8))
+	for (i = 0; widget && i < 16; i++, widget = next) {
+		if (!guest_heap_ok(widget, GUEST_CAPTION_SKIP + 1))
 			break;
-		n++;
-		next = *(volatile uintptr_t *)(next + GUEST_CAPTION_BTN_NEXT);
+		next = *(volatile uintptr_t *)(widget + GUEST_CAPTION_NEXT);
+		if (*(volatile uint8_t *)(widget + GUEST_CAPTION_SKIP) != 0 ||
+		    *(volatile uint8_t *)(widget + GUEST_CAPTION_ACTIVE) == 0)
+			continue;
+		button = *(volatile uintptr_t *)(widget + GUEST_CAPTION_BTNS);
+		if (!button ||
+		    !guest_heap_ok(button, GUEST_CAPTION_BTN_NEXT + 8))
+			continue;
+		n = 0;
+		for (button = *(volatile uintptr_t *)(widget +
+						     GUEST_CAPTION_BTNS);
+		     button && n < 8; n++) {
+			if (!guest_heap_ok(button,
+					   GUEST_CAPTION_BTN_NEXT + 8))
+				break;
+			button = *(volatile uintptr_t *)(button +
+							GUEST_CAPTION_BTN_NEXT);
+		}
+		if (n < 2)
+			continue;
+		if (count)
+			*count = n;
+		return widget;
 	}
-	if (n < 2)
-		return 0;
-	if (count)
-		*count = n;
-	return widget;
+	return 0;
 }
 
 static int guest_caption_choice(void)
