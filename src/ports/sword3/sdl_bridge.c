@@ -295,6 +295,14 @@ static void owner_drop(enum sword3_sdl_kind kind, void *pointer)
 #define GUEST_PAD_BUTTONS 16
 #define GUEST_DPAD_SLOT 0x2404
 #define GUEST_DPAD_STRIDE 0x18
+#define GUEST_DLG_MGR 0x100318070ull
+#define GUEST_DLG_WIDGETS 0x788
+#define GUEST_DLG_DIR_GATE 0x8f0
+#define GUEST_CAPTION_BTNS 0x30
+#define GUEST_CAPTION_ACTIVE 0x7c
+#define GUEST_CAPTION_SEL 0x80
+#define GUEST_CAPTION_SKIP 0x128
+#define GUEST_CAPTION_BTN_NEXT 0x18
 #define GUEST_VIEW_ORIGIN 0x1c0
 #define GUEST_VIEW_SIZE 0x1c8
 #define GUEST_VIEW_SCALE 0x1c
@@ -363,6 +371,10 @@ static int g_title_keys;
 static int g_title_dir_dpad[4];
 static int g_title_dir_axis[4];
 static int g_title_dir_down[4];
+static int g_choice_dir_dpad[4];
+static int g_choice_dir_axis[4];
+static int g_choice_dir_down[4];
+static unsigned g_choice_seen;
 static int g_menu_ui;
 static int g_menu_keys;
 static int g_menu_session;
@@ -568,6 +580,17 @@ static int guest_data_ok(uintptr_t addr)
 	return addr >= 0x100294000ull && addr < 0x100380000ull;
 }
 
+static int guest_heap_ok(uintptr_t addr, size_t n)
+{
+	if (addr < 0x10000ull || addr > 0x00007fffffffffffull)
+		return 0;
+	if (n == 0)
+		return 1;
+	if (addr + n - 1 < addr)
+		return 0;
+	return addr + n - 1 <= 0x00007fffffffffffull;
+}
+
 static void maybe_init_guest_viewport(uint8_t *screen)
 {
 	static int logged;
@@ -753,6 +776,10 @@ static void save_release_directions(void);
 static void title_release_directions(void);
 static void menu_release_directions(void);
 static void fight_release_directions(void);
+static int guest_caption_choice(void);
+static void caption_dpad_event(int button, int down);
+static void caption_axis_event(Uint8 axis, Sint16 value);
+static void caption_clear_dirs(void);
 static void release_guest_walk(void);
 static void field_restore_controller_mode(void);
 static void push_finger_at(float x, float y, Uint32 type);
@@ -1720,6 +1747,155 @@ static void title_release_directions(void)
 	memset(g_title_dir_dpad, 0, sizeof(g_title_dir_dpad));
 	memset(g_title_dir_axis, 0, sizeof(g_title_dir_axis));
 	memset(g_title_dir_down, 0, sizeof(g_title_dir_down));
+}
+
+/*
+ * Field WaitDLG/Caption %B choices (是/否) live on the dialog manager
+ * at 0x100318070. PlayerMove calls 0x1001f24cc every frame; that path
+ * moves widget+0x80 only when GetDirState returns -1 (keyboard type-2
+ * edge). Field D-pad is a controller button, so the highlight never
+ * changes. Write the same 1-based index the binary stores.
+ */
+static uintptr_t caption_choice_widget(int *count)
+{
+	uintptr_t widget;
+	uintptr_t button;
+	uintptr_t next;
+	int n;
+	int i;
+
+	if (count)
+		*count = 0;
+	if (guest_read_i32(GUEST_DLG_MGR + GUEST_DLG_DIR_GATE, 0) == 0)
+		return 0;
+	widget = guest_read_ptr(GUEST_DLG_MGR + GUEST_DLG_WIDGETS);
+	if (!widget || !guest_heap_ok(widget, GUEST_CAPTION_SKIP + 1))
+		return 0;
+	if (*(volatile uint8_t *)(widget + GUEST_CAPTION_SKIP) != 0)
+		return 0;
+	if (*(volatile uint8_t *)(widget + GUEST_CAPTION_ACTIVE) == 0)
+		return 0;
+	button = *(volatile uintptr_t *)(widget + GUEST_CAPTION_BTNS);
+	if (!button || !guest_heap_ok(button, GUEST_CAPTION_BTN_NEXT + 8))
+		return 0;
+	n = 0;
+	for (i = 0, next = button; next && i < 8; i++) {
+		if (!guest_heap_ok(next, GUEST_CAPTION_BTN_NEXT + 8))
+			break;
+		n++;
+		next = *(volatile uintptr_t *)(next + GUEST_CAPTION_BTN_NEXT);
+	}
+	if (n < 2)
+		return 0;
+	if (count)
+		*count = n;
+	return widget;
+}
+
+static int guest_caption_choice(void)
+{
+	return caption_choice_widget(NULL) != 0;
+}
+
+static void caption_clear_dirs(void)
+{
+	memset(g_choice_dir_dpad, 0, sizeof(g_choice_dir_dpad));
+	memset(g_choice_dir_axis, 0, sizeof(g_choice_dir_axis));
+	memset(g_choice_dir_down, 0, sizeof(g_choice_dir_down));
+}
+
+static void caption_move(int delta)
+{
+	uintptr_t widget;
+	int n;
+	int sel;
+
+	widget = caption_choice_widget(&n);
+	if (!widget || n < 2)
+		return;
+	sel = *(volatile int *)(widget + GUEST_CAPTION_SEL);
+	if (sel < 1 || sel > n)
+		sel = 1;
+	if (delta < 0)
+		sel = sel > 1 ? sel - 1 : 1;
+	else
+		sel = sel < n ? sel + 1 : n;
+	*(volatile int *)(widget + GUEST_CAPTION_SEL) = sel;
+	if (g_choice_seen++ < 24)
+		fprintf(stderr, "sword3-sdl: caption choice=%d/%d\n", sel, n);
+}
+
+static void caption_set_dir_source(int index, int axis, int down)
+{
+	int wanted;
+
+	if (index < 0 || index >= 4)
+		return;
+	if (!guest_caption_choice()) {
+		caption_clear_dirs();
+		return;
+	}
+	if (axis)
+		g_choice_dir_axis[index] = down;
+	else
+		g_choice_dir_dpad[index] = down;
+	wanted = g_choice_dir_axis[index] || g_choice_dir_dpad[index];
+	if (wanted == g_choice_dir_down[index])
+		return;
+	g_choice_dir_down[index] = wanted;
+	if (!wanted)
+		return;
+	/* Same mapping as 0x1001c3c30: up/left decrement, down/right increment. */
+	caption_move((index == 0 || index == 3) ? -1 : 1);
+}
+
+static void caption_axis_event(Uint8 axis, Sint16 value)
+{
+	int old_dir;
+	int new_dir;
+
+	if (axis == SDL_CONTROLLER_AXIS_LEFTX) {
+		old_dir = g_choice_dir_axis[3] ? 3 :
+			  (g_choice_dir_axis[1] ? 1 : -1);
+		new_dir = value < -STICK_DEADZONE ? 3 :
+			  (value > STICK_DEADZONE ? 1 : -1);
+	} else if (axis == SDL_CONTROLLER_AXIS_LEFTY) {
+		old_dir = g_choice_dir_axis[0] ? 0 :
+			  (g_choice_dir_axis[2] ? 2 : -1);
+		new_dir = value < -STICK_DEADZONE ? 0 :
+			  (value > STICK_DEADZONE ? 2 : -1);
+	} else {
+		return;
+	}
+	if (old_dir == new_dir)
+		return;
+	if (old_dir >= 0)
+		caption_set_dir_source(old_dir, 1, 0);
+	if (new_dir >= 0)
+		caption_set_dir_source(new_dir, 1, 1);
+}
+
+static void caption_dpad_event(int button, int down)
+{
+	int index;
+
+	switch (button) {
+	case SDL_CONTROLLER_BUTTON_DPAD_UP:
+		index = 0;
+		break;
+	case SDL_CONTROLLER_BUTTON_DPAD_RIGHT:
+		index = 1;
+		break;
+	case SDL_CONTROLLER_BUTTON_DPAD_DOWN:
+		index = 2;
+		break;
+	case SDL_CONTROLLER_BUTTON_DPAD_LEFT:
+		index = 3;
+		break;
+	default:
+		return;
+	}
+	caption_set_dir_source(index, 0, down);
 }
 
 static uint8_t *menu_find_widget(int id)
@@ -3186,6 +3362,11 @@ static int rewrite_event(SDL_Event *event)
 			event->type = SDL_FIRSTEVENT;
 			return 0;
 		}
+		if (guest_caption_choice()) {
+			caption_axis_event(event->caxis.axis, event->caxis.value);
+			event->type = SDL_FIRSTEVENT;
+			return 0;
+		}
 		if (menu_opening()) {
 			event->type = SDL_FIRSTEVENT;
 			return 0;
@@ -3563,6 +3744,11 @@ static int rewrite_event(SDL_Event *event)
 		}
 		if (g_menu_keys) {
 			menu_dpad_event(button, down);
+			event->type = SDL_FIRSTEVENT;
+			return 0;
+		}
+		if (guest_caption_choice()) {
+			caption_dpad_event(button, down);
 			event->type = SDL_FIRSTEVENT;
 			return 0;
 		}
@@ -4122,6 +4308,8 @@ void sword3_SDL_RenderPresent(SDL_Renderer *renderer)
 	save_flush_direction_releases();
 	menu_flush_direction_releases();
 	fight_flush_direction_releases();
+	if (!guest_caption_choice())
+		caption_clear_dirs();
 }
 
 int sword3_SDL_RenderDrawPointsF(SDL_Renderer *renderer,
