@@ -79,9 +79,30 @@ int sword3_SDL_UpperBlit(SDL_Surface *src, const SDL_Rect *srcrect,
 			 SDL_Surface *dst, SDL_Rect *dstrect);
 int sword3_SDL_UpperBlitScaled(SDL_Surface *src, const SDL_Rect *srcrect,
 			       SDL_Surface *dst, SDL_Rect *dstrect);
+SDL_Surface *sword3_SDL_CreateRGBSurface(Uint32 flags, int width, int height,
+					 int depth, Uint32 rmask,
+					 Uint32 gmask, Uint32 bmask,
+					 Uint32 amask);
+SDL_Surface *sword3_SDL_CreateRGBSurfaceFrom(void *pixels, int width,
+					     int height, int depth, int pitch,
+					     Uint32 rmask, Uint32 gmask,
+					     Uint32 bmask, Uint32 amask);
 SDL_Surface *sword3_SDL_CreateRGBSurfaceWithFormat(Uint32 flags, int width,
 						   int height, int depth,
 						   Uint32 format);
+SDL_Surface *sword3_SDL_CreateRGBSurfaceWithFormatFrom(
+	void *pixels, int width, int height, int depth, int pitch,
+	Uint32 format);
+SDL_Surface *sword3_SDL_ConvertSurface(SDL_Surface *src,
+				       const SDL_PixelFormat *format,
+				       Uint32 flags);
+SDL_Surface *sword3_SDL_ConvertSurfaceFormat(SDL_Surface *src,
+					     Uint32 format, Uint32 flags);
+int sword3_SDL_SetColorKey(SDL_Surface *surface, int flag, Uint32 key);
+int sword3_SDL_FillRect(SDL_Surface *surface, const SDL_Rect *rect,
+			Uint32 color);
+int sword3_SDL_FillRects(SDL_Surface *surface, const SDL_Rect *rects,
+			 int count, Uint32 color);
 void sword3_SDL_FreeSurface(SDL_Surface *surface);
 
 SDL_RWops *sword3_SDL_RWFromFile(const char *file, const char *mode);

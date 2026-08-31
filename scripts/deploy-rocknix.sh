@@ -3,7 +3,7 @@ set -eu
 
 ROOT=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)
 TARGET=${TARGET:-root@192.168.31.110}
-REMOTE_DIR=${REMOTE_DIR:-/storage/roms/ports/sword3-ios}
+REMOTE_DIR=${REMOTE_DIR:-/roms/ports/sword3-ios}
 PACKAGE=${OUTPUT:-"$ROOT/dist/sword3-ios"}
 
 "$ROOT/scripts/package-rocknix.sh"

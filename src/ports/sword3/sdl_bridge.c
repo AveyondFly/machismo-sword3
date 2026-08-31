@@ -1,4 +1,6 @@
 #include "sdl_bridge.h"
+#include "input_context.h"
+#include "native_menu_input.h"
 #include "host_menu.h"
 #include "host_battle_menu.h"
 #include "host_cheat.h"
@@ -230,6 +232,7 @@ static void owner_drop(enum sword3_sdl_kind kind, void *pointer)
 #define GAME_H 480
 #define GUEST_UIGAMEPAD 0x100304e28ull
 #define GUEST_SCREEN 0x100319450ull
+#define GUEST_MENU_SELECTION 0x1002a99d0ull
 #define GUEST_MAP_ID 0x1002a99d4ull
 #define GUEST_UI_FLAGS 0x1002a9a24ull
 #define GUEST_MENU_PAGE 0x1002a9a20ull
@@ -252,6 +255,12 @@ static void owner_drop(enum sword3_sdl_kind kind, void *pointer)
 #define GUEST_FEX_RET 0x10005b87cull
 #define GUEST_FEX_FIELD 0x1000831a8ull
 #define GUEST_FEX_SYSPAGE 0x10002d018ull
+#define GUEST_FEX_ITEM 0x10002fffcull
+#define GUEST_ITEM_OK 0x100030a20ull
+#define GUEST_ITEM_CATEGORY_PREV 0x1000314a8ull
+#define GUEST_ITEM_CATEGORY_NEXT 0x1000315f0ull
+#define GUEST_ITEM_CATEGORY 0x1002aa798ull
+#define GUEST_ITEM_CONFIRM_SELECTION 0x1002aa78cull
 #define GUEST_REBIND_ACTIONS 0x1001fa5e8ull
 #define GUEST_PAD_READY 0x248c
 #define GUEST_SLOT_MASK 0x10
@@ -325,6 +334,7 @@ static void owner_drop(enum sword3_sdl_kind kind, void *pointer)
 #define GUEST_CSINC_W8 0x1a9f0508u
 #define GUEST_MOV_W22_16 0x52800216u
 #define GUEST_MOV_W8_16 0x52800208u
+#define GUEST_FEATURE_ENABLED 0x1001b7014ull
 #define GUEST_GET_DIR 0x1001c1df4ull
 #define GUEST_SAVE_LIST 0x100027834ull
 #define GUEST_SHOP_UI 0x10003992cull
@@ -416,8 +426,9 @@ static unsigned g_fight_key_seen;
 static int g_menu_open_button = -1;
 static int g_menu_close_widget;
 static int g_menu_close_pending;
-static int g_menu_tab_index;
+static Sword3NativeMenuInput g_native_menu_input;
 static Uint32 g_menu_a_block_until;
+static int g_menu_captured_a;
 static int g_a_down;
 static Uint32 g_a_edge_ms;
 static unsigned g_a_chatter;
@@ -428,6 +439,7 @@ static unsigned g_finger_seen;
 static unsigned g_pad_seen[GUEST_PAD_BUTTONS];
 static Uint32 g_cursor_ticks;
 static int g_swallow_a_up;
+static Sword3InputContextTracker g_input_context_tracker;
 
 static int movie_is_playing(void);
 static int movie_consume_skip(int button, int down);
@@ -903,8 +915,16 @@ static uintptr_t guest_read_ptr(uintptr_t addr)
 static void menu_log_state(const char *why)
 {
 	fprintf(stderr,
-		"sword3-sdl: menust %s draw=%d layer=%d in=%d page=%d lv=%d sub=%d slot=%d halt=%d cnt=%d obj=%p fex=%p\n",
+		"sword3-sdl: menust %s focus=%s tab=%d/%d action=%d native=%d "
+		"draw=%d layer=%d in=%d page=%d lv=%d sub=%d slot=%d "
+		"halt=%d cnt=%d obj=%p fex=%p\n",
 		why,
+		g_native_menu_input.focus == SWORD3_NATIVE_MENU_FOCUS_TABS
+			? "tabs" : "content",
+		g_native_menu_input.tab,
+		g_native_menu_input.tab_count,
+		g_native_menu_input.item_action,
+		guest_read_i32(GUEST_MENU_SELECTION, -1),
 		guest_read_i32(GUEST_DRAW_GATE, -1),
 		guest_read_i32(GUEST_SYS_LAYER, -1),
 		guest_menu_flag(),
@@ -1286,24 +1306,116 @@ static void warp_screen_center(void)
 	g_cursor_ready = 1;
 }
 
+static int input_shadow_enabled(void)
+{
+	static int enabled = -1;
+	const char *value;
+
+	if (enabled >= 0)
+		return enabled;
+	value = getenv("SWORD3_INPUT_SHADOW");
+	enabled = value && value[0] && strcmp(value, "0") != 0;
+	return enabled;
+}
+
+static void input_shadow_format_candidates(uint32_t candidates,
+					   char *buffer, size_t size)
+{
+	size_t used = 0;
+	int route;
+
+	if (!size)
+		return;
+	buffer[0] = '\0';
+	for (route = SWORD3_INPUT_ROUTE_FIELD;
+	     route < SWORD3_INPUT_ROUTE_COUNT; route++) {
+		const char *name;
+		int written;
+
+		if (!(candidates &
+		      SWORD3_INPUT_ROUTE_BIT((Sword3InputRoute)route)))
+			continue;
+		name = sword3_input_route_name((Sword3InputRoute)route);
+		written = snprintf(buffer + used, size - used, "%s%s",
+				   used ? "," : "", name);
+		if (written < 0 || (size_t)written >= size - used) {
+			buffer[size - 1] = '\0';
+			return;
+		}
+		used += (size_t)written;
+	}
+}
+
+static void input_shadow_update(int title, int in_fight, int save_load,
+				int save_list, int shop, int system_menu,
+				int menu_opening_state, int pointer)
+{
+	Sword3InputProbe probe;
+	Sword3InputContext context;
+	char candidates[192];
+
+	if (!input_shadow_enabled())
+		return;
+	memset(&probe, 0, sizeof(probe));
+	probe.host_cheat = host_cheat_active();
+	probe.caption = guest_caption_choice();
+	probe.host_menu = host_menu_active();
+	probe.host_battle = host_battle_owns_pad();
+	probe.battle = in_fight;
+	probe.save_load = save_load;
+	probe.save_list = save_list;
+	probe.shop = shop;
+	probe.title = title;
+	probe.system_menu = system_menu;
+	probe.menu_opening = menu_opening_state;
+	probe.pointer = pointer;
+	probe.map_id = guest_map_id();
+	probe.title_mode = guest_read_i32(GUEST_TITLE_MODE, -1);
+	probe.menu_page = guest_read_i32(GUEST_MENU_PAGE, -1);
+	probe.system_page = guest_read_i32(GUEST_SYS_PAGE, -1);
+	probe.system_level = guest_read_i32(GUEST_SYS_LEVEL, -1);
+	probe.system_sub = guest_read_i32(GUEST_SYS_SUB, -1);
+	probe.battle_menu = guest_now_menu();
+
+	if (!sword3_input_context_track(&g_input_context_tracker, &probe,
+					 &context))
+		return;
+	input_shadow_format_candidates(context.candidates, candidates,
+				       sizeof(candidates));
+	fprintf(stderr,
+		"sword3-input-shadow: generation=%llu route=%s candidates=%s "
+		"map=%d title=%d page=%d sys=%d/%d/%d battle=%d\n",
+		(unsigned long long)context.generation,
+		sword3_input_route_name(context.route), candidates,
+		context.map_id, context.title_mode, context.menu_page,
+		context.system_page, context.system_level, context.system_sub,
+		context.battle_menu);
+}
+
 static void sync_ui_mode(void)
 {
 	int on_title = guest_on_title();
 	int save_ui = guest_load_ui();
 	int list_ui = guest_save_list();
 	int shop_ui = guest_shop();
-	int title_ui = guest_title_visible() && !save_ui;
+	int title_visible = guest_title_visible();
+	int title_ui = title_visible && !save_ui;
 	int menu_ui = guest_system_menu();
 	int pointer_ui;
 	int menu_keys;
 	int fight_ui;
+	int in_fight;
+	int check_fight;
 
 	if (!on_title && !save_ui)
 		g_after_continue = 0;
 	pointer_ui = 0;
-	menu_keys = !title_ui && !save_ui && !list_ui && !shop_ui && menu_ui;
-	fight_ui = !pointer_ui && !menu_keys && !list_ui && !shop_ui &&
-		   guest_in_fight();
+	menu_keys = !on_title && !title_ui && !save_ui && !list_ui &&
+		    !shop_ui && menu_ui;
+	check_fight = !pointer_ui && !menu_keys && !list_ui && !shop_ui;
+	in_fight = (check_fight || input_shadow_enabled())
+		? guest_in_fight() : 0;
+	fight_ui = check_fight && in_fight;
 	/*
 	 * g_save_ui is only the title 读取进度 list (page==3). Script 存盘
 	 * uses the same slot-list function 0x100027834; pad mapping follows
@@ -1320,6 +1432,8 @@ static void sync_ui_mode(void)
 		host_battle_poll();
 	else
 		host_battle_close();
+	input_shadow_update(on_title, in_fight, save_ui, list_ui, shop_ui,
+			    menu_ui, menu_opening(), pointer_ui);
 	if (pointer_ui == g_pointer_ui && title_ui == g_title_keys &&
 	    save_ui == g_save_ui && list_ui == g_save_list_ui &&
 	    shop_ui == g_shop_ui &&
@@ -2201,19 +2315,215 @@ static int menu_syspage_active(void)
 	return guest_read_ptr(GUEST_FEXECUTE) == GUEST_FEX_SYSPAGE;
 }
 
-static void menu_switch_tab(int delta)
+static int menu_item_route_active(void)
 {
-	static const float tab_x[5] = {
-		0.378f, 0.509f, 0.641f, 0.772f, 0.902f,
-	};
-	int index;
+	int route = guest_read_i32(GUEST_MAP_ID, -1);
 
-	index = (g_menu_tab_index + delta + 5) % 5;
-	g_menu_tab_index = index;
-	push_finger_at(tab_x[index], 0.058f, SDL_FINGERDOWN);
-	push_finger_at(tab_x[index], 0.058f, SDL_FINGERUP);
-	fprintf(stderr, "sword3-sdl: menu tab=%d touch=%.3f,0.058\n",
-		index, tab_x[index]);
+	return g_menu_session && g_menu_keys &&
+	       g_native_menu_input.focus ==
+		       SWORD3_NATIVE_MENU_FOCUS_CONTENT &&
+	       g_native_menu_input.tab == 0 &&
+	       guest_read_i32(GUEST_MENU_SELECTION, -1) == 11 &&
+	       guest_read_i32(GUEST_SYS_LAYER, 0) >= 2 &&
+	       route >= 30 && route <= 32 &&
+	       guest_read_ptr(GUEST_FEXECUTE) == GUEST_FEX_ITEM;
+}
+
+static int menu_item_content_active(void)
+{
+	return menu_item_route_active() &&
+	       guest_read_i32(GUEST_SYS_LAYER, 0) == 2;
+}
+
+static int menu_item_move_category(int index)
+{
+	uintptr_t callback;
+	uintptr_t expected;
+
+	if (!menu_item_content_active() || (index != 1 && index != 3))
+		return 0;
+	callback = guest_read_ptr(GUEST_FEXECUTE +
+				  (index == 1 ? 0x30u : 0x28u));
+	expected = index == 1 ? GUEST_ITEM_CATEGORY_NEXT
+			      : GUEST_ITEM_CATEGORY_PREV;
+	if (callback != expected)
+		return 0;
+	((void (*)(void))callback)();
+	fprintf(stderr, "sword3-sdl: menu item category=%d\n",
+		guest_read_i32(GUEST_ITEM_CATEGORY, -1));
+	return 1;
+}
+
+static int menu_item_move_nested(int index)
+{
+	uintptr_t callback;
+
+	if (!menu_item_route_active() ||
+	    guest_read_i32(GUEST_SYS_LAYER, 0) <= 2 ||
+	    (index != 1 && index != 3))
+		return 0;
+	callback = guest_read_ptr(GUEST_FEXECUTE +
+				  (index == 1 ? 8u : 16u));
+	if (!callback)
+		return 0;
+	((void (*)(void))callback)();
+	fprintf(stderr, "sword3-sdl: menu item nested %s selection=%d\n",
+		index == 1 ? "right" : "left",
+		guest_read_i32(GUEST_ITEM_CONFIRM_SELECTION, -1));
+	return 1;
+}
+
+static int menu_item_confirm_action(void)
+{
+	uintptr_t callback;
+	int action;
+	int layer;
+
+	if (!menu_item_route_active())
+		return 0;
+	callback = guest_read_ptr(GUEST_FEXECUTE + 0x48);
+	if (callback != GUEST_ITEM_OK)
+		return 0;
+	layer = guest_read_i32(GUEST_SYS_LAYER, 0);
+	action = g_native_menu_input.item_action;
+	if (layer == 2)
+		*(volatile int *)(uintptr_t)GUEST_MAP_ID = 30 + action;
+	fprintf(stderr, "sword3-sdl: menu item action=%d layer=%d\n",
+		action, layer);
+	((void (*)(void))callback)();
+	return 1;
+}
+
+static int menu_native_tab_count(void)
+{
+	int (*enabled)(int) =
+		(int (*)(int))(uintptr_t)GUEST_FEATURE_ENABLED;
+
+	return enabled(0x49) ? 6 : 5;
+}
+
+static void menu_native_tab_geometry(int count, int index, SDL_Rect *rect,
+				     float *touch_x)
+{
+	int step = count == 6 ? 70 : 80;
+	int end = count == 6 ? 630 : 600;
+	int left = 220 + index * step;
+	int right = index + 1 == count ? end : left + step;
+
+	if (rect) {
+		rect->x = left + 1;
+		rect->y = 1;
+		rect->w = right - rect->x;
+		rect->h = 54;
+	}
+	if (touch_x)
+		*touch_x = (float)(left + right) * 0.5f / (float)GAME_W;
+}
+
+static void menu_reset_input_focus(void)
+{
+	int count;
+	int selection;
+	int tab = 0;
+
+	count = menu_native_tab_count();
+	selection = guest_read_i32(GUEST_MENU_SELECTION, -1);
+	if (selection >= 11 && selection < 11 + count)
+		tab = selection - 11;
+	sword3_native_menu_input_reset(&g_native_menu_input, count, tab);
+}
+
+static void menu_move_tab_focus(int delta)
+{
+	if (!sword3_native_menu_input_move_tab(&g_native_menu_input, delta))
+		return;
+	fprintf(stderr, "sword3-sdl: menu tab focus=%d\n",
+		g_native_menu_input.tab);
+}
+
+static int menu_activate_tab(void)
+{
+	int index = sword3_native_menu_input_activate(&g_native_menu_input);
+	float touch_x;
+
+	if (index < 0)
+		return 0;
+	menu_native_tab_geometry(g_native_menu_input.tab_count, index, NULL,
+				 &touch_x);
+	push_finger_at(touch_x, 0.058f, SDL_FINGERDOWN);
+	push_finger_at(touch_x, 0.058f, SDL_FINGERUP);
+	fprintf(stderr, "sword3-sdl: menu tab activate=%d touch=%.3f,0.058\n",
+		index, (double)touch_x);
+	return 1;
+}
+
+static void menu_draw_focus(SDL_Renderer *renderer, int logical_w,
+			    int logical_h)
+{
+	uint8_t *widget;
+	SDL_Rect rect;
+	SDL_Rect outer;
+	Uint8 old_r;
+	Uint8 old_g;
+	Uint8 old_b;
+	Uint8 old_a;
+	SDL_BlendMode old_blend;
+	int index;
+	int selection;
+
+	if (!g_menu_session || !g_menu_keys || !menu_drawn())
+		return;
+	if (logical_w <= 0)
+		logical_w = GAME_W;
+	if (logical_h <= 0)
+		logical_h = GAME_H;
+	if (g_native_menu_input.focus == SWORD3_NATIVE_MENU_FOCUS_TABS) {
+		index = g_native_menu_input.tab;
+		/*
+		 * Widget ids 3..7 are reused by the 天书 action row after
+		 * activation; they are not stable tab identities.
+		 */
+		menu_native_tab_geometry(g_native_menu_input.tab_count, index,
+					 &rect, NULL);
+	} else if (menu_item_content_active()) {
+		index = g_native_menu_input.item_action;
+		widget = menu_find_widget(GUEST_MENU_TAB0 + index);
+		if (!menu_widget_on_screen(widget))
+			return;
+		rect.x = *(volatile int *)(widget + GUEST_WIDGET_X);
+		rect.y = *(volatile int *)(widget + GUEST_WIDGET_Y);
+		rect.w = *(volatile int *)(widget + GUEST_WIDGET_W);
+		rect.h = *(volatile int *)(widget + GUEST_WIDGET_H);
+	} else if (menu_item_route_active() &&
+		   guest_read_i32(GUEST_SYS_LAYER, 0) == 5) {
+		selection = guest_read_i32(GUEST_ITEM_CONFIRM_SELECTION, 0);
+		selection = selection != 0;
+		rect.x = selection ? 472 : 429;
+		rect.y = 411;
+		rect.w = selection ? 44 : 43;
+		rect.h = 23;
+	} else {
+		return;
+	}
+	rect.x = rect.x * logical_w / GAME_W;
+	rect.y = rect.y * logical_h / GAME_H;
+	rect.w = rect.w * logical_w / GAME_W;
+	rect.h = rect.h * logical_h / GAME_H;
+	outer = rect;
+	outer.x -= 3;
+	outer.y -= 3;
+	outer.w += 6;
+	outer.h += 6;
+
+	SDL_GetRenderDrawColor(renderer, &old_r, &old_g, &old_b, &old_a);
+	SDL_GetRenderDrawBlendMode(renderer, &old_blend);
+	SDL_SetRenderDrawBlendMode(renderer, SDL_BLENDMODE_BLEND);
+	SDL_SetRenderDrawColor(renderer, 0, 0, 0, 220);
+	SDL_RenderDrawRect(renderer, &outer);
+	SDL_SetRenderDrawColor(renderer, 255, 220, 64, 255);
+	SDL_RenderDrawRect(renderer, &rect);
+	SDL_SetRenderDrawColor(renderer, old_r, old_g, old_b, old_a);
+	SDL_SetRenderDrawBlendMode(renderer, old_blend);
 }
 
 static const SDL_Scancode g_menu_dir_keys[4] = {
@@ -2344,7 +2654,7 @@ static void menu_enter_session(void)
 	g_menu_keys = 1;
 	g_menu_ui = 1;
 	g_menu_open_pending = 0;
-	g_menu_tab_index = 0;
+	menu_reset_input_focus();
 	fprintf(stderr, "sword3-sdl: menu session start\n");
 }
 
@@ -2368,6 +2678,9 @@ static void menu_leave_session(void)
 	g_menu_back_until = 0;
 	g_menu_reenter_until = SDL_GetTicks() + MENU_BACK_GRACE_MS;
 	g_field_mode_held = 0;
+	g_menu_captured_a = 0;
+	sword3_native_menu_input_reset(&g_native_menu_input,
+					menu_native_tab_count(), 0);
 	menu_release_directions();
 	release_guest_walk();
 	if (guest_data_ok(GUEST_UIGAMEPAD)) {
@@ -2384,7 +2697,9 @@ static void menu_begin_open(int button)
 	g_menu_open_until = SDL_GetTicks() + MENU_OPEN_WAIT_MS;
 	g_menu_seen_chrome = 0;
 	g_menu_gone_at = 0;
-	g_menu_tab_index = 0;
+	g_menu_captured_a = 0;
+	sword3_native_menu_input_reset(&g_native_menu_input,
+					menu_native_tab_count(), 0);
 	g_menu_logged_postopen = 0;
 	g_menu_saw_draw = 0;
 	menu_log_icons("open");
@@ -2450,7 +2765,8 @@ static void menu_poll_open_pulse(void)
 	    SDL_TICKS_PASSED(now, g_menu_return_up_at)) {
 		g_menu_return_held = 0;
 	}
-	if (menu_drawn()) {
+	if (menu_drawn() &&
+	    (g_menu_session || (g_menu_open_pending && !guest_on_title()))) {
 		g_menu_saw_draw = 1;
 		g_menu_gone_at = 0;
 		g_menu_open_pending = 0;
@@ -2901,6 +3217,22 @@ static void menu_set_dir_source(int index, int axis, int down)
 		g_menu_dir_release[index] = 0;
 	if (wanted == g_menu_dir_down[index])
 		return;
+	if (g_native_menu_input.focus == SWORD3_NATIVE_MENU_FOCUS_TABS) {
+		g_menu_dir_down[index] = wanted;
+		if (wanted && (index == 1 || index == 3))
+			menu_move_tab_focus(index == 1 ? 1 : -1);
+		return;
+	}
+	if (menu_item_route_active() && (index == 1 || index == 3)) {
+		g_menu_dir_down[index] = wanted;
+		if (wanted) {
+			if (menu_item_content_active())
+				(void)menu_item_move_category(index);
+			else
+				(void)menu_item_move_nested(index);
+		}
+		return;
+	}
 	if (index == 1 || index == 3) {
 		if (!wanted) {
 			g_menu_dir_down[index] = 0;
@@ -2917,12 +3249,6 @@ static void menu_set_dir_source(int index, int axis, int down)
 			guest_keyboard_key(g_menu_dir_keys[index], 1);
 			g_menu_dir_release[index] = 1;
 			menu_log_state(index == 1 ? "right" : "left");
-			return;
-		}
-		if (menu_widget_on_screen(menu_find_widget(GUEST_MENU_TAB0)) ||
-		    menu_widget_on_screen(menu_find_widget(GUEST_MENU_TAB1))) {
-			menu_switch_tab(index == 1 ? 1 : -1);
-			menu_log_state("tab");
 			return;
 		}
 		guest_keyboard_key(g_menu_dir_keys[index], 1);
@@ -3549,10 +3875,32 @@ static int rewrite_event(SDL_Event *event)
 		}
 		if (menu_drawn()) {
 			if (down) {
+				Sword3NativeMenuBack back;
+				const char *owner;
+				int native_layer;
+
+				g_menu_captured_a = 0;
+				g_a_down = 0;
+				menu_release_directions();
+				native_layer =
+					guest_read_i32(GUEST_SYS_LAYER, 1);
+				back = sword3_native_menu_input_back(
+					&g_native_menu_input, native_layer);
+				if (back ==
+				    SWORD3_NATIVE_MENU_BACK_WITHIN_CONTENT)
+					owner = "content->content";
+				else if (back ==
+					 SWORD3_NATIVE_MENU_BACK_TO_TABS)
+					owner = "content->tabs";
+				else
+					owner = "tabs->close";
 				g_menu_back_until = SDL_GetTicks() +
 						    MENU_BACK_GRACE_MS;
 				g_menu_gone_at = 0;
 				g_menu_close_widget = menu_begin_close();
+				fprintf(stderr,
+					"sword3-sdl: menu B owner=%s layer=%d\n",
+					owner, native_layer);
 			}
 			else
 				menu_finish_close(g_menu_close_widget);
@@ -3607,12 +3955,36 @@ static int rewrite_event(SDL_Event *event)
 		if (g_menu_keys && menu_drawn()) {
 			Uint32 now = SDL_GetTicks();
 
+			if (!down && g_menu_captured_a) {
+				g_menu_captured_a = 0;
+				(void)accept_a_edge(0);
+				event->type = SDL_FIRSTEVENT;
+				return 0;
+			}
 			if (down &&
 			    !SDL_TICKS_PASSED(now, g_menu_a_block_until)) {
 				event->type = SDL_FIRSTEVENT;
 				return 0;
 			}
 			if (!accept_a_edge(down)) {
+				event->type = SDL_FIRSTEVENT;
+				return 0;
+			}
+			if (g_native_menu_input.focus ==
+			    SWORD3_NATIVE_MENU_FOCUS_TABS) {
+				if (down) {
+					menu_release_directions();
+					g_menu_captured_a = 1;
+					(void)menu_activate_tab();
+				}
+				event->type = SDL_FIRSTEVENT;
+				return 0;
+			}
+			if (menu_item_route_active()) {
+				if (down) {
+					g_menu_captured_a = 1;
+					(void)menu_item_confirm_action();
+				}
 				event->type = SDL_FIRSTEVENT;
 				return 0;
 			}
@@ -3733,6 +4105,32 @@ static int rewrite_event(SDL_Event *event)
 				event->tfinger.y, g_cursor_x, g_cursor_y);
 		}
 		return 1;
+	}
+	if (button == SDL_CONTROLLER_BUTTON_LEFTSHOULDER ||
+	    button == SDL_CONTROLLER_BUTTON_RIGHTSHOULDER) {
+		if (host_menu_active()) {
+			host_menu_button(button, down);
+			event->type = SDL_FIRSTEVENT;
+			return 0;
+		}
+		if (host_battle_owns_pad()) {
+			host_battle_button(button, down);
+			event->type = SDL_FIRSTEVENT;
+			return 0;
+		}
+		if (menu_item_content_active()) {
+			if (down &&
+			    sword3_native_menu_input_move_item_action(
+				    &g_native_menu_input,
+				    button ==
+					    SDL_CONTROLLER_BUTTON_RIGHTSHOULDER
+					    ? 1 : -1))
+				fprintf(stderr,
+					"sword3-sdl: menu item action focus=%d\n",
+					g_native_menu_input.item_action);
+			event->type = SDL_FIRSTEVENT;
+			return 0;
+		}
 	}
 	if (button == SDL_CONTROLLER_BUTTON_DPAD_UP ||
 	    button == SDL_CONTROLLER_BUTTON_DPAD_DOWN ||
@@ -4294,6 +4692,9 @@ void sword3_SDL_RenderPresent(SDL_Renderer *renderer)
 	} else if (host_battle_active() &&
 		   SDL_GetRenderTarget(renderer) == NULL) {
 		host_battle_draw(renderer, g_logical_w, g_logical_h);
+	} else if (g_menu_session &&
+		   SDL_GetRenderTarget(renderer) == NULL) {
+		menu_draw_focus(renderer, g_logical_w, g_logical_h);
 	} else if (g_pointer_ui && g_cursor_ready && g_logical_w > 0 &&
 	    SDL_GetRenderTarget(renderer) == NULL) {
 		x = (int)g_cursor_x;
@@ -4453,6 +4854,32 @@ int sword3_SDL_UpperBlitScaled(SDL_Surface *src, const SDL_Rect *srcrect,
 	return SDL_UpperBlitScaled(src, srcrect, dst, dstrect);
 }
 
+SDL_Surface *sword3_SDL_CreateRGBSurface(Uint32 flags, int width, int height,
+					 int depth, Uint32 rmask,
+					 Uint32 gmask, Uint32 bmask,
+					 Uint32 amask)
+{
+	SDL_Surface *surface =
+		SDL_CreateRGBSurface(flags, width, height, depth, rmask, gmask,
+				     bmask, amask);
+
+	owner_register(KIND_SURFACE, surface);
+	return surface;
+}
+
+SDL_Surface *sword3_SDL_CreateRGBSurfaceFrom(void *pixels, int width,
+					     int height, int depth, int pitch,
+					     Uint32 rmask, Uint32 gmask,
+					     Uint32 bmask, Uint32 amask)
+{
+	SDL_Surface *surface =
+		SDL_CreateRGBSurfaceFrom(pixels, width, height, depth, pitch,
+					 rmask, gmask, bmask, amask);
+
+	owner_register(KIND_SURFACE, surface);
+	return surface;
+}
+
 SDL_Surface *sword3_SDL_CreateRGBSurfaceWithFormat(Uint32 flags, int width,
 						   int height, int depth,
 						   Uint32 format)
@@ -4462,6 +4889,71 @@ SDL_Surface *sword3_SDL_CreateRGBSurfaceWithFormat(Uint32 flags, int width,
 					       format);
 	owner_register(KIND_SURFACE, surface);
 	return surface;
+}
+
+SDL_Surface *sword3_SDL_CreateRGBSurfaceWithFormatFrom(
+	void *pixels, int width, int height, int depth, int pitch,
+	Uint32 format)
+{
+	SDL_Surface *surface = SDL_CreateRGBSurfaceWithFormatFrom(
+		pixels, width, height, depth, pitch, format);
+
+	owner_register(KIND_SURFACE, surface);
+	return surface;
+}
+
+SDL_Surface *sword3_SDL_ConvertSurface(SDL_Surface *src,
+				       const SDL_PixelFormat *format,
+				       Uint32 flags)
+{
+	SDL_Surface *surface;
+	Uint32 pixel_format;
+
+	owner_check("SDL_ConvertSurface", KIND_SURFACE, src);
+	if (!format) {
+		SDL_SetError("SDL_ConvertSurface(): NULL format");
+		return NULL;
+	}
+	/*
+	 * The guest SDL_PixelFormat object cannot be passed to host SDL. Its
+	 * leading Uint32 format value is ABI-stable; let host SDL allocate the
+	 * matching destination format rather than dereferencing guest internals.
+	 */
+	memcpy(&pixel_format, format, sizeof(pixel_format));
+	surface = SDL_ConvertSurfaceFormat(src, pixel_format, flags);
+	owner_register(KIND_SURFACE, surface);
+	return surface;
+}
+
+SDL_Surface *sword3_SDL_ConvertSurfaceFormat(SDL_Surface *src,
+					     Uint32 format, Uint32 flags)
+{
+	SDL_Surface *surface;
+
+	owner_check("SDL_ConvertSurfaceFormat", KIND_SURFACE, src);
+	surface = SDL_ConvertSurfaceFormat(src, format, flags);
+	owner_register(KIND_SURFACE, surface);
+	return surface;
+}
+
+int sword3_SDL_SetColorKey(SDL_Surface *surface, int flag, Uint32 key)
+{
+	owner_check("SDL_SetColorKey", KIND_SURFACE, surface);
+	return SDL_SetColorKey(surface, flag, key);
+}
+
+int sword3_SDL_FillRect(SDL_Surface *surface, const SDL_Rect *rect,
+			Uint32 color)
+{
+	owner_check("SDL_FillRect", KIND_SURFACE, surface);
+	return SDL_FillRect(surface, rect, color);
+}
+
+int sword3_SDL_FillRects(SDL_Surface *surface, const SDL_Rect *rects,
+			 int count, Uint32 color)
+{
+	owner_check("SDL_FillRects", KIND_SURFACE, surface);
+	return SDL_FillRects(surface, rects, count, color);
 }
 
 void sword3_SDL_FreeSurface(SDL_Surface *surface)

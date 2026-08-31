@@ -173,6 +173,8 @@ pkg_check_modules(SWORD3_FFMPEG REQUIRED IMPORTED_TARGET
 add_library(sword3_host SHARED
     src/ports/sword3/host_prepare.c
     src/ports/sword3/sdl_bridge.c
+    src/ports/sword3/input_context.c
+    src/ports/sword3/native_menu_input.c
     src/ports/sword3/host_menu.c
     src/ports/sword3/host_battle_menu.c
     src/ports/sword3/host_cheat.c
@@ -241,6 +243,18 @@ if(BUILD_TESTS)
     target_compile_options(test_crash_handler PRIVATE -Wall -g -O0 -fno-omit-frame-pointer)
     target_compile_definitions(test_crash_handler PRIVATE _GNU_SOURCE)
     target_link_libraries(test_crash_handler PRIVATE pthread)
+
+    add_executable(test_sword3_input_context
+        tests/test_sword3_input_context.c
+        src/ports/sword3/input_context.c)
+    target_include_directories(test_sword3_input_context PRIVATE src)
+    target_compile_options(test_sword3_input_context PRIVATE -Wall -Wextra -O2 -g)
+
+    add_executable(test_sword3_native_menu_input
+        tests/test_sword3_native_menu_input.c
+        src/ports/sword3/native_menu_input.c)
+    target_include_directories(test_sword3_native_menu_input PRIVATE src)
+    target_compile_options(test_sword3_native_menu_input PRIVATE -Wall -Wextra -O2 -g)
 endif()
 
 # --- per-game shim libraries (libgame_patches, libsugar_patches_*, pcm_cache_write) ---

@@ -295,6 +295,74 @@
       "group": "surface"
     },
     {
+      "symbol": "SDL_CreateRGBSurface",
+      "nth_after": {
+        "after_symbol": "SDL_FreeSurface",
+        "n": 3
+      },
+      "expected_address": "0x1000dfe20",
+      "group": "surface"
+    },
+    {
+      "symbol": "SDL_CreateRGBSurfaceFrom",
+      "nth_after": {
+        "after_symbol": "SDL_CreateRGBSurface",
+        "n": 0
+      },
+      "expected_address": "0x1000dfe84",
+      "group": "surface"
+    },
+    {
+      "symbol": "SDL_CreateRGBSurfaceWithFormatFrom",
+      "nth_after": {
+        "after_symbol": "SDL_CreateRGBSurfaceFrom",
+        "n": 0
+      },
+      "expected_address": "0x1000dfef8",
+      "group": "surface"
+    },
+    {
+      "symbol": "SDL_SetColorKey",
+      "nth_after": {
+        "after_symbol": "SDL_CreateRGBSurfaceWithFormatFrom",
+        "n": 1
+      },
+      "expected_address": "0x1000dffa4",
+      "group": "surface"
+    },
+    {
+      "symbol": "SDL_ConvertSurface",
+      "nth_after": {
+        "after_symbol": "SDL_CreateRGBSurfaceWithFormatFrom",
+        "n": 15
+      },
+      "expected_address": "0x1000e0a4c",
+      "group": "surface"
+    },
+    {
+      "symbol": "SDL_ConvertSurfaceFormat",
+      "nth_after": {
+        "after_symbol": "SDL_ConvertSurface",
+        "n": 0
+      },
+      "expected_address": "0x1000e0fc8",
+      "group": "surface"
+    },
+    {
+      "symbol": "SDL_FillRect",
+      "string": "SDL_FillRect(): Unsupported surface format",
+      "group": "surface"
+    },
+    {
+      "symbol": "SDL_FillRects",
+      "nth_after": {
+        "after_symbol": "SDL_FillRect",
+        "n": 0
+      },
+      "expected_address": "0x1000f3220",
+      "group": "surface"
+    },
+    {
       "symbol": "SDL_PeepEvents",
       "string": "Couldn't lock event queue",
       "group": "event"
