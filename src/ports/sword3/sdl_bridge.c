@@ -280,6 +280,12 @@ static void owner_drop(enum sword3_sdl_kind kind, void *pointer)
 #define GUEST_REFINING_SLOT_LEFT 0x10001fe10ull
 #define GUEST_REFINING_OK 0x10001ffc4ull
 #define GUEST_REFINING_BACK 0x10001fec4ull
+#define GUEST_BOOK_NEXT 0x10002d69cull
+#define GUEST_BOOK_PREV 0x10002d4f4ull
+#define GUEST_BOOK_LEFT 0x10002dd74ull
+#define GUEST_BOOK_RIGHT 0x10002df1cull
+#define GUEST_BOOK_OK 0x10002dad8ull
+#define GUEST_BOOK_BACK 0x10002da28ull
 #define GUEST_ITEM_OK 0x100030a20ull
 #define GUEST_ITEM_CATEGORY_PREV 0x1000314a8ull
 #define GUEST_ITEM_CATEGORY_NEXT 0x1000315f0ull
@@ -2826,6 +2832,101 @@ static int menu_refining_back(void)
 	return menu_refining_call(0x50, GUEST_REFINING_BACK);
 }
 
+static int menu_book_native_active(void)
+{
+	int route = guest_read_i32(GUEST_MAP_ID, -1);
+	int selection = guest_read_i32(GUEST_MENU_SELECTION, -1);
+
+	return menu_drawn() && guest_read_i32(GUEST_SYS_LAYER, 0) == 2 &&
+	       ((selection == 15 && route >= 54 && route <= 58) ||
+		(selection == 16 && route >= 60 && route <= 62)) &&
+	       guest_read_ptr(GUEST_FEXECUTE) == GUEST_FEX_SYSPAGE &&
+	       guest_read_ptr(GUEST_FEXECUTE + 0x48) == GUEST_BOOK_OK &&
+	       guest_read_ptr(GUEST_FEXECUTE + 0x50) == GUEST_BOOK_BACK;
+}
+
+static int menu_book_route_active(void)
+{
+	return g_menu_session && g_menu_keys &&
+	       g_native_menu_input.focus ==
+		       SWORD3_NATIVE_MENU_FOCUS_CONTENT &&
+	       menu_book_native_active();
+}
+
+static void menu_reconcile_book_focus(void)
+{
+	int selection;
+
+	if (!g_menu_session)
+		return;
+	if (menu_book_native_active()) {
+		selection = guest_read_i32(GUEST_MENU_SELECTION, 15);
+		g_native_menu_input.tab = selection - 11;
+		g_native_menu_input.focus =
+			SWORD3_NATIVE_MENU_FOCUS_CONTENT;
+		if (guest_read_i32(GUEST_SYS_LEVEL, 0) == 0) {
+			int page = guest_read_i32(GUEST_SYS_PAGE, -1);
+
+			if (page < 0 || page > 4)
+				*(volatile int *)(uintptr_t)GUEST_SYS_PAGE = 0;
+		}
+		return;
+	}
+	if ((g_native_menu_input.tab == 4 ||
+	     g_native_menu_input.tab == 5) &&
+	    g_native_menu_input.focus ==
+		    SWORD3_NATIVE_MENU_FOCUS_CONTENT &&
+	    menu_drawn() && guest_read_i32(GUEST_SYS_LAYER, 0) == 1)
+		g_native_menu_input.focus = SWORD3_NATIVE_MENU_FOCUS_TABS;
+}
+
+static int menu_book_call(unsigned offset, uintptr_t expected)
+{
+	uintptr_t callback;
+
+	if (!menu_book_route_active())
+		return 0;
+	callback = guest_read_ptr(GUEST_FEXECUTE + offset);
+	if (callback != expected)
+		return 0;
+	((void (*)(void))callback)();
+	return 1;
+}
+
+static int menu_book_move_direction(int index)
+{
+	static const unsigned offsets[4] = {
+		0x10, 0x30, 0x08, 0x28,
+	};
+	static const uintptr_t expected[4] = {
+		GUEST_BOOK_PREV, GUEST_BOOK_RIGHT,
+		GUEST_BOOK_NEXT, GUEST_BOOK_LEFT,
+	};
+	int level;
+
+	if (!menu_book_route_active() || index < 0 || index >= 4)
+		return 0;
+	level = guest_read_i32(GUEST_SYS_LEVEL, 0);
+	if (level == 0) {
+		if (index == 1)
+			return menu_book_call(0x08, GUEST_BOOK_NEXT);
+		if (index == 3)
+			return menu_book_call(0x10, GUEST_BOOK_PREV);
+		return 1;
+	}
+	return menu_book_call(offsets[index], expected[index]);
+}
+
+static int menu_book_confirm(void)
+{
+	return menu_book_call(0x48, GUEST_BOOK_OK);
+}
+
+static int menu_book_back(void)
+{
+	return menu_book_call(0x50, GUEST_BOOK_BACK);
+}
+
 static int menu_content_is_nested(void)
 {
 	if (guest_read_i32(GUEST_SYS_LAYER, 0) > 2)
@@ -2841,6 +2942,8 @@ static int menu_content_is_nested(void)
 	if (menu_refining_native_active())
 		return guest_read_i32(GUEST_REFINING_MODE, 1) != 1 ||
 		       guest_read_i32(GUEST_REFINING_SIDE, 0) != 0;
+	if (menu_book_native_active())
+		return guest_read_i32(GUEST_SYS_LEVEL, 0) != 0;
 	return 0;
 }
 
@@ -2994,6 +3097,18 @@ static void menu_draw_focus(SDL_Renderer *renderer, int logical_w,
 		 */
 		menu_native_tab_geometry(g_native_menu_input.tab_count, index,
 					 &rect, NULL);
+	} else if (menu_book_route_active() &&
+		   guest_read_i32(GUEST_SYS_LEVEL, 0) == 0) {
+		index = guest_read_i32(GUEST_SYS_PAGE, 0);
+		if (index < 0 || index > 4)
+			index = 0;
+		widget = menu_find_widget(3 + index);
+		if (!menu_widget_on_screen(widget))
+			return;
+		rect.x = *(volatile int *)(widget + GUEST_WIDGET_X);
+		rect.y = *(volatile int *)(widget + GUEST_WIDGET_Y);
+		rect.w = *(volatile int *)(widget + GUEST_WIDGET_W);
+		rect.h = *(volatile int *)(widget + GUEST_WIDGET_H);
 	} else if (menu_refining_route_active()) {
 		int mode = guest_read_i32(GUEST_REFINING_MODE, 0);
 		int selected;
@@ -3339,6 +3454,7 @@ static void menu_poll_open_pulse(void)
 	menu_reconcile_skill_focus();
 	menu_reconcile_status_focus();
 	menu_reconcile_refining_focus();
+	menu_reconcile_book_focus();
 }
 
 static int menu_field_button_rect(int *x, int *y, int *w, int *h)
@@ -3756,6 +3872,12 @@ static void menu_set_dir_source(int index, int axis, int down)
 		g_menu_dir_down[index] = wanted;
 		if (wanted && (index == 1 || index == 3))
 			menu_move_tab_focus(index == 1 ? 1 : -1);
+		return;
+	}
+	if (menu_book_route_active()) {
+		g_menu_dir_down[index] = wanted;
+		if (wanted)
+			(void)menu_book_move_direction(index);
 		return;
 	}
 	if (menu_refining_route_active()) {
@@ -4429,6 +4551,17 @@ static int rewrite_event(SDL_Event *event)
 			event->type = SDL_FIRSTEVENT;
 			return 0;
 		}
+		if (menu_book_route_active()) {
+			if (down) {
+				g_menu_captured_a = 0;
+				g_menu_captured_b = 1;
+				g_a_down = 0;
+				menu_release_directions();
+				(void)menu_book_back();
+			}
+			event->type = SDL_FIRSTEVENT;
+			return 0;
+		}
 		if (menu_refining_route_active()) {
 			if (down) {
 				g_menu_captured_a = 0;
@@ -4545,6 +4678,14 @@ static int rewrite_event(SDL_Event *event)
 					menu_release_directions();
 					g_menu_captured_a = 1;
 					(void)menu_activate_tab();
+				}
+				event->type = SDL_FIRSTEVENT;
+				return 0;
+			}
+			if (menu_book_route_active()) {
+				if (down) {
+					g_menu_captured_a = 1;
+					(void)menu_book_confirm();
 				}
 				event->type = SDL_FIRSTEVENT;
 				return 0;
@@ -4704,6 +4845,10 @@ static int rewrite_event(SDL_Event *event)
 		}
 		if (host_battle_owns_pad()) {
 			host_battle_button(button, down);
+			event->type = SDL_FIRSTEVENT;
+			return 0;
+		}
+		if (menu_book_route_active()) {
 			event->type = SDL_FIRSTEVENT;
 			return 0;
 		}
