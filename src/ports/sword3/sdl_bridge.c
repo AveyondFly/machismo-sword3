@@ -256,11 +256,16 @@ static void owner_drop(enum sword3_sdl_kind kind, void *pointer)
 #define GUEST_FEX_FIELD 0x1000831a8ull
 #define GUEST_FEX_SYSPAGE 0x10002d018ull
 #define GUEST_FEX_ITEM 0x10002fffcull
+#define GUEST_FEX_EQUIP 0x100034da8ull
+#define GUEST_EQUIP_BACK 0x1000351e4ull
 #define GUEST_ITEM_OK 0x100030a20ull
 #define GUEST_ITEM_CATEGORY_PREV 0x1000314a8ull
 #define GUEST_ITEM_CATEGORY_NEXT 0x1000315f0ull
 #define GUEST_ITEM_CATEGORY 0x1002aa798ull
 #define GUEST_ITEM_CONFIRM_SELECTION 0x1002aa78cull
+#define GUEST_EQUIP_STATE 0x1002aab88ull
+#define GUEST_EQUIP_PERSON 0x1002a99e0ull
+#define GUEST_EQUIP_NEXT_PERSON 0x1000356b8ull
 #define GUEST_REBIND_ACTIONS 0x1001fa5e8ull
 #define GUEST_PAD_READY 0x248c
 #define GUEST_SLOT_MASK 0x10
@@ -2335,6 +2340,95 @@ static int menu_item_content_active(void)
 	       guest_read_i32(GUEST_SYS_LAYER, 0) == 2;
 }
 
+static int menu_equip_native_active(void)
+{
+	int route = guest_read_i32(GUEST_MAP_ID, -1);
+
+	return menu_drawn() &&
+	       guest_read_i32(GUEST_MENU_SELECTION, -1) == 12 &&
+	       route >= 36 && route <= 41 &&
+	       guest_read_i32(GUEST_SYS_LAYER, 0) == 2 &&
+	       guest_read_ptr(GUEST_FEXECUTE) == GUEST_FEX_EQUIP &&
+	       guest_read_ptr(GUEST_FEXECUTE + 0x50) == GUEST_EQUIP_BACK;
+}
+
+static int menu_equip_route_active(void)
+{
+	return g_menu_session && g_menu_keys &&
+	       g_native_menu_input.focus ==
+		       SWORD3_NATIVE_MENU_FOCUS_CONTENT &&
+	       menu_equip_native_active();
+}
+
+static void menu_reconcile_equip_focus(void)
+{
+	if (!g_menu_session)
+		return;
+	if (menu_equip_native_active()) {
+		g_native_menu_input.tab = 1;
+		g_native_menu_input.focus =
+			SWORD3_NATIVE_MENU_FOCUS_CONTENT;
+		return;
+	}
+	if (g_native_menu_input.tab == 1 &&
+	    g_native_menu_input.focus ==
+		    SWORD3_NATIVE_MENU_FOCUS_CONTENT &&
+	    menu_drawn() && guest_read_i32(GUEST_SYS_LAYER, 0) == 1)
+		g_native_menu_input.focus = SWORD3_NATIVE_MENU_FOCUS_TABS;
+}
+
+static int menu_equip_party_count(void)
+{
+	int (*enabled)(int) =
+		(int (*)(int))(uintptr_t)GUEST_FEATURE_ENABLED;
+	int count = 1;
+
+	while (count < 8 && enabled(0x1e + count))
+		count++;
+	return count;
+}
+
+static int menu_equip_move_person(int delta)
+{
+	uintptr_t callback;
+	volatile int *person;
+	int count;
+	int current;
+	int target;
+	int predecessor;
+
+	if (!menu_equip_route_active() ||
+	    guest_read_i32(GUEST_EQUIP_STATE, 0) != 0 || !delta)
+		return 0;
+	callback = guest_read_ptr(GUEST_FEXECUTE + 0x38);
+	if (callback != GUEST_EQUIP_NEXT_PERSON)
+		return 0;
+	person = (volatile int *)(uintptr_t)GUEST_EQUIP_PERSON;
+	count = menu_equip_party_count();
+	current = *person;
+	if (current < 0 || current >= count)
+		current = 0;
+	if (count < 2)
+		return 1;
+	if (delta < 0) {
+		target = (current + count - 1) % count;
+		predecessor = (target + count - 1) % count;
+		*person = predecessor;
+	}
+	((void (*)(void))callback)();
+	fprintf(stderr, "sword3-sdl: menu equip person=%d/%d\n",
+		*person, count);
+	return 1;
+}
+
+static int menu_content_is_nested(void)
+{
+	if (guest_read_i32(GUEST_SYS_LAYER, 0) > 2)
+		return 1;
+	return menu_equip_native_active() &&
+	       guest_read_i32(GUEST_EQUIP_STATE, 0) != 0;
+}
+
 static int menu_item_move_category(int index)
 {
 	uintptr_t callback;
@@ -2804,6 +2898,7 @@ static void menu_poll_open_pulse(void)
 		g_menu_open_pending = 0;
 		g_menu_close_pending = 0;
 	}
+	menu_reconcile_equip_focus();
 }
 
 static int menu_field_button_rect(int *x, int *y, int *w, int *h)
@@ -3885,7 +3980,9 @@ static int rewrite_event(SDL_Event *event)
 				native_layer =
 					guest_read_i32(GUEST_SYS_LAYER, 1);
 				back = sword3_native_menu_input_back(
-					&g_native_menu_input, native_layer);
+					&g_native_menu_input,
+					menu_content_is_nested()
+						? 3 : native_layer);
 				if (back ==
 				    SWORD3_NATIVE_MENU_BACK_WITHIN_CONTENT)
 					owner = "content->content";
@@ -4115,6 +4212,15 @@ static int rewrite_event(SDL_Event *event)
 		}
 		if (host_battle_owns_pad()) {
 			host_battle_button(button, down);
+			event->type = SDL_FIRSTEVENT;
+			return 0;
+		}
+		if (menu_equip_route_active()) {
+			if (down)
+				(void)menu_equip_move_person(
+					button ==
+					    SDL_CONTROLLER_BUTTON_RIGHTSHOULDER
+						? 1 : -1);
 			event->type = SDL_FIRSTEVENT;
 			return 0;
 		}
