@@ -327,6 +327,7 @@ static void owner_drop(enum sword3_sdl_kind kind, void *pointer)
 #define GUEST_MOV_W8_16 0x52800208u
 #define GUEST_GET_DIR 0x1001c1df4ull
 #define GUEST_SAVE_LIST 0x100027834ull
+#define GUEST_SHOP_UI 0x10003992cull
 #define GUEST_PLAYER_DIR0_RA 0x100073284ull
 #define GUEST_PLAYER_DIR1_RA 0x10007349cull
 #define GUEST_PLAYER_DIR2_RA 0x10007351cull
@@ -369,6 +370,9 @@ static int g_save_ui;
 static int g_save_list_ui;
 static int g_save_list_hit;
 static Uint32 g_save_list_ms;
+static int g_shop_ui;
+static int g_shop_hit;
+static Uint32 g_shop_ms;
 static int g_load_context_done;
 static int g_save_dir_down[4];
 static int g_save_dir_dpad[4];
@@ -830,6 +834,22 @@ static int save_slot_pad(void)
 	return g_save_ui || guest_save_list();
 }
 
+/*
+ * 0x10003992c is the shop overlay (购买). Action 1/3 change 数量,
+ * 2/4 move the item row. Pad mapping follows that function.
+ */
+static int guest_shop(void)
+{
+	if (!g_shop_hit)
+		return 0;
+	return !SDL_TICKS_PASSED(SDL_GetTicks(), g_shop_ms + 250u);
+}
+
+static int list_arrow_pad(void)
+{
+	return save_slot_pad() || guest_shop();
+}
+
 static int guest_menu_flag(void)
 {
 	if (!guest_data_ok(GUEST_IN_MENU_SYSTEM))
@@ -1136,6 +1156,42 @@ static void save_list_hook(void)
 	save_list_orig();
 }
 
+void shop_ui_orig(void);
+
+__asm__(
+	"	.text\n"
+	"	.align	2\n"
+	"	.globl	shop_ui_orig\n"
+	"	.hidden	shop_ui_orig\n"
+	"	.type	shop_ui_orig, %function\n"
+	"shop_ui_orig:\n"
+	"	sub	sp, sp, #0xc0\n"
+	"	stp	d9, d8, [sp, #0x50]\n"
+	"	stp	x28, x27, [sp, #0x60]\n"
+	"	stp	x26, x25, [sp, #0x70]\n"
+	"	ldr	x16, 1f\n"
+	"	br	x16\n"
+	"	.align	3\n"
+	"1:	.quad	0x10003993c\n"
+	"	.size	shop_ui_orig, .-shop_ui_orig\n"
+);
+
+static void save_flush_direction_releases(void);
+
+static void shop_ui_hook(void)
+{
+	static unsigned seen;
+
+	g_shop_hit = 1;
+	g_shop_ms = SDL_GetTicks();
+	if (seen < 4) {
+		seen++;
+		fprintf(stderr, "sword3-sdl: shop overlay\n");
+	}
+	shop_ui_orig();
+	save_flush_direction_releases();
+}
+
 static int field_player_dir_call(uintptr_t ra)
 {
 	return ra == GUEST_PLAYER_DIR0_RA || ra == GUEST_PLAYER_DIR1_RA ||
@@ -1150,6 +1206,8 @@ static int field_get_dir_hook(void *pad, int direction, int edge)
 	int result;
 
 	ra = (uintptr_t)__builtin_return_address(0);
+	if (field_player_dir_call(ra) && list_arrow_pad())
+		return 0;
 	result = field_get_dir_orig(pad, direction, edge);
 	if (!field_player_dir_call(ra) || !g_pad)
 		return result;
@@ -1203,6 +1261,16 @@ void sword3_field_install(void)
 			fprintf(stderr,
 				"sword3-sdl: save/load slot list pad hook installed\n");
 	}
+	{
+		static const uint32_t shop_expect[4] = {
+			0xd10303ffu, 0x6d0523e9u, 0xa9066ffcu, 0xa90767fau
+		};
+
+		if (field_patch_jump(GUEST_SHOP_UI, shop_ui_hook,
+				     shop_expect, "shop overlay") == 0)
+			fprintf(stderr,
+				"sword3-sdl: shop overlay pad hook installed\n");
+	}
 	installed = 1;
 	fprintf(stderr,
 		"sword3-sdl: PlayerMove run speed and private stick hook installed\n");
@@ -1223,6 +1291,7 @@ static void sync_ui_mode(void)
 	int on_title = guest_on_title();
 	int save_ui = guest_load_ui();
 	int list_ui = guest_save_list();
+	int shop_ui = guest_shop();
 	int title_ui = guest_title_visible() && !save_ui;
 	int menu_ui = guest_system_menu();
 	int pointer_ui;
@@ -1232,8 +1301,9 @@ static void sync_ui_mode(void)
 	if (!on_title && !save_ui)
 		g_after_continue = 0;
 	pointer_ui = 0;
-	menu_keys = !title_ui && !save_ui && !list_ui && menu_ui;
-	fight_ui = !pointer_ui && !menu_keys && !list_ui && guest_in_fight();
+	menu_keys = !title_ui && !save_ui && !list_ui && !shop_ui && menu_ui;
+	fight_ui = !pointer_ui && !menu_keys && !list_ui && !shop_ui &&
+		   guest_in_fight();
 	/*
 	 * g_save_ui is only the title 读取进度 list (page==3). Script 存盘
 	 * uses the same slot-list function 0x100027834; pad mapping follows
@@ -1252,6 +1322,7 @@ static void sync_ui_mode(void)
 		host_battle_close();
 	if (pointer_ui == g_pointer_ui && title_ui == g_title_keys &&
 	    save_ui == g_save_ui && list_ui == g_save_list_ui &&
+	    shop_ui == g_shop_ui &&
 	    menu_ui == g_menu_ui && menu_keys == g_menu_keys &&
 	    fight_ui == g_fight_ui)
 		return;
@@ -1285,11 +1356,12 @@ static void sync_ui_mode(void)
 	}
 	if (g_title_keys && !title_ui)
 		title_release_directions();
-	if (g_save_ui != save_ui || g_save_list_ui != list_ui) {
+	if (g_save_ui != save_ui || g_save_list_ui != list_ui ||
+	    g_shop_ui != shop_ui) {
 		save_release_directions();
 		g_a_down = 0;
 	}
-	if (list_ui && !g_save_list_ui)
+	if ((list_ui && !g_save_list_ui) || (shop_ui && !g_shop_ui))
 		release_guest_walk();
 	if (menu_keys && !g_menu_keys) {
 		release_guest_walk();
@@ -1310,14 +1382,15 @@ static void sync_ui_mode(void)
 	}
 	g_save_ui = save_ui;
 	g_save_list_ui = list_ui;
+	g_shop_ui = shop_ui;
 	g_title_keys = title_ui;
 	g_menu_ui = menu_ui;
 	g_pointer_ui = pointer_ui;
 	g_menu_keys = menu_keys;
 	g_fight_ui = fight_ui;
 	fprintf(stderr,
-		"sword3-sdl: ui pointer=%d menu=%d fight=%d save=%d list=%d detected=%d draw=%d in=%d layer=%d syspage=%d syslv=%d page=%d now=%d sel=%d after=%d map=%d flags=%d back=%d tabs=%d cursor=%.0f,%.0f\n",
-		pointer_ui, menu_keys, fight_ui, save_ui, list_ui, menu_ui,
+		"sword3-sdl: ui pointer=%d menu=%d fight=%d save=%d list=%d shop=%d detected=%d draw=%d in=%d layer=%d syspage=%d syslv=%d page=%d now=%d sel=%d after=%d map=%d flags=%d back=%d tabs=%d cursor=%.0f,%.0f\n",
+		pointer_ui, menu_keys, fight_ui, save_ui, list_ui, shop_ui, menu_ui,
 		guest_read_i32(GUEST_DRAW_GATE, -1),
 		guest_menu_flag(),
 		guest_read_i32(GUEST_SYS_LAYER, -1),
@@ -1632,9 +1705,15 @@ static void save_set_dir_source(int index, int axis, int down)
 	if (wanted == g_save_dir_down[index])
 		return;
 	if (wanted) {
-		g_save_dir_release[index] = 0;
 		g_save_dir_down[index] = 1;
 		save_set_key_state(index, 1);
+		/*
+		 * save_set_key_state pre-ages the 0x208ms action repeat, so
+		 * a held key steps every frame — field run speed. Shop
+		 * 0x1001c1d30 uses that helper for rows and 数量; keep the
+		 * first press and release on Present so hold is one step.
+		 */
+		g_save_dir_release[index] = guest_shop() ? 1 : 0;
 		return;
 	}
 	g_save_dir_release[index] = 1;
@@ -3285,7 +3364,7 @@ static int rewrite_event(SDL_Event *event)
 			event->type = SDL_FIRSTEVENT;
 			return 0;
 		}
-		if (save_slot_pad()) {
+		if (list_arrow_pad()) {
 			save_axis_event(event->caxis.axis, event->caxis.value);
 			event->type = SDL_FIRSTEVENT;
 			return 0;
@@ -3372,7 +3451,7 @@ static int rewrite_event(SDL_Event *event)
 			fill_key(event, SDL_SCANCODE_ESCAPE, down);
 			return 1;
 		}
-		if (guest_save_list()) {
+		if (guest_save_list() || guest_shop()) {
 			event->type = SDL_FIRSTEVENT;
 			return 0;
 		}
@@ -3455,7 +3534,7 @@ static int rewrite_event(SDL_Event *event)
 			fill_key(event, SDL_SCANCODE_ESCAPE, down);
 			return 1;
 		}
-		if (guest_save_list()) {
+		if (guest_save_list() || guest_shop()) {
 			fill_key(event, SDL_SCANCODE_ESCAPE, down);
 			return 1;
 		}
@@ -3589,7 +3668,7 @@ static int rewrite_event(SDL_Event *event)
 			event->type = SDL_FIRSTEVENT;
 			return 0;
 		}
-		if (!g_pointer_ui && !g_title_keys && !save_slot_pad()) {
+		if (!g_pointer_ui && !g_title_keys && !list_arrow_pad()) {
 			if (!accept_a_edge(down)) {
 				if (!down && g_field_mode_held)
 					field_talk_key(0);
@@ -3619,13 +3698,13 @@ static int rewrite_event(SDL_Event *event)
 						       0) != 0;
 			} else if (g_save_ui && !down) {
 				g_load_context_done = 1;
-			} else if (guest_save_list()) {
+			} else if (guest_save_list() || guest_shop()) {
 				static unsigned seen;
 
 				if (seen < 16) {
 					seen++;
 					fprintf(stderr,
-						"sword3-sdl: save list A -> Return %s\n",
+						"sword3-sdl: list A -> Return %s\n",
 						down ? "down" : "up");
 				}
 			}
@@ -3674,14 +3753,14 @@ static int rewrite_event(SDL_Event *event)
 			event->type = SDL_FIRSTEVENT;
 			return 0;
 		}
-		if (save_slot_pad()) {
+		if (list_arrow_pad()) {
 			static unsigned seen;
 
 			save_dpad_event(button, down);
 			if (seen < 16) {
 				seen++;
 				fprintf(stderr,
-					"sword3-sdl: save list pad %s %s\n",
+					"sword3-sdl: list pad %s %s\n",
 					pad_button_name(button),
 					down ? "down" : "up");
 			}
@@ -3715,7 +3794,7 @@ static int rewrite_event(SDL_Event *event)
 		return 1;
 	}
 	if (button == SDL_CONTROLLER_BUTTON_LEFTSTICK) {
-		if (save_slot_pad() || g_title_keys || g_fight_ui ||
+		if (list_arrow_pad() || g_title_keys || g_fight_ui ||
 		    g_pointer_ui) {
 			event->type = SDL_FIRSTEVENT;
 			return 0;
