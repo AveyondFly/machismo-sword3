@@ -257,7 +257,15 @@ static void owner_drop(enum sword3_sdl_kind kind, void *pointer)
 #define GUEST_FEX_SYSPAGE 0x10002d018ull
 #define GUEST_FEX_ITEM 0x10002fffcull
 #define GUEST_FEX_EQUIP 0x100034da8ull
+#define GUEST_FEX_SKILL 0x100057eacull
 #define GUEST_EQUIP_BACK 0x1000351e4ull
+#define GUEST_SKILL_BACK 0x100058364ull
+#define GUEST_SKILL_OK 0x1000584c4ull
+#define GUEST_SKILL_DOWN 0x100058b78ull
+#define GUEST_SKILL_UP 0x100058d20ull
+#define GUEST_SKILL_LEFT 0x100059284ull
+#define GUEST_SKILL_RIGHT 0x10005938cull
+#define GUEST_SKILL_NEXT_PERSON 0x100058a48ull
 #define GUEST_ITEM_OK 0x100030a20ull
 #define GUEST_ITEM_CATEGORY_PREV 0x1000314a8ull
 #define GUEST_ITEM_CATEGORY_NEXT 0x1000315f0ull
@@ -266,6 +274,14 @@ static void owner_drop(enum sword3_sdl_kind kind, void *pointer)
 #define GUEST_EQUIP_STATE 0x1002aab88ull
 #define GUEST_EQUIP_PERSON 0x1002a99e0ull
 #define GUEST_EQUIP_NEXT_PERSON 0x1000356b8ull
+#define GUEST_SKILL_STATE 0x1002f37a8ull
+#define GUEST_SKILL_PERSON 0x1002f37dcull
+#define GUEST_SKILL_DIRECTION_GATE 0x1002f37e0ull
+#define GUEST_SKILL_PAGE_BASE 0x1002f37b4ull
+#define GUEST_SKILL_CURSOR 0x1002f37b8ull
+#define GUEST_SKILL_PAGE_COUNT 0x1002f37bcull
+#define GUEST_SKILL_VALIDITY_MAP 0x1002f37e8ull
+#define GUEST_PARTY_COUNT 0x1002a9b10ull
 #define GUEST_REBIND_ACTIONS 0x1001fa5e8ull
 #define GUEST_PAD_READY 0x248c
 #define GUEST_SLOT_MASK 0x10
@@ -2377,13 +2393,13 @@ static void menu_reconcile_equip_focus(void)
 		g_native_menu_input.focus = SWORD3_NATIVE_MENU_FOCUS_TABS;
 }
 
-static int menu_equip_party_count(void)
+static int menu_party_count(int limit)
 {
 	int (*enabled)(int) =
 		(int (*)(int))(uintptr_t)GUEST_FEATURE_ENABLED;
 	int count = 1;
 
-	while (count < 8 && enabled(0x1e + count))
+	while (count < limit && enabled(0x1e + count))
 		count++;
 	return count;
 }
@@ -2404,7 +2420,7 @@ static int menu_equip_move_person(int delta)
 	if (callback != GUEST_EQUIP_NEXT_PERSON)
 		return 0;
 	person = (volatile int *)(uintptr_t)GUEST_EQUIP_PERSON;
-	count = menu_equip_party_count();
+	count = menu_party_count(8);
 	current = *person;
 	if (current < 0 || current >= count)
 		current = 0;
@@ -2421,12 +2437,171 @@ static int menu_equip_move_person(int delta)
 	return 1;
 }
 
+static int menu_skill_native_active(void)
+{
+	int route = guest_read_i32(GUEST_MAP_ID, -1);
+
+	return menu_drawn() &&
+	       guest_read_i32(GUEST_MENU_SELECTION, -1) == 13 &&
+	       route >= 42 && route <= 46 &&
+	       guest_read_ptr(GUEST_FEXECUTE) == GUEST_FEX_SKILL &&
+	       guest_read_ptr(GUEST_FEXECUTE + 0x48) == GUEST_SKILL_OK &&
+	       guest_read_ptr(GUEST_FEXECUTE + 0x50) == GUEST_SKILL_BACK;
+}
+
+static int menu_skill_route_active(void)
+{
+	return g_menu_session && g_menu_keys &&
+	       g_native_menu_input.focus ==
+		       SWORD3_NATIVE_MENU_FOCUS_CONTENT &&
+	       menu_skill_native_active();
+}
+
+static void menu_reconcile_skill_focus(void)
+{
+	if (!g_menu_session)
+		return;
+	if (menu_skill_native_active()) {
+		g_native_menu_input.tab = 2;
+		g_native_menu_input.focus =
+			SWORD3_NATIVE_MENU_FOCUS_CONTENT;
+		return;
+	}
+	if (g_native_menu_input.tab == 2 &&
+	    g_native_menu_input.focus ==
+		    SWORD3_NATIVE_MENU_FOCUS_CONTENT &&
+	    menu_drawn() && guest_read_i32(GUEST_SYS_LAYER, 0) == 1)
+		g_native_menu_input.focus = SWORD3_NATIVE_MENU_FOCUS_TABS;
+}
+
+static int menu_skill_move_person(int delta)
+{
+	uintptr_t callback;
+	volatile int *person;
+	volatile int *skill_person;
+	int count;
+	int current;
+	int target;
+	int predecessor;
+
+	if (!menu_skill_route_active() ||
+	    guest_read_i32(GUEST_SKILL_STATE, 0) != 1 || !delta)
+		return 0;
+	callback = guest_read_ptr(GUEST_FEXECUTE + 0x38);
+	if (callback != GUEST_SKILL_NEXT_PERSON)
+		return 0;
+	person = (volatile int *)(uintptr_t)GUEST_EQUIP_PERSON;
+	skill_person = (volatile int *)(uintptr_t)GUEST_SKILL_PERSON;
+	count = guest_read_i32(GUEST_PARTY_COUNT, 0);
+	if (count < 1 || count > 4)
+		count = menu_party_count(4);
+	current = *person;
+	if (current < 0 || current >= count)
+		current = 0;
+	if (count < 2)
+		return 1;
+	if (delta < 0) {
+		target = (current + count - 1) % count;
+		predecessor = (target + count - 1) % count;
+		*person = predecessor;
+		*skill_person = predecessor;
+	} else {
+		*skill_person = current;
+	}
+	((void (*)(void))callback)();
+	fprintf(stderr, "sword3-sdl: menu skill person=%d/%d\n",
+		*person, count);
+	return 1;
+}
+
+static int menu_skill_move_direction(int index)
+{
+	static const unsigned offsets[4] = {
+		0x10, 0x30, 0x08, 0x28,
+	};
+	static const uintptr_t expected[4] = {
+		GUEST_SKILL_UP, GUEST_SKILL_RIGHT,
+		GUEST_SKILL_DOWN, GUEST_SKILL_LEFT,
+	};
+	uintptr_t callback;
+	uint8_t *validity;
+	volatile int *gate;
+	uint8_t old_validity[12];
+	int validity_base = 0;
+	int validity_count = 0;
+	int old_gate;
+	int state;
+
+	if (!menu_skill_route_active() || index < 0 || index >= 4)
+		return 0;
+	callback = guest_read_ptr(GUEST_FEXECUTE + offsets[index]);
+	if (callback != expected[index])
+		return 0;
+	state = guest_read_i32(GUEST_SKILL_STATE, -1);
+	gate = (volatile int *)(uintptr_t)GUEST_SKILL_DIRECTION_GATE;
+	old_gate = *gate;
+	if (state == 1)
+		*gate = 1;
+	if (state == 1) {
+		int base = guest_read_i32(GUEST_SKILL_PAGE_BASE, 0);
+		int count = guest_read_i32(GUEST_SKILL_PAGE_COUNT, 0);
+		uintptr_t map = guest_read_ptr(GUEST_SKILL_VALIDITY_MAP);
+		int i;
+
+		if (map && count > 0 && count <= 24) {
+			validity = (uint8_t *)map;
+			validity_base = 0x80 + base;
+			for (i = 1; i < count; i += 2) {
+				old_validity[validity_count++] =
+					validity[validity_base + i];
+				validity[validity_base + i] = 1;
+			}
+		}
+	}
+	((void (*)(void))callback)();
+	if (validity_count) {
+		int i;
+		int old = 0;
+
+		for (i = 1; old < validity_count; i += 2)
+			validity[validity_base + i] =
+				old_validity[old++];
+	}
+	if (state == 1)
+		*gate = old_gate;
+	fprintf(stderr, "sword3-sdl: menu skill direction=%d state=%d\n",
+		index, state);
+	return 1;
+}
+
+static int menu_skill_confirm(void)
+{
+	uintptr_t callback;
+
+	if (!menu_skill_route_active())
+		return 0;
+	callback = guest_read_ptr(GUEST_FEXECUTE + 0x48);
+	if (callback != GUEST_SKILL_OK)
+		return 0;
+	((void (*)(void))callback)();
+	fprintf(stderr, "sword3-sdl: menu skill confirm state=%d\n",
+		guest_read_i32(GUEST_SKILL_STATE, -1));
+	return 1;
+}
+
 static int menu_content_is_nested(void)
 {
 	if (guest_read_i32(GUEST_SYS_LAYER, 0) > 2)
 		return 1;
-	return menu_equip_native_active() &&
-	       guest_read_i32(GUEST_EQUIP_STATE, 0) != 0;
+	if (menu_equip_native_active() &&
+	    guest_read_i32(GUEST_EQUIP_STATE, 0) != 0)
+		return 1;
+	if (menu_skill_native_active()) {
+		int state = guest_read_i32(GUEST_SKILL_STATE, 0);
+
+		return state != 0 && state != 1;
+	}
+	return 0;
 }
 
 static int menu_item_move_category(int index)
@@ -2899,6 +3074,7 @@ static void menu_poll_open_pulse(void)
 		g_menu_close_pending = 0;
 	}
 	menu_reconcile_equip_focus();
+	menu_reconcile_skill_focus();
 }
 
 static int menu_field_button_rect(int *x, int *y, int *w, int *h)
@@ -3316,6 +3492,12 @@ static void menu_set_dir_source(int index, int axis, int down)
 		g_menu_dir_down[index] = wanted;
 		if (wanted && (index == 1 || index == 3))
 			menu_move_tab_focus(index == 1 ? 1 : -1);
+		return;
+	}
+	if (menu_skill_route_active()) {
+		g_menu_dir_down[index] = wanted;
+		if (wanted)
+			(void)menu_skill_move_direction(index);
 		return;
 	}
 	if (menu_item_route_active() && (index == 1 || index == 3)) {
@@ -4077,6 +4259,14 @@ static int rewrite_event(SDL_Event *event)
 				event->type = SDL_FIRSTEVENT;
 				return 0;
 			}
+			if (menu_skill_route_active()) {
+				if (down) {
+					g_menu_captured_a = 1;
+					(void)menu_skill_confirm();
+				}
+				event->type = SDL_FIRSTEVENT;
+				return 0;
+			}
 			if (menu_item_route_active()) {
 				if (down) {
 					g_menu_captured_a = 1;
@@ -4212,6 +4402,15 @@ static int rewrite_event(SDL_Event *event)
 		}
 		if (host_battle_owns_pad()) {
 			host_battle_button(button, down);
+			event->type = SDL_FIRSTEVENT;
+			return 0;
+		}
+		if (menu_skill_route_active()) {
+			if (down)
+				(void)menu_skill_move_person(
+					button ==
+					    SDL_CONTROLLER_BUTTON_RIGHTSHOULDER
+						? 1 : -1);
 			event->type = SDL_FIRSTEVENT;
 			return 0;
 		}
