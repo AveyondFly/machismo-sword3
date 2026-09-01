@@ -63,6 +63,10 @@
 #define CHEAT_CAL_LEVEL 0x10006a084ull
 #define CHEAT_HIT_DAMAGE1 0x10007e62cull
 #define CHEAT_HIT_DAMAGE3 0x10007cb24ull
+#define CHEAT_RANDOM 0x1001b9784ull
+#define CHEAT_CATCH_ROLL0_RA 0x10000bad4ull
+#define CHEAT_CATCH_ROLL1_RA 0x10000bb1cull
+#define CHEAT_CATCH_ROLL2_RA 0x10000bb6cull
 #define CHEAT_CAL_LIFE 0x10007b398ull
 #define CHEAT_LOAD_BATTLE 0x100046188ull
 #define CHEAT_LOAD_BATTLE_PLAYERMOVE_RA 0x100073d1cull
@@ -99,6 +103,7 @@ static int g_hooks_ready;
 static void (*g_cal_level_orig)(void);
 static int (*g_hit1_orig)(void *atk, void *def, int flag);
 static int (*g_hit3_orig)(void *atk, void *def, short *a, short *b, int flag);
+static int (*g_random_orig)(int limit);
 static void (*g_load_battle_orig)(void *script) __attribute__((used));
 static char g_status[64];
 static Uint32 g_status_until;
@@ -588,6 +593,21 @@ static int cheat_hit3_hook(void *atk, void *def, short *a, short *b, int flag)
 	return dmg;
 }
 
+static int cheat_random_hook(int limit)
+{
+	uintptr_t caller;
+	int result;
+
+	caller = (uintptr_t)__builtin_return_address(0);
+	result = g_random_orig(limit);
+	if (g_catch && limit == 100 &&
+	    (caller == CHEAT_CATCH_ROLL0_RA ||
+	     caller == CHEAT_CATCH_ROLL1_RA ||
+	     caller == CHEAT_CATCH_ROLL2_RA))
+		return 0;
+	return result;
+}
+
 /*
  * iOS has no ChanceOfBattle. Random fights are Lua PlayerMove writing
  * the battle-script pointer, then LoadBattle at 0x100073d18. Skip that
@@ -641,6 +661,9 @@ void host_cheat_install(void)
 	static const uint32_t hit3_expect[4] = {
 		0xd10303ffu, 0xa9066ffcu, 0xa90767fau, 0xa9085ff8u
 	};
+	static const uint32_t random_expect[4] = {
+		0xa9bc5ff8u, 0xa90157f6u, 0xa9024ff4u, 0xa9037bfdu
+	};
 	static const uint32_t load_expect[4] = {
 		0xd10243ffu, 0x6d0223e9u, 0xa9036ffcu, 0xa90467fau
 	};
@@ -650,9 +673,10 @@ void host_cheat_install(void)
 	g_cal_level_orig = cheat_make_tramp(CHEAT_CAL_LEVEL);
 	g_hit1_orig = cheat_make_tramp(CHEAT_HIT_DAMAGE1);
 	g_hit3_orig = cheat_make_tramp(CHEAT_HIT_DAMAGE3);
+	g_random_orig = cheat_make_tramp(CHEAT_RANDOM);
 	g_load_battle_orig = cheat_make_tramp(CHEAT_LOAD_BATTLE);
 	if (!g_cal_level_orig || !g_hit1_orig || !g_hit3_orig ||
-	    !g_load_battle_orig) {
+	    !g_random_orig || !g_load_battle_orig) {
 		fprintf(stderr, "sword3-sdl: cheat tramp mmap failed\n");
 		return;
 	}
@@ -666,11 +690,14 @@ void host_cheat_install(void)
 	if (cheat_patch_jump(CHEAT_HIT_DAMAGE3, cheat_hit3_hook,
 			     hit3_expect) != 0)
 		return;
+	if (cheat_patch_jump(CHEAT_RANDOM, cheat_random_hook,
+			     random_expect) != 0)
+		return;
 	if (cheat_patch_jump(CHEAT_LOAD_BATTLE, cheat_load_battle_hook,
 			     load_expect) != 0)
 		return;
 	fprintf(stderr,
-		"sword3-sdl: cheat CalLevel/HitDamage/LoadBattle hooks installed\n");
+		"sword3-sdl: cheat CalLevel/HitDamage/Catch/LoadBattle hooks installed\n");
 }
 
 void host_cheat_poll(void)
@@ -710,6 +737,11 @@ static void cheat_apply(void)
 	if (g_sel == CHEAT_OHKO) {
 		g_ohko = !g_ohko;
 		cheat_set_status(g_ohko ? "一击必杀已开" : "一击必杀已关");
+		return;
+	}
+	if (g_sel == CHEAT_CATCH) {
+		g_catch = !g_catch;
+		cheat_set_status(g_catch ? "抓怪必成已开" : "抓怪必成已关");
 		return;
 	}
 	cheat_set_status("尚未实现");

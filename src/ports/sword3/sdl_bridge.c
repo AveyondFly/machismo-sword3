@@ -327,6 +327,7 @@ static void owner_drop(enum sword3_sdl_kind kind, void *pointer)
 #define MENU_OPEN_WAIT_MS 900
 #define MENU_BACK_GRACE_MS 450
 #define MENU_CHROME_GONE_MS 250
+#define HOST_MENU_HANDOFF_WAIT_MS 3000
 #define GUEST_MENU_DIALOG 0x1002aa7d0ull
 #define GUEST_LOAD_ACTIVE 0x1002aa3c8ull
 #define GUEST_MENU_WIDGET_ROOT 0x1002ab840ull
@@ -502,6 +503,9 @@ static int g_menu_session;
 static int g_menu_open_pending;
 static int g_menu_open_from_field;
 static Uint32 g_menu_open_until;
+static int g_host_menu_handoff;
+static int g_host_menu_target;
+static Uint32 g_host_menu_handoff_until;
 static int g_menu_seen_chrome;
 static Uint32 g_menu_gone_at;
 static Uint32 g_menu_back_until;
@@ -4916,16 +4920,94 @@ static void fight_confirm_result(void)
 	((void (*)(void))(uintptr_t)GUEST_BATTLE_UPDATE)();
 }
 
+static void host_native_menu_handoff_poll(void)
+{
+	Uint32 now;
+	int count;
+
+	if (!g_host_menu_handoff)
+		return;
+	now = SDL_GetTicks();
+	if (SDL_TICKS_PASSED(now, g_host_menu_handoff_until)) {
+		fprintf(stderr,
+			"sword3-sdl: host menu handoff timeout target=%d phase=%d\n",
+			g_host_menu_target, g_host_menu_handoff);
+		g_host_menu_handoff = 0;
+		g_host_menu_target = 0;
+		return;
+	}
+	if (g_host_menu_handoff == 1) {
+		if (!g_menu_session || !g_menu_keys || !menu_drawn() ||
+		    g_native_menu_input.focus !=
+			    SWORD3_NATIVE_MENU_FOCUS_TABS)
+			return;
+		count = menu_native_tab_count();
+		if (g_host_menu_target == 3 && count < 6) {
+			fprintf(stderr,
+				"sword3-sdl: host refining handoff disabled\n");
+			g_host_menu_handoff = 0;
+			g_host_menu_target = 0;
+			return;
+		}
+		g_native_menu_input.tab =
+			g_host_menu_target == 3 ? 4 : count - 1;
+		if (menu_activate_tab())
+			g_host_menu_handoff = 2;
+		return;
+	}
+	if (g_host_menu_target == 3) {
+		if (!menu_refining_native_active())
+			return;
+		g_host_menu_handoff = 0;
+		g_host_menu_target = 0;
+		fprintf(stderr, "sword3-sdl: host menu -> native refining\n");
+		return;
+	}
+	if (!menu_book_native_active())
+		return;
+	if (guest_data_ok(GUEST_SYS_PAGE))
+		*(volatile int *)(uintptr_t)GUEST_SYS_PAGE = 2;
+	if (guest_data_ok(GUEST_SYS_LEVEL))
+		*(volatile int *)(uintptr_t)GUEST_SYS_LEVEL = 0;
+	if (guest_data_ok(GUEST_SYS_SUB))
+		*(volatile int *)(uintptr_t)GUEST_SYS_SUB = 0;
+	if (guest_data_ok(GUEST_SYS_SLOT))
+		*(volatile int *)(uintptr_t)GUEST_SYS_SLOT = 0;
+	if (guest_data_ok(GUEST_HALT_INP))
+		*(volatile int *)(uintptr_t)GUEST_HALT_INP = 0;
+	((void (*)(void))(uintptr_t)GUEST_BOOK_OK)();
+	g_host_menu_handoff = 0;
+	g_host_menu_target = 0;
+	fprintf(stderr, "sword3-sdl: host menu -> native journal\n");
+}
+
 static void host_menu_run_pending(void)
 {
 	int action;
 	int slot;
 	void (*reset_keys)(void *);
 
+	host_native_menu_handoff_poll();
+	if (g_host_menu_handoff)
+		return;
 	slot = 0;
 	action = host_menu_take_pending(&slot);
 	if (action < 0)
 		return;
+	if (action == 2 || action == 3) {
+		menu_begin_open(-1);
+		g_menu_open_from_field = 1;
+		clear_released_guest_clicks();
+		((void (*)(void))(uintptr_t)GUEST_OPEN_NATIVE_MENU)();
+		g_host_menu_handoff = 1;
+		g_host_menu_target = action;
+		g_host_menu_handoff_until =
+			SDL_GetTicks() + HOST_MENU_HANDOFF_WAIT_MS;
+		fprintf(stderr,
+			"sword3-sdl: host menu -> native menu target=%d\n",
+			action);
+		return;
+	}
 	if (slot < 0)
 		slot = 0;
 	if (guest_data_ok(GUEST_SAVE_INDEX))

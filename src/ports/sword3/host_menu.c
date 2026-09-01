@@ -14,7 +14,7 @@
 #include <SDL2/SDL_ttf.h>
 
 #define HOST_MENU_DEADZONE 14000
-#define HOST_MENU_TABS 5
+#define HOST_MENU_TABS 6
 #define HOST_MENU_ACTIONS 5
 #define HOST_MENU_SLOTS 10
 #define HOST_MENU_SAV_THUMB_W 160
@@ -67,7 +67,8 @@
 #define HOST_MENU_ITEM_NODE 0x130
 #define HOST_MENU_BAG_N 48
 #define HOST_MENU_SKILL_N 32
-#define HOST_MENU_EQUIP_N 8
+#define HOST_MENU_EQUIP_N 11
+#define HOST_MENU_EQUIP_STRIDE 16
 #define HOST_MENU_OFF_NEXT 0x10
 #define HOST_MENU_OFF_TEMP 0x20
 #define HOST_MENU_OFF_COUNT 0x28
@@ -98,13 +99,16 @@
 #define HOST_MENU_STR_DEF 0x100272a2dull
 #define HOST_MENU_STR_SPD 0x100272a31ull
 #define HOST_MENU_STR_HELP 0x10027297dull
+#define HOST_MENU_STR_INFO 0x100272986ull
 #define HOST_MENU_BOOK_SRC 0x1002a85d8ull
 #define HOST_MENU_BOOK_SRC_N 0x1002a85d0ull
 #define HOST_MENU_BESTIARY_N 128
+#define HOST_MENU_ITEM_META_N 256
 #define HOST_MENU_ITEM_USE_BITS 0xe
 #define HOST_MENU_ITEM_NO_THROW 5
 #define HOST_MENU_ITEM_NO_CONSUME 7
 #define HOST_MENU_WIDGET_HAS 0x1001b7014ull
+#define HOST_MENU_REFINING_FEATURE 0x49
 #define HOST_MENU_WIDGET_BITS 0x10030f500ull
 #define HOST_MENU_W_PARTY0 0x1e
 #define HOST_MENU_EQUIP_SWAP 0x100080f64ull
@@ -125,6 +129,7 @@ enum host_menu_tab {
 	HOST_MENU_TAB_EQUIP,
 	HOST_MENU_TAB_SKILL,
 	HOST_MENU_TAB_STATUS,
+	HOST_MENU_TAB_REFINING,
 	HOST_MENU_TAB_BOOK
 };
 
@@ -174,6 +179,7 @@ static SDL_Texture *g_tex_back;
 static SDL_Texture *g_tex_book[HOST_MENU_ACTIONS];
 static SDL_Texture *g_tex_face[HOST_MENU_PARTY_N];
 static int g_face_act[HOST_MENU_PARTY_N];
+static uintptr_t g_face_obj[HOST_MENU_PARTY_N];
 static SDL_Texture *g_tex_slot[HOST_MENU_SLOTS];
 static int g_slot_have[HOST_MENU_SLOTS];
 static unsigned g_slot_play[HOST_MENU_SLOTS];
@@ -214,14 +220,22 @@ struct host_menu_item {
 	int place;
 	uintptr_t node;
 	char name[32];
-	char help[48];
-	char info[48];
+	char help[80];
+	char info[64];
+};
+
+struct host_menu_item_meta {
+	int temp;
+	char help[80];
+	char info[64];
 };
 
 static struct host_menu_actor g_party[HOST_MENU_PARTY_N];
 static struct host_menu_item g_bag[HOST_MENU_BAG_N];
 static struct host_menu_item g_equip[HOST_MENU_EQUIP_N];
 static struct host_menu_item g_skills[HOST_MENU_SKILL_N];
+static struct host_menu_item_meta g_item_meta[HOST_MENU_ITEM_META_N];
+static int g_item_meta_n;
 static int g_party_i;
 static int g_party_logged;
 static int g_pick_logged;
@@ -281,9 +295,15 @@ static void host_menu_item_act(void);
 static void host_menu_bestiary_open(void);
 static void host_menu_equip_open(void);
 static void host_menu_equip_commit(void);
+static void host_menu_draw_equip_pick(SDL_Renderer *renderer, SDL_Rect well,
+				      int logical_w, int logical_h, int pt,
+				      int pt_small);
+static int host_menu_lua_text(int temp, uintptr_t field, char *dst,
+			      size_t dstn);
+static void host_menu_load_item_meta(struct host_menu_item *it);
 
 static const char *g_tab_text[HOST_MENU_TABS] = {
-	"物品", "装备", "奇术", "状态", "天书"
+	"物品", "装备", "奇术", "状态", "炼妖", "天书"
 };
 
 static const char *g_book_text[HOST_MENU_ACTIONS] = {
@@ -295,7 +315,8 @@ static const char *g_item_cat_text[] = {
 	"新品", "恢复", "辅助", "法宝", "装备", "活物", "其他"
 };
 static const char *g_equip_slot[] = {
-	"武器", "头部", "身体", "手部", "足部", "饰品", "法宝", "护驾"
+	"武器", "头部", "身体", "手部", "足部",
+	"饰品一", "饰品二", "法宝一", "法宝二", "护驾一", "护驾二"
 };
 static const char *g_stat_row[] = {
 	"等级", "经验", "力量", "耐力", "智慧", "敏捷", "绝招经验"
@@ -313,10 +334,11 @@ static const uint32_t g_item_cat_mask[HOST_MENU_ITEM_CAT] = {
 	0x00008000u, 0x00001003u, 0x0000001cu, 0x08000040u,
 	0x00000700u, 0x00000800u, 0x00000020u
 };
-/* Original slot masks at 0x1002a50dc, indexed by the 8 equip slots. */
+/* Original slot masks at 0x1002a50dc, indexed by all 11 equip slots. */
 static const uint32_t g_equip_mask[HOST_MENU_EQUIP_N] = {
 	0x00000100u, 0x10000200u, 0x40000200u, 0x20000200u,
-	0x80000200u, 0x00000400u, 0x00000400u, 0x00000040u
+	0x80000200u, 0x00000400u, 0x00000400u, 0x00000040u,
+	0x00000040u, 0x00000800u, 0x00000800u
 };
 static const uintptr_t g_equip_stat_field[] = {
 	HOST_MENU_STR_ADDATK, HOST_MENU_STR_ADDDEF, HOST_MENU_STR_ADDSPD,
@@ -569,7 +591,12 @@ static int host_menu_copy_name(char *dst, size_t dstn, uintptr_t ptr)
 	if (!dst || dstn == 0)
 		return 0;
 	dst[0] = 0;
-	if (ptr < 0x1000ull || ptr > 0x00007fffffffffffull)
+	/*
+	 * AArch64 Linux maps shared-library strings in the upper half of its
+	 * 48-bit user address space (0xffff...). StringDB legitimately returns
+	 * those pointers for HelpText/InfoText.
+	 */
+	if (ptr < 0x1000ull || ptr > 0x0000ffffffffffffull)
 		return 0;
 	s = (const unsigned char *)(uintptr_t)ptr;
 	for (i = 0; i + 1 < dstn; i++) {
@@ -729,8 +756,6 @@ static const struct host_menu_actor *host_menu_actor(void)
 
 static int host_menu_load_item(struct host_menu_item *it, uintptr_t node)
 {
-	uintptr_t help;
-	uintptr_t info;
 	int temp;
 
 	memset(it, 0, sizeof(*it));
@@ -751,13 +776,8 @@ static int host_menu_load_item(struct host_menu_item *it, uintptr_t node)
 		it->count_new = 0;
 	host_menu_copy_name(it->name, sizeof(it->name),
 			    node + HOST_MENU_OFF_INAME);
-	help = host_menu_mem_ptr(node + HOST_MENU_OFF_HELP);
-	if (help)
-		host_menu_copy_name(it->help, sizeof(it->help), help);
-	info = host_menu_mem_ptr(node + HOST_MENU_OFF_INFO);
-	if (info)
-		host_menu_copy_name(it->info, sizeof(it->info), info);
 	it->used = it->name[0] || temp > 0;
+	host_menu_load_item_meta(it);
 	return it->used;
 }
 
@@ -807,10 +827,10 @@ static void host_menu_refresh_inv(void)
 		g_bag_n = host_menu_walk_list(g_bag, HOST_MENU_BAG_N, head);
 	}
 	if (host_menu_guest_ok(HOST_MENU_EQUIP_REPO,
-			       (size_t)HOST_MENU_EQUIP_N * 8 *
+			       (size_t)HOST_MENU_EQUIP_STRIDE * 8 *
 				       HOST_MENU_PARTY_N)) {
 		for (i = 0; i < HOST_MENU_EQUIP_N; i++) {
-			idx = i + g_party_i * 16;
+			idx = i + g_party_i * HOST_MENU_EQUIP_STRIDE;
 			node = host_menu_guest_ptr(HOST_MENU_EQUIP_REPO +
 						  (uintptr_t)idx * 8);
 			if (node)
@@ -997,6 +1017,40 @@ static int host_menu_lua_text(int temp, uintptr_t field, char *dst, size_t dstn)
 	shown = ((const char *(*)(const void *))(uintptr_t)HOST_MENU_LUA_DB)(
 		raw);
 	return host_menu_copy_name(dst, dstn, (uintptr_t)shown);
+}
+
+static void host_menu_load_item_meta(struct host_menu_item *it)
+{
+	struct host_menu_item_meta *meta;
+	int i;
+
+	if (!it || it->temp < 1 || !host_menu_lua_ready())
+		return;
+	meta = NULL;
+	for (i = 0; i < g_item_meta_n; i++) {
+		if (g_item_meta[i].temp == it->temp) {
+			meta = &g_item_meta[i];
+			break;
+		}
+	}
+	if (!meta && g_item_meta_n < HOST_MENU_ITEM_META_N) {
+		meta = &g_item_meta[g_item_meta_n++];
+		memset(meta, 0, sizeof(*meta));
+		meta->temp = it->temp;
+		host_menu_lua_text(it->temp, HOST_MENU_STR_HELP, meta->help,
+				   sizeof(meta->help));
+		host_menu_lua_text(it->temp, HOST_MENU_STR_INFO, meta->info,
+				   sizeof(meta->info));
+	}
+	if (!meta) {
+		host_menu_lua_text(it->temp, HOST_MENU_STR_HELP, it->help,
+				   sizeof(it->help));
+		host_menu_lua_text(it->temp, HOST_MENU_STR_INFO, it->info,
+				   sizeof(it->info));
+		return;
+	}
+	snprintf(it->help, sizeof(it->help), "%s", meta->help);
+	snprintf(it->info, sizeof(it->info), "%s", meta->info);
 }
 
 static void host_menu_bestiary_load_sel(void)
@@ -1380,7 +1434,8 @@ static int host_menu_equip_swap(uintptr_t bag_node, int slot)
 	if (slot < 0 || slot >= HOST_MENU_EQUIP_N || !host_menu_in_team(g_party_i))
 		return 0;
 	rec = HOST_MENU_EQUIP_REPO +
-	      ((uintptr_t)slot + (uintptr_t)g_party_i * 16u) * 8u;
+	      ((uintptr_t)slot +
+	       (uintptr_t)g_party_i * HOST_MENU_EQUIP_STRIDE) * 8u;
 	if (!host_menu_guest_ok(rec, 8))
 		return 0;
 	worn = host_menu_guest_ptr(rec);
@@ -1471,8 +1526,7 @@ static int host_menu_layer_page(void)
 	       g_layer == HOST_MENU_LAYER_STUB ||
 	       g_layer == HOST_MENU_LAYER_BESTIARY ||
 	       g_layer == HOST_MENU_LAYER_PICK ||
-	       g_layer == HOST_MENU_LAYER_ASK ||
-	       g_layer == HOST_MENU_LAYER_EQUIP;
+	       g_layer == HOST_MENU_LAYER_ASK;
 }
 
 static void host_menu_item_sort(void)
@@ -1639,6 +1693,8 @@ static void host_menu_enter_inner(void)
 		g_skill_focus = 0;
 		host_menu_item_party();
 	}
+	else if (g_tab == HOST_MENU_TAB_STATUS)
+		host_menu_item_party();
 	else if (g_tab == HOST_MENU_TAB_BOOK)
 		g_book_focus = 0;
 	fprintf(stderr, "sword3-sdl: host menu enter tab=%d\n", g_tab);
@@ -1664,9 +1720,41 @@ static void host_menu_move_slot(int dx, int dy)
 		       HOST_MENU_SLOTS;
 }
 
+static int host_menu_refining_enabled(void)
+{
+	return ((int (*)(int))(uintptr_t)HOST_MENU_WIDGET_HAS)(
+		       HOST_MENU_REFINING_FEATURE) != 0;
+}
+
+static int host_menu_tab_count(void)
+{
+	return host_menu_refining_enabled() ? HOST_MENU_TABS :
+					     HOST_MENU_TABS - 1;
+}
+
+static int host_menu_tab_from_visible(int visible)
+{
+	if (!host_menu_refining_enabled() && visible >= HOST_MENU_TAB_REFINING)
+		return visible + 1;
+	return visible;
+}
+
+static int host_menu_tab_to_visible(int tab)
+{
+	if (!host_menu_refining_enabled() && tab > HOST_MENU_TAB_REFINING)
+		return tab - 1;
+	return tab;
+}
+
 static void host_menu_move_tab(int delta)
 {
-	g_tab = (g_tab + delta + HOST_MENU_TABS) % HOST_MENU_TABS;
+	int count;
+	int visible;
+
+	count = host_menu_tab_count();
+	visible = host_menu_tab_to_visible(g_tab);
+	visible = (visible + delta % count + count) % count;
+	g_tab = host_menu_tab_from_visible(visible);
 	g_layer = HOST_MENU_LAYER_TABS;
 	g_stub = -1;
 }
@@ -1708,6 +1796,7 @@ static void host_menu_move_equip(int delta)
 {
 	g_equip_focus = (g_equip_focus + delta + HOST_MENU_EQUIP_N) %
 			HOST_MENU_EQUIP_N;
+	g_equip_sel = 0;
 	g_item_note[0] = 0;
 }
 
@@ -1834,6 +1923,15 @@ static void host_menu_confirm(void)
 		return;
 	}
 	if (g_layer == HOST_MENU_LAYER_TABS) {
+		if (g_tab == HOST_MENU_TAB_REFINING &&
+		    host_menu_refining_enabled()) {
+			g_pending = 3;
+			g_pending_slot = 0;
+			host_menu_close();
+			fprintf(stderr,
+				"sword3-sdl: host menu refining pending\n");
+			return;
+		}
 		host_menu_enter_inner();
 		return;
 	}
@@ -1867,6 +1965,13 @@ static void host_menu_confirm(void)
 	}
 	if (g_book_focus == 0 || g_book_focus == 1) {
 		host_menu_enter_slots(g_book_focus);
+		return;
+	}
+	if (g_book_focus == 2) {
+		g_pending = 2;
+		g_pending_slot = 0;
+		host_menu_close();
+		fprintf(stderr, "sword3-sdl: host menu journal pending\n");
 		return;
 	}
 	g_stub = g_book_focus;
@@ -1920,7 +2025,8 @@ int host_menu_button(int button, int down)
 		if (down &&
 		    ((g_layer == HOST_MENU_LAYER_INNER &&
 		      (g_tab == HOST_MENU_TAB_EQUIP ||
-		       g_tab == HOST_MENU_TAB_SKILL)) ||
+		       g_tab == HOST_MENU_TAB_SKILL ||
+		       g_tab == HOST_MENU_TAB_STATUS)) ||
 		     (g_layer == HOST_MENU_LAYER_EQUIP &&
 		      g_tab == HOST_MENU_TAB_EQUIP))) {
 			host_menu_move_party(-1);
@@ -1938,7 +2044,8 @@ int host_menu_button(int button, int down)
 		if (down &&
 		    ((g_layer == HOST_MENU_LAYER_INNER &&
 		      (g_tab == HOST_MENU_TAB_EQUIP ||
-		       g_tab == HOST_MENU_TAB_SKILL)) ||
+		       g_tab == HOST_MENU_TAB_SKILL ||
+		       g_tab == HOST_MENU_TAB_STATUS)) ||
 		     (g_layer == HOST_MENU_LAYER_EQUIP &&
 		      g_tab == HOST_MENU_TAB_EQUIP))) {
 			host_menu_move_party(1);
@@ -2409,6 +2516,7 @@ static void host_menu_assets_flush(void)
 			SDL_DestroyTexture(g_tex_face[i]);
 		g_tex_face[i] = NULL;
 		g_face_act[i] = 0;
+		g_face_obj[i] = 0;
 	}
 	for (i = 0; i < HOST_MENU_SLOTS; i++)
 		host_menu_slot_clear(i);
@@ -2889,6 +2997,7 @@ static SDL_Texture *host_menu_face_tex(SDL_Renderer *renderer, int slot)
 	const struct host_menu_actor *a;
 	SDL_Surface *surf;
 	SDL_Texture *tex;
+	uintptr_t obj;
 	int frame;
 	int tw;
 	int th;
@@ -2898,20 +3007,24 @@ static SDL_Texture *host_menu_face_tex(SDL_Renderer *renderer, int slot)
 	a = &g_party[slot];
 	if (!a->used || a->act <= 0)
 		return g_tex_face[slot];
-	if (g_face_act[slot] == a->act)
+	obj = host_menu_tsw_obj(a->act);
+	if (g_tex_face[slot] && g_face_act[slot] == a->act &&
+	    g_face_obj[slot] == obj)
 		return g_tex_face[slot];
 	if (g_tex_face[slot]) {
 		SDL_DestroyTexture(g_tex_face[slot]);
 		g_tex_face[slot] = NULL;
 	}
 	g_face_act[slot] = a->act;
+	g_face_obj[slot] = obj;
 	surf = NULL;
 	for (frame = 0; frame < 3 && !surf; frame++)
 		surf = host_menu_tsw_surface(a->act, frame);
 	tex = host_menu_tex_from_surf(renderer, surf);
 	g_tex_face[slot] = tex;
-	if (!tex && !host_menu_tsw_obj(a->act)) {
+	if (!tex && !obj) {
 		g_face_act[slot] = 0;
+		g_face_obj[slot] = 0;
 		return NULL;
 	}
 	tw = 0;
@@ -2920,7 +3033,7 @@ static SDL_Texture *host_menu_face_tex(SDL_Renderer *renderer, int slot)
 		SDL_QueryTexture(tex, NULL, NULL, &tw, &th);
 	fprintf(stderr, "sword3-sdl: face slot=%d act=%d %s %dx%d obj=%llx\n",
 		slot, a->act, tex ? "ok" : "miss", tw, th,
-		(unsigned long long)host_menu_tsw_obj(a->act));
+		(unsigned long long)obj);
 	return tex;
 }
 
@@ -3211,23 +3324,28 @@ static void host_menu_draw_tabs(SDL_Renderer *renderer, int logical_w,
 	int th;
 	int gap;
 	int end;
+	int count;
+	int tab_i;
 
 	x0 = host_sx(290, logical_w);
 	y0 = host_sy(16, logical_h);
 	th = host_sy(44, logical_h);
 	gap = host_sx(4, logical_w);
 	end = host_sx(848, logical_w);
-	tw = (end - x0 - gap * (HOST_MENU_TABS - 1)) / HOST_MENU_TABS;
-	for (i = 0; i < HOST_MENU_TABS; i++) {
+	count = host_menu_tab_count();
+	tw = (end - x0 - gap * (count - 1)) / count;
+	for (i = 0; i < count; i++) {
+		tab_i = host_menu_tab_from_visible(i);
 		tab.x = x0 + i * (tw + gap);
 		tab.y = y0;
 		tab.w = tw;
 		tab.h = th;
-		host_menu_plaque(renderer, tab, g_tab == i);
-		host_menu_text_center(renderer, g_tab_text[i],
+		host_menu_plaque(renderer, tab, g_tab == tab_i);
+		host_menu_text_center(renderer, g_tab_text[tab_i],
 				      tab.x + tab.w / 2, tab.y + tab.h / 2, pt,
-				      g_tab == i ? g_ink_tab_on : g_ink_hint);
-		if (g_layer == HOST_MENU_LAYER_TABS && g_tab == i) {
+				      g_tab == tab_i ? g_ink_tab_on :
+						      g_ink_hint);
+		if (g_layer == HOST_MENU_LAYER_TABS && g_tab == tab_i) {
 			host_menu_frame(renderer, tab, 2, g_ink_gold.r,
 					g_ink_gold.g, g_ink_gold.b, 255);
 		}
@@ -3442,12 +3560,11 @@ static void host_menu_draw_equip(SDL_Renderer *renderer, int logical_w,
 	int rh;
 	int on;
 
-	(void)pt;
 	host_menu_draw_combat(renderer, logical_w, logical_h, pt_small);
 	list.x = host_sx(HOST_MENU_SPLIT_X + 12, logical_w);
 	list.y = host_sy(108, logical_h);
-	list.w = host_sx(248, logical_w);
-	list.h = host_sy(420, logical_h);
+	list.w = host_sx(358, logical_w);
+	list.h = logical_h - list.y - host_sy(92, logical_h);
 	host_menu_well(renderer, list);
 	rh = (list.h - host_sy(16, logical_h)) / HOST_MENU_EQUIP_N;
 	for (i = 0; i < HOST_MENU_EQUIP_N; i++) {
@@ -3455,7 +3572,9 @@ static void host_menu_draw_equip(SDL_Renderer *renderer, int logical_w,
 		row.y = list.y + host_sy(8, logical_h) + i * rh;
 		row.w = list.w - host_sx(16, logical_w);
 		row.h = rh - host_sy(4, logical_h);
-		on = (g_layer == HOST_MENU_LAYER_INNER && g_equip_focus == i);
+		on = (g_layer == HOST_MENU_LAYER_INNER ||
+		      g_layer == HOST_MENU_LAYER_EQUIP) &&
+		     g_equip_focus == i;
 		host_menu_fill(renderer, row, on ? 88 : 28, on ? 68 : 32,
 			       on ? 28 : 22, 200);
 		if (on)
@@ -3477,61 +3596,10 @@ static void host_menu_draw_equip(SDL_Renderer *renderer, int logical_w,
 	well.x = list.x + list.w + host_sx(8, logical_w);
 	well.y = list.y;
 	well.w = logical_w - well.x - host_sx(24, logical_w);
-	well.h = host_sy(300, logical_h);
-	if (well.w > host_sx(40, logical_w)) {
-		const struct host_menu_item *worn;
-		int y;
-		int i;
-		int val;
-		char line[48];
-
-		host_menu_well(renderer, well);
-		worn = &g_equip[g_equip_focus];
-		if (worn->used && worn->name[0])
-			host_menu_text_left(renderer, worn->name,
-					    well.x + host_sx(10, logical_w),
-					    well.y + host_sy(8, logical_h),
-					    pt_small, g_ink_gold);
-		else
-			host_menu_text_left(renderer, "此栏没有装备",
-					    well.x + host_sx(10, logical_w),
-					    well.y + host_sy(8, logical_h),
-					    pt_small, g_ink_hint);
-		y = well.y + host_sy(36, logical_h);
-		for (i = 0; i < HOST_MENU_EQUIP_STAT_N; i++) {
-			val = worn->used ?
-				      host_menu_item_add(worn->temp,
-							 g_equip_stat_field[i]) :
-				      0;
-			if (i >= 3 && val == 0)
-				continue;
-			if (val)
-				snprintf(line, sizeof(line), "%s  %+d",
-					 g_equip_stat_name[i], val);
-			else
-				snprintf(line, sizeof(line), "%s  —",
-					 g_equip_stat_name[i]);
-			host_menu_text_left(renderer, line,
-					    well.x + host_sx(10, logical_w),
-					    y, pt_small, g_ink_body);
-			y += host_sy(24, logical_h);
-		}
-		if (worn->help[0])
-			host_menu_text_left(renderer, worn->help,
-					    well.x + host_sx(10, logical_w),
-					    y + host_sy(8, logical_h),
-					    pt_small, g_ink_hint);
-		if (g_item_note[0])
-			host_menu_text_center(renderer, g_item_note,
-					      well.x + well.w / 2,
-					      well.y + well.h -
-						      host_sy(40, logical_h),
-					      pt_small, g_ink_gold);
-		host_menu_text_center(renderer, "L1/R1 换人  A 更换",
-				      well.x + well.w / 2,
-				      well.y + well.h - host_sy(18, logical_h),
-				      pt_small, g_ink_hint);
-	}
+	well.h = list.h;
+	if (well.w > host_sx(40, logical_w))
+		host_menu_draw_equip_pick(renderer, well, logical_w, logical_h,
+					  pt, pt_small);
 }
 
 static void host_menu_draw_skill(SDL_Renderer *renderer, int logical_w,
@@ -3543,9 +3611,11 @@ static void host_menu_draw_skill(SDL_Renderer *renderer, int logical_w,
 	int i;
 	int rh;
 	int on;
-	char effect[64];
-	char target[64];
+	int usable;
+	char effect[112];
+	char target[96];
 	const struct host_menu_item *sk;
+	const SDL_Color *skill_ink;
 
 	list.x = host_sx(HOST_MENU_SPLIT_X + 16, logical_w);
 	list.y = host_sy(78, logical_h);
@@ -3570,18 +3640,24 @@ static void host_menu_draw_skill(SDL_Renderer *renderer, int logical_w,
 			row.h = rh - 2;
 			on = (g_layer == HOST_MENU_LAYER_INNER &&
 			      g_skill_focus == i);
+			usable = host_menu_item_usable(&g_skills[i]);
 			if (on)
 				host_menu_frame(renderer, row, 2, g_ink_gold.r,
 						g_ink_gold.g, g_ink_gold.b,
 						255);
+			if (!usable)
+				skill_ink = &g_ink_hp;
+			else if (on)
+				skill_ink = &g_ink_gold;
+			else
+				skill_ink = &g_ink_body;
 			host_menu_text_left(renderer,
 					    g_skills[i].name[0] ?
 						    g_skills[i].name :
 						    "—",
 					    row.x + host_sx(8, logical_w),
 					    row.y + row.h / 2 - pt_small / 2,
-					    pt_small,
-					    on ? g_ink_gold : g_ink_body);
+					    pt_small, *skill_ink);
 		}
 	}
 	desc.x = list.x;
@@ -3607,10 +3683,15 @@ static void host_menu_draw_skill(SDL_Renderer *renderer, int logical_w,
 				    desc.y + host_sy(8, logical_h), pt_small,
 				    g_ink_hint);
 		host_menu_text_left(renderer, target,
-				    desc.x + host_sx(12, logical_w) +
-					    desc.w / 2,
-				    desc.y + host_sy(8, logical_h), pt_small,
+				    desc.x + host_sx(12, logical_w),
+				    desc.y + host_sy(34, logical_h), pt_small,
 				    g_ink_hint);
+		if (sk && !host_menu_item_usable(sk))
+			host_menu_text_left(
+				renderer, "当前菜单不可使用",
+				desc.x + desc.w - host_sx(170, logical_w),
+				desc.y + host_sy(34, logical_h), pt_small,
+				g_ink_hp);
 		host_menu_text_center(renderer, "L1/R1 切换人物",
 				      desc.x + desc.w / 2,
 				      desc.y + desc.h -
@@ -3713,6 +3794,30 @@ static void host_menu_draw_status(SDL_Renderer *renderer, int logical_w,
 								g_ink_hint);
 		}
 	}
+	host_menu_text_center(renderer, "L1/R1 切换人物",
+			      x0 + host_sx(140, logical_w),
+			      logical_h - host_sy(18, logical_h), pt_small,
+			      g_ink_hint);
+}
+
+static void host_menu_draw_refining(SDL_Renderer *renderer, int logical_w,
+				   int logical_h, int pt, int pt_small)
+{
+	SDL_Rect well;
+
+	well.x = host_sx(HOST_MENU_SPLIT_X + 16, logical_w);
+	well.y = host_sy(78, logical_h);
+	well.w = logical_w - well.x - host_sx(24, logical_w);
+	well.h = logical_h - well.y - host_sy(16, logical_h);
+	host_menu_well(renderer, well);
+	host_menu_text_center(renderer, "炼妖",
+			      well.x + well.w / 2,
+			      well.y + well.h / 2 - host_sy(20, logical_h), pt,
+			      g_ink_gold);
+	host_menu_text_center(renderer, "A 进入炼妖",
+			      well.x + well.w / 2,
+			      well.y + well.h / 2 + host_sy(24, logical_h),
+			      pt_small, g_ink_hint);
 }
 
 static void host_menu_draw_book(SDL_Renderer *renderer, int logical_w,
@@ -4115,8 +4220,9 @@ static void host_menu_draw_equip_pick(SDL_Renderer *renderer, SDL_Rect well,
 	SDL_Rect list;
 	SDL_Rect cmp;
 	SDL_Rect hit;
-	char title[56];
-	char line[48];
+	SDL_Rect old_clip;
+	SDL_bool had_clip;
+	char line[96];
 	int view[HOST_MENU_BAG_N];
 	int n;
 	int i;
@@ -4130,42 +4236,36 @@ static void host_menu_draw_equip_pick(SDL_Renderer *renderer, SDL_Rect well,
 	int newv;
 	int delta;
 	int y;
+	int x;
+	const struct host_menu_item *worn;
 	const struct host_menu_item *it;
 	const SDL_Color *ink;
 
-	host_menu_fill(renderer, well, 8, 12, 10, 230);
-	host_menu_frame(renderer, well, 2, 212, 176, 88, 255);
-	if (g_equip_focus >= 0 && g_equip_focus < HOST_MENU_EQUIP_N)
-		snprintf(title, sizeof(title), "更换「%s」",
-			 g_equip_slot[g_equip_focus]);
-	else
-		snprintf(title, sizeof(title), "%s", "更换装备");
-	host_menu_text_left(renderer, title, well.x + host_sx(12, logical_w),
-			    well.y + host_sy(8, logical_h), pt, g_ink_gold);
 	n = host_menu_equip_view(view, HOST_MENU_BAG_N);
 	host_menu_clamp_equip_sel();
 	list = well;
-	list.x += host_sx(8, logical_w);
-	list.y += host_sy(40, logical_h);
-	list.w = well.w * 11 / 20;
-	list.h = well.h - host_sy(70, logical_h);
-	cmp = list;
-	cmp.x = list.x + list.w + host_sx(8, logical_w);
-	cmp.w = well.x + well.w - cmp.x - host_sx(8, logical_w);
-	if (n <= 0) {
-		host_menu_text_center(renderer, "没有可装备的物品",
-				      well.x + well.w / 2,
-				      well.y + well.h / 2, pt, g_ink_hint);
-		host_menu_text_center(renderer, "B 返回",
-				      well.x + well.w / 2,
-				      well.y + well.h - host_sy(22, logical_h),
-				      pt_small, g_ink_hint);
-		return;
-	}
+	list.h = well.h * 3 / 5;
+	cmp = well;
+	cmp.y = list.y + list.h + host_sy(8, logical_h);
+	cmp.h = well.y + well.h - cmp.y;
+	host_menu_well(renderer, list);
+	host_menu_well(renderer, cmp);
+	host_menu_text_center(renderer, "待更换装备",
+			      list.x + list.w / 2,
+			      list.y + host_sy(20, logical_h), pt_small,
+			      g_ink_gold);
+
+	had_clip = SDL_RenderIsClipEnabled(renderer);
+	SDL_RenderGetClipRect(renderer, &old_clip);
+	SDL_RenderSetClipRect(renderer, &list);
+	if (n <= 0)
+		host_menu_text_center(renderer, "没有物品",
+				      list.x + list.w / 2,
+				      list.y + list.h / 2, pt, g_ink_hint);
 	rh = host_sy(26, logical_h);
 	if (rh < 16)
 		rh = 16;
-	rows = list.h / rh;
+	rows = (list.h - host_sy(42, logical_h)) / rh;
 	if (rows < 1)
 		rows = 1;
 	if (rows > n)
@@ -4175,12 +4275,17 @@ static void host_menu_draw_equip_pick(SDL_Renderer *renderer, SDL_Rect well,
 		start = 0;
 	if (start + rows > n)
 		start = n - rows;
-	host_menu_scroll(renderer, list, start, rows, n);
+	hit = list;
+	hit.y += host_sy(36, logical_h);
+	hit.h -= host_sy(42, logical_h);
+	if (n > 0)
+		host_menu_scroll(renderer, hit, start, rows, n);
 	for (i = 0; i < rows; i++) {
 		it = &g_bag[view[start + i]];
-		on = (g_equip_sel == start + i);
+		on = g_layer == HOST_MENU_LAYER_EQUIP &&
+		     g_equip_sel == start + i;
 		hit.x = list.x;
-		hit.y = list.y + i * rh;
+		hit.y = list.y + host_sy(36, logical_h) + i * rh;
 		hit.w = list.w - host_sx(12, logical_w);
 		hit.h = rh - 2;
 		if (on)
@@ -4198,52 +4303,78 @@ static void host_menu_draw_equip_pick(SDL_Renderer *renderer, SDL_Rect well,
 				    hit.y + hit.h / 2 - pt_small / 2, pt_small,
 				    on ? g_ink_gold : g_ink_body);
 	}
-	worn_temp = (g_equip[g_equip_focus].used &&
-		     g_equip[g_equip_focus].temp > 0) ?
-			    g_equip[g_equip_focus].temp :
-			    0;
-	it = &g_bag[view[g_equip_sel]];
-	cand_temp = it->temp;
-	host_menu_text_left(renderer, "已装备 → 待装备", cmp.x, cmp.y,
-			    pt_small, g_ink_hint);
-	y = cmp.y + host_sy(28, logical_h);
+	if (had_clip)
+		SDL_RenderSetClipRect(renderer, &old_clip);
+	else
+		SDL_RenderSetClipRect(renderer, NULL);
+
+	worn = &g_equip[g_equip_focus];
+	worn_temp = worn->used && worn->temp > 0 ? worn->temp : 0;
+	it = n > 0 ? &g_bag[view[g_equip_sel]] : NULL;
+	cand_temp = it ? it->temp : 0;
+	SDL_RenderSetClipRect(renderer, &cmp);
+	host_menu_text_left(renderer,
+			    it && it->name[0] ? it->name :
+			    (worn->used && worn->name[0] ? worn->name :
+							   "没有装备"),
+			    cmp.x + host_sx(10, logical_w),
+			    cmp.y + host_sy(8, logical_h), pt_small,
+			    it ? g_ink_gold : g_ink_hint);
 	for (i = 0; i < HOST_MENU_EQUIP_STAT_N; i++) {
 		oldv = worn_temp ? host_menu_item_add(worn_temp,
 						      g_equip_stat_field[i]) :
 				   0;
-		newv = cand_temp ? host_menu_item_add(cand_temp,
-						      g_equip_stat_field[i]) :
-				   0;
+		newv = cand_temp ?
+			       host_menu_item_add(cand_temp,
+						  g_equip_stat_field[i]) :
+			       oldv;
 		delta = newv - oldv;
-		if (i >= 3 && oldv == 0 && newv == 0)
-			continue;
-		snprintf(line, sizeof(line), "%s  %d → %d",
-			 g_equip_stat_name[i], oldv, newv);
-		host_menu_text_left(renderer, line, cmp.x, y, pt_small,
-				    g_ink_body);
-		if (delta > 0) {
+		x = cmp.x + host_sx(10 + (i / 3) * 130, logical_w);
+		y = cmp.y + host_sy(36 + (i % 3) * 24, logical_h);
+		if (it)
+			snprintf(line, sizeof(line), "%s %d→%d",
+				 g_equip_stat_name[i], oldv, newv);
+		else if (oldv)
+			snprintf(line, sizeof(line), "%s %+d",
+				 g_equip_stat_name[i], oldv);
+		else
+			snprintf(line, sizeof(line), "%s —",
+				 g_equip_stat_name[i]);
+		if (delta > 0)
 			ink = &g_ink_up;
-			snprintf(line, sizeof(line), "+%d", delta);
-		} else if (delta < 0) {
+		else if (delta < 0)
 			ink = &g_ink_hp;
-			snprintf(line, sizeof(line), "%d", delta);
-		} else {
-			ink = &g_ink_hint;
-			snprintf(line, sizeof(line), "%s", "0");
-		}
-		host_menu_text_left(renderer, line,
-				    cmp.x + host_sx(150, logical_w), y,
-				    pt_small, *ink);
-		y += host_sy(24, logical_h);
+		else
+			ink = &g_ink_body;
+		host_menu_text_left(renderer, line, x, y, pt_small, *ink);
 	}
-	if (it->help[0])
-		host_menu_text_left(renderer, it->help, cmp.x,
-				    y + host_sy(8, logical_h), pt_small,
+	if (it && it->help[0])
+		host_menu_text_left(renderer, it->help,
+				    cmp.x + host_sx(10, logical_w),
+				    cmp.y + host_sy(116, logical_h), pt_small,
 				    g_ink_hint);
-	host_menu_text_center(renderer, "上下选择  L1/R1 换人  A 装备  B 取消",
+	else if (worn->help[0])
+		host_menu_text_left(renderer, worn->help,
+				    cmp.x + host_sx(10, logical_w),
+				    cmp.y + host_sy(116, logical_h), pt_small,
+				    g_ink_hint);
+	if (g_item_note[0])
+		host_menu_text_center(renderer, g_item_note,
+				      cmp.x + cmp.w / 2,
+				      cmp.y + cmp.h -
+					      host_sy(38, logical_h),
+				      pt_small, g_ink_gold);
+	host_menu_text_center(renderer,
+			      g_layer == HOST_MENU_LAYER_EQUIP ?
+				      "上下选择 A装备 B返回" :
+				      "上下选槽 A选择 L1/R1换人",
 			      well.x + well.w / 2,
 			      well.y + well.h - host_sy(22, logical_h),
 			      pt_small, g_ink_hint);
+	if (had_clip)
+		SDL_RenderSetClipRect(renderer, &old_clip);
+	else
+		SDL_RenderSetClipRect(renderer, NULL);
 }
 
 void host_menu_draw(SDL_Renderer *renderer, int logical_w, int logical_h)
@@ -4324,7 +4455,10 @@ void host_menu_draw(SDL_Renderer *renderer, int logical_w, int logical_h)
 		else if (g_tab == HOST_MENU_TAB_STATUS)
 			host_menu_draw_status(renderer, logical_w, logical_h,
 					      pt_small);
-		else
+		else if (g_tab == HOST_MENU_TAB_REFINING)
+			host_menu_draw_refining(renderer, logical_w, logical_h,
+					       pt, pt_small);
+		else if (g_tab == HOST_MENU_TAB_BOOK)
 			host_menu_draw_book(renderer, logical_w, logical_h, pt);
 	}
 
@@ -4344,9 +4478,6 @@ void host_menu_draw(SDL_Renderer *renderer, int logical_w, int logical_h)
 	else if (g_layer == HOST_MENU_LAYER_ASK)
 		host_menu_draw_ask(renderer, well, logical_w, logical_h, pt,
 				   pt_small);
-	else if (g_layer == HOST_MENU_LAYER_EQUIP)
-		host_menu_draw_equip_pick(renderer, well, logical_w, logical_h,
-					  pt, pt_small);
 	else if (g_layer == HOST_MENU_LAYER_STUB && g_stub >= 0 &&
 		 g_stub < HOST_MENU_ACTIONS) {
 		host_menu_fill(renderer, well, 8, 12, 10, 230);
