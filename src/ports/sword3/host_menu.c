@@ -1221,18 +1221,27 @@ static void host_menu_move_party(int delta)
 {
 	int i;
 	int guard = 0;
+	int old;
 	int step;
 
 	if (delta == 0 || host_menu_party_team_n() <= 0)
 		return;
 	step = delta > 0 ? 1 : -1;
+	old = g_party_i;
 	i = g_party_i;
 	do {
 		i = (i + step + HOST_MENU_PARTY_N) % HOST_MENU_PARTY_N;
 		guard++;
 	} while (guard < HOST_MENU_PARTY_N && !host_menu_in_team(i));
-	if (host_menu_in_team(i))
+	if (host_menu_in_team(i)) {
 		g_party_i = i;
+		if (g_party_i != old) {
+			g_skill_focus = 0;
+			g_equip_sel = 0;
+			g_item_note[0] = 0;
+			host_menu_refresh_inv();
+		}
+	}
 }
 
 static uintptr_t host_menu_item_party(void)
@@ -1626,8 +1635,10 @@ static void host_menu_enter_inner(void)
 		g_equip_focus = 0;
 		host_menu_item_party();
 	}
-	else if (g_tab == HOST_MENU_TAB_SKILL)
+	else if (g_tab == HOST_MENU_TAB_SKILL) {
 		g_skill_focus = 0;
+		host_menu_item_party();
+	}
 	else if (g_tab == HOST_MENU_TAB_BOOK)
 		g_book_focus = 0;
 	fprintf(stderr, "sword3-sdl: host menu enter tab=%d\n", g_tab);
@@ -1726,10 +1737,6 @@ static void host_menu_dir(int index, int down)
 			host_menu_move_equip_sel(1);
 		else if (index == 0)
 			host_menu_move_equip_sel(-1);
-		else if (index == 1)
-			host_menu_move_party(1);
-		else if (index == 3)
-			host_menu_move_party(-1);
 		host_menu_clamp_equip_sel();
 		return;
 	}
@@ -1785,10 +1792,6 @@ static void host_menu_dir(int index, int down)
 			host_menu_move_equip(1);
 		else if (index == 0)
 			host_menu_move_equip(-1);
-		else if (index == 1)
-			host_menu_move_party(1);
-		else if (index == 3)
-			host_menu_move_party(-1);
 		return;
 	}
 	if (g_tab == HOST_MENU_TAB_SKILL) {
@@ -1914,7 +1917,16 @@ int host_menu_button(int button, int down)
 			host_menu_back();
 		return 1;
 	case SDL_CONTROLLER_BUTTON_LEFTSHOULDER:
-		if (down && !host_menu_layer_page()) {
+		if (down &&
+		    ((g_layer == HOST_MENU_LAYER_INNER &&
+		      (g_tab == HOST_MENU_TAB_EQUIP ||
+		       g_tab == HOST_MENU_TAB_SKILL)) ||
+		     (g_layer == HOST_MENU_LAYER_EQUIP &&
+		      g_tab == HOST_MENU_TAB_EQUIP))) {
+			host_menu_move_party(-1);
+			if (g_layer == HOST_MENU_LAYER_EQUIP)
+				host_menu_clamp_equip_sel();
+		} else if (down && !host_menu_layer_page()) {
 			if (g_layer == HOST_MENU_LAYER_INNER &&
 			    g_tab == HOST_MENU_TAB_ITEM)
 				host_menu_move_item(-1);
@@ -1923,7 +1935,16 @@ int host_menu_button(int button, int down)
 		}
 		return 1;
 	case SDL_CONTROLLER_BUTTON_RIGHTSHOULDER:
-		if (down && !host_menu_layer_page()) {
+		if (down &&
+		    ((g_layer == HOST_MENU_LAYER_INNER &&
+		      (g_tab == HOST_MENU_TAB_EQUIP ||
+		       g_tab == HOST_MENU_TAB_SKILL)) ||
+		     (g_layer == HOST_MENU_LAYER_EQUIP &&
+		      g_tab == HOST_MENU_TAB_EQUIP))) {
+			host_menu_move_party(1);
+			if (g_layer == HOST_MENU_LAYER_EQUIP)
+				host_menu_clamp_equip_sel();
+		} else if (down && !host_menu_layer_page()) {
 			if (g_layer == HOST_MENU_LAYER_INNER &&
 			    g_tab == HOST_MENU_TAB_ITEM)
 				host_menu_move_item(1);
@@ -3044,26 +3065,63 @@ static void host_menu_draw_left(SDL_Renderer *renderer, int logical_w,
 	SDL_Rect card;
 	SDL_Rect portrait;
 	SDL_Rect track;
-	int i;
-	int bar_y;
-	int cur[3];
-	int maxv[3];
-	char name[40];
-	char lvline[40];
-	char barline[32];
+	SDL_Texture *face;
 	const struct host_menu_actor *act;
 	const char *labs[3] = { "命", "灵", "体" };
 	const SDL_Color *ink[3] = { &g_ink_hp, &g_ink_mp, &g_ink_sp };
 	Uint8 br[3] = { 176, 48, 48 };
 	Uint8 bg[3] = { 48, 140, 64 };
 	Uint8 bb[3] = { 48, 96, 176 };
+	int members[HOST_MENU_PARTY_N];
+	int member_n;
+	int party;
+	int i;
+	int j;
+	int gap;
+	int available;
+	int card_h;
+	int bar_y;
+	int cur[3];
+	int maxv[3];
+	char name[40];
+	char lvline[40];
+	char barline[32];
 
-	act = host_menu_actor();
-	if (act && act->name[0])
-		snprintf(name, sizeof(name), "%s", act->name);
+	left.x = 0;
+	left.y = 0;
+	left.w = host_sx(HOST_MENU_SPLIT_X, logical_w);
+	left.h = logical_h;
+	if (g_tex_paper)
+		host_menu_blit(renderer, g_tex_paper, left);
 	else
-		snprintf(name, sizeof(name), "%s", "—");
-	if (act && act->used) {
+		host_menu_vgrad(renderer, left, 210, 190, 140, 168, 142, 88,
+				255);
+
+	member_n = 0;
+	for (i = 0; i < HOST_MENU_PARTY_N; i++) {
+		if (host_menu_in_team(i))
+			members[member_n++] = i;
+	}
+	if (member_n == 0) {
+		act = host_menu_actor();
+		if (act)
+			members[member_n++] = (int)(act - g_party);
+	}
+	gap = host_sy(6, logical_h);
+	available = logical_h - host_sy(16, logical_h) -
+		    (member_n > 0 ? (member_n - 1) * gap : 0);
+	card_h = member_n > 0 ? available / member_n :
+			       host_sy(196, logical_h);
+	if (card_h > host_sy(196, logical_h))
+		card_h = host_sy(196, logical_h);
+
+	for (j = 0; j < member_n; j++) {
+		party = members[j];
+		act = &g_party[party];
+		if (act->name[0])
+			snprintf(name, sizeof(name), "%s", act->name);
+		else
+			snprintf(name, sizeof(name), "%s", "—");
 		if (act->level_max > 0)
 			snprintf(lvline, sizeof(lvline), "%d 级 / %d",
 				 act->level, act->level_max);
@@ -3076,79 +3134,69 @@ static void host_menu_draw_left(SDL_Renderer *renderer, int logical_w,
 		maxv[0] = act->hp_max;
 		maxv[1] = act->mp_max;
 		maxv[2] = act->sp_max;
-	} else {
-		snprintf(lvline, sizeof(lvline), "%s", "— 级 / —");
-		cur[0] = cur[1] = cur[2] = 0;
-		maxv[0] = maxv[1] = maxv[2] = 0;
-	}
 
-	left.x = 0;
-	left.y = 0;
-	left.w = host_sx(HOST_MENU_SPLIT_X, logical_w);
-	left.h = logical_h;
-	if (g_tex_paper)
-		host_menu_blit(renderer, g_tex_paper, left);
-	else
-		host_menu_vgrad(renderer, left, 210, 190, 140, 168, 142, 88,
-				255);
+		card.x = host_sx(8, logical_w);
+		card.y = host_sy(8, logical_h) + j * (card_h + gap);
+		card.w = left.w - host_sx(16, logical_w);
+		card.h = card_h;
+		host_menu_frame(renderer, card, party == g_party_i ? 3 : 2,
+				party == g_party_i ? g_ink_gold.r : 196,
+				party == g_party_i ? g_ink_gold.g : 164,
+				party == g_party_i ? g_ink_gold.b : 72, 255);
 
-	card.x = host_sx(8, logical_w);
-	card.y = host_sy(10, logical_h);
-	card.w = left.w - host_sx(16, logical_w);
-	card.h = host_sy(196, logical_h);
-	host_menu_frame(renderer, card, 2, 196, 164, 72, 255);
-	if (g_layer == HOST_MENU_LAYER_PICK || g_layer == HOST_MENU_LAYER_EQUIP ||
-	    (g_layer == HOST_MENU_LAYER_INNER &&
-	     g_tab == HOST_MENU_TAB_EQUIP))
-		host_menu_frame(renderer, card, 3, g_ink_gold.r, g_ink_gold.g,
-				g_ink_gold.b, 255);
-
-	portrait.x = card.x + host_sx(8, logical_w);
-	portrait.y = card.y + host_sy(10, logical_h);
-	portrait.w = host_sx(118, logical_w);
-	portrait.h = host_sy(140, logical_h);
-	host_menu_fill(renderer, portrait, 32, 22, 12, 255);
-	if (act) {
-		SDL_Texture *face;
-
-		face = host_menu_face_tex(renderer, (int)(act - g_party));
+		portrait.x = card.x + host_sx(8, logical_w);
+		portrait.y = card.y + host_sy(10, logical_h);
+		portrait.w = card.h >= host_sy(190, logical_h) ?
+				     host_sx(118, logical_w) :
+				     host_sx(96, logical_w);
+		portrait.h = card.h - host_sy(20, logical_h);
+		if (portrait.h > host_sy(140, logical_h))
+			portrait.h = host_sy(140, logical_h);
+		host_menu_fill(renderer, portrait, 32, 22, 12, 255);
+		face = host_menu_face_tex(renderer, party);
 		if (face)
 			host_menu_blit_contain(renderer, face, portrait);
-	}
-	host_menu_frame(renderer, portrait, 2, 196, 164, 72, 255);
+		host_menu_frame(renderer, portrait, 2, 196, 164, 72, 255);
 
-	host_menu_text_left(renderer, name,
-			    portrait.x + portrait.w + host_sx(10, logical_w),
-			    portrait.y + host_sy(6, logical_h), pt,
-			    g_ink_paper);
-	host_menu_text_left(renderer, lvline,
-			    portrait.x + portrait.w + host_sx(10, logical_w),
-			    portrait.y + host_sy(34, logical_h), pt_small,
-			    g_ink_paper);
+		host_menu_text_left(
+			renderer, name,
+			portrait.x + portrait.w + host_sx(10, logical_w),
+			portrait.y + host_sy(6, logical_h), pt, g_ink_paper);
+		host_menu_text_left(
+			renderer, lvline,
+			portrait.x + portrait.w + host_sx(10, logical_w),
+			portrait.y + host_sy(34, logical_h), pt_small,
+			g_ink_paper);
 
-	bar_y = portrait.y + host_sy(68, logical_h);
-	for (i = 0; i < 3; i++) {
-		host_menu_text_left(renderer, labs[i],
-				    portrait.x + portrait.w +
-					    host_sx(8, logical_w),
-				    bar_y + i * host_sy(24, logical_h),
-				    pt_small, *ink[i]);
-		track.x = portrait.x + portrait.w + host_sx(32, logical_w);
-		track.y = bar_y + i * host_sy(24, logical_h) + 2;
-		track.w = card.x + card.w - track.x - host_sx(8, logical_w);
-		track.h = host_sy(16, logical_h);
-		if (track.w < 8)
-			continue;
-		host_menu_bar(renderer, track, br[i], bg[i], bb[i], cur[i],
-			      maxv[i]);
-		if (maxv[i] > 0)
-			snprintf(barline, sizeof(barline), "%d / %d", cur[i],
-				 maxv[i]);
-		else
-			snprintf(barline, sizeof(barline), "%s", "— / —");
-		host_menu_text_left(renderer, barline,
-				    track.x + host_sx(4, logical_w),
-				    track.y - 1, pt_small, g_ink_title);
+		bar_y = portrait.y + host_sy(68, logical_h);
+		for (i = 0; i < 3; i++) {
+			host_menu_text_left(
+				renderer, labs[i],
+				portrait.x + portrait.w +
+					host_sx(8, logical_w),
+				bar_y + i * host_sy(24, logical_h), pt_small,
+				*ink[i]);
+			track.x = portrait.x + portrait.w +
+				  host_sx(32, logical_w);
+			track.y = bar_y + i * host_sy(24, logical_h) + 2;
+			track.w = card.x + card.w - track.x -
+				  host_sx(8, logical_w);
+			track.h = host_sy(16, logical_h);
+			if (track.w < 8)
+				continue;
+			host_menu_bar(renderer, track, br[i], bg[i], bb[i],
+				      cur[i], maxv[i]);
+			if (maxv[i] > 0)
+				snprintf(barline, sizeof(barline), "%d / %d",
+					 cur[i], maxv[i]);
+			else
+				snprintf(barline, sizeof(barline), "%s",
+					 "— / —");
+			host_menu_text_left(renderer, barline,
+					    track.x + host_sx(4, logical_w),
+					    track.y - 1, pt_small,
+					    g_ink_title);
+		}
 	}
 }
 
@@ -3479,7 +3527,7 @@ static void host_menu_draw_equip(SDL_Renderer *renderer, int logical_w,
 					      well.y + well.h -
 						      host_sy(40, logical_h),
 					      pt_small, g_ink_gold);
-		host_menu_text_center(renderer, "左右换人  A 更换",
+		host_menu_text_center(renderer, "L1/R1 换人  A 更换",
 				      well.x + well.w / 2,
 				      well.y + well.h - host_sy(18, logical_h),
 				      pt_small, g_ink_hint);
@@ -3563,6 +3611,11 @@ static void host_menu_draw_skill(SDL_Renderer *renderer, int logical_w,
 					    desc.w / 2,
 				    desc.y + host_sy(8, logical_h), pt_small,
 				    g_ink_hint);
+		host_menu_text_center(renderer, "L1/R1 切换人物",
+				      desc.x + desc.w / 2,
+				      desc.y + desc.h -
+					      host_sy(18, logical_h),
+				      pt_small, g_ink_hint);
 	}
 }
 
@@ -4187,7 +4240,7 @@ static void host_menu_draw_equip_pick(SDL_Renderer *renderer, SDL_Rect well,
 		host_menu_text_left(renderer, it->help, cmp.x,
 				    y + host_sy(8, logical_h), pt_small,
 				    g_ink_hint);
-	host_menu_text_center(renderer, "上下选择  左右换人  A 装备  B 取消",
+	host_menu_text_center(renderer, "上下选择  L1/R1 换人  A 装备  B 取消",
 			      well.x + well.w / 2,
 			      well.y + well.h - host_sy(22, logical_h),
 			      pt_small, g_ink_hint);
