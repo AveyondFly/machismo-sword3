@@ -474,18 +474,10 @@ static void cheat_cal_level_hook(void)
 	g_cal_level_orig();
 }
 
-void host_cheat_before_result_skip(void)
-{
-	if (!g_lvup || g_lvup_applied || !g_cal_level_orig)
-		return;
-	cheat_cal_level_hook();
-}
-
 /*
- * A-skip writes the victory click slot and can leave the 150-frame
- * timer / gate set. The next fight reuses NowMenu 100 for auto, so
- * leftover skip state jumps straight to confirm and never shows
- * settlement. Clear on fight end and again at LoadBattle.
+ * Result and touch state can survive the battle transition. The next fight
+ * reuses NowMenu 100 for auto, so clear timer/gate/click state on fight end
+ * and again at LoadBattle.
  */
 static void cheat_clear_result_latch(void)
 {

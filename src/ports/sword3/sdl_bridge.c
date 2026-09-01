@@ -438,7 +438,7 @@ static void owner_drop(enum sword3_sdl_kind kind, void *pointer)
 #define GUEST_FIGHT_DOWN 0x10003f28cull
 #define GUEST_FIGHT_LEFT 0x10003dff8ull
 #define GUEST_FIGHT_CANCEL 0x10003f3ecull
-#define GUEST_CLICK_SLOT 0x2d8u
+#define GUEST_BATTLE_UPDATE 0x100040c54ull
 #define GUEST_RESULT_TIMER 0x1002f1f64ull
 #define GUEST_RESULT_GATE 0x1002f3f98ull
 #define FIGHT_NOW_TURN 99
@@ -4766,31 +4766,11 @@ static int fight_confirm_command(void)
 	return 1;
 }
 
-/*
- * Victory wait (NowMenu 100+) looks at click slot 0x2d8 / a 150-frame
- * timer, then the game itself calls confirm. Do not call that confirm
- * from the host: from the wrong NowMenu it zeros the menu and skips
- * CalLevel, which is 战后升级.
- */
-static void fight_skip_result(void)
+static void fight_confirm_result(void)
 {
-	uint8_t *pad;
-	uint8_t *slot;
-	void (*transition)(void *, void *, int);
-
-	host_cheat_before_result_skip();
-	if (guest_data_ok(GUEST_UIGAMEPAD)) {
-		pad = (uint8_t *)(uintptr_t)GUEST_UIGAMEPAD;
-		slot = pad + GUEST_CLICK_SLOT;
-		*(volatile int *)(pad + GUEST_INPUT_MODE) = GUEST_INPUT_MOUSE;
-		transition = (void (*)(void *, void *, int))(uintptr_t)
-			GUEST_INPUT_TRANSITION;
-		if (slot[0] != 1)
-			transition(pad, slot, 1);
-		transition(pad, slot, 0);
-		*(volatile int *)(pad + GUEST_INPUT_MODE) =
-			GUEST_INPUT_CONTROLLER;
-	}
+	if (guest_data_ok(GUEST_RESULT_TIMER))
+		*(volatile int *)(uintptr_t)GUEST_RESULT_TIMER = INT_MAX;
+	((void (*)(void))(uintptr_t)GUEST_BATTLE_UPDATE)();
 }
 
 static void host_menu_run_pending(void)
@@ -5386,7 +5366,7 @@ static int rewrite_event(SDL_Event *event)
 			}
 			if (fight_result_now(guest_now_menu())) {
 				if (down) {
-					fight_skip_result();
+					fight_confirm_result();
 					g_fight_target_a_up = 1;
 					if (g_fight_key_seen++ < 48)
 						fprintf(stderr,
@@ -5405,7 +5385,7 @@ static int rewrite_event(SDL_Event *event)
 		}
 		if (fight_result_now(guest_now_menu())) {
 			if (down) {
-				fight_skip_result();
+				fight_confirm_result();
 				g_fight_target_a_up = 1;
 				if (g_fight_key_seen++ < 48)
 					fprintf(stderr,
