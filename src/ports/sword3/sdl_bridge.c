@@ -367,6 +367,7 @@ static void owner_drop(enum sword3_sdl_kind kind, void *pointer)
 #define GUEST_CAPTION_NEXT 0x118
 #define GUEST_CAPTION_SKIP 0x128
 #define GUEST_CAPTION_BTN_NEXT 0x18
+#define GUEST_CAPTION_BTN_MAX 10
 #define GUEST_FIELD_HUD 0x100318980ull
 #define GUEST_FIELD_HUD_MASTER 0x328
 #define GUEST_FIELD_MARKER 0x138
@@ -503,6 +504,9 @@ static int g_menu_session;
 static int g_menu_open_pending;
 static int g_menu_open_from_field;
 static Uint32 g_menu_open_until;
+static int g_menu_tab_click_pending;
+static int g_menu_tab_click_target;
+static Uint32 g_menu_tab_click_until;
 static int g_host_menu_handoff;
 static int g_host_menu_target;
 static Uint32 g_host_menu_handoff_until;
@@ -1148,7 +1152,7 @@ static void clear_input_slot(uint8_t *slot)
 	slot[8] = 0;
 }
 
-static void clear_released_guest_clicks(void)
+static int clear_released_guest_clicks(void)
 {
 	uint8_t *pad;
 	uint8_t *slot;
@@ -1156,7 +1160,7 @@ static void clear_released_guest_clicks(void)
 	int i;
 
 	if (!guest_data_ok(GUEST_UIGAMEPAD))
-		return;
+		return 0;
 	pad = (uint8_t *)(uintptr_t)GUEST_UIGAMEPAD;
 	for (i = 0; i < GUEST_CLICK_N; i++) {
 		slot = pad + GUEST_CLICK_SLOT + i * GUEST_CLICK_STRIDE;
@@ -1168,6 +1172,7 @@ static void clear_released_guest_clicks(void)
 	if (cleared)
 		*(volatile int *)(pad + GUEST_INPUT_MODE) =
 			GUEST_INPUT_KEYBOARD;
+	return cleared;
 }
 
 static void release_guest_walk(void)
@@ -2410,7 +2415,7 @@ static uintptr_t caption_choice_widget(int *count)
 		n = 0;
 		for (button = *(volatile uintptr_t *)(widget +
 						     GUEST_CAPTION_BTNS);
-		     button && n < 8; n++) {
+		     button && n < GUEST_CAPTION_BTN_MAX; n++) {
 			if (!guest_heap_ok(button,
 					   GUEST_CAPTION_BTN_NEXT + 8))
 				break;
@@ -3489,6 +3494,9 @@ static int menu_activate_tab(void)
 				 &touch_x);
 	push_finger_at(touch_x, 0.058f, SDL_FINGERDOWN);
 	push_finger_at(touch_x, 0.058f, SDL_FINGERUP);
+	g_menu_tab_click_pending = 1;
+	g_menu_tab_click_target = 11 + index;
+	g_menu_tab_click_until = SDL_GetTicks() + MENU_OPEN_WAIT_MS;
 	fprintf(stderr, "sword3-sdl: menu tab activate=%d touch=%.3f,0.058\n",
 		index, (double)touch_x);
 	return 1;
@@ -4028,6 +4036,7 @@ static void menu_enter_session(void)
 	g_menu_ui = 1;
 	g_menu_open_pending = 0;
 	g_menu_open_from_field = 0;
+	clear_released_guest_clicks();
 	menu_reset_input_focus();
 	fprintf(stderr, "sword3-sdl: menu session start\n");
 }
@@ -4054,6 +4063,7 @@ static void menu_leave_session(void)
 	g_field_mode_held = 0;
 	g_menu_captured_a = 0;
 	g_menu_captured_b = 0;
+	g_menu_tab_click_pending = 0;
 	sword3_native_menu_input_reset(&g_native_menu_input,
 					menu_native_tab_count(), 0);
 	menu_release_directions();
@@ -4075,6 +4085,7 @@ static void menu_begin_open(int button)
 	g_menu_gone_at = 0;
 	g_menu_captured_a = 0;
 	g_menu_captured_b = 0;
+	g_menu_tab_click_pending = 0;
 	sword3_native_menu_input_reset(&g_native_menu_input,
 					menu_native_tab_count(), 0);
 	g_menu_logged_postopen = 0;
@@ -4145,6 +4156,18 @@ static void menu_poll_open_pulse(void)
 	menu_reconcile_status_focus();
 	menu_reconcile_refining_focus();
 	menu_reconcile_book_focus();
+	if (g_menu_tab_click_pending) {
+		if (guest_read_i32(GUEST_MENU_SELECTION, -1) ==
+			    g_menu_tab_click_target &&
+		    guest_read_i32(GUEST_SYS_LAYER, 0) >= 2 &&
+		    clear_released_guest_clicks()) {
+			g_menu_tab_click_pending = 0;
+			fprintf(stderr,
+				"sword3-sdl: menu tab click residue cleared\n");
+		} else if (SDL_TICKS_PASSED(now, g_menu_tab_click_until)) {
+			g_menu_tab_click_pending = 0;
+		}
+	}
 }
 
 static int menu_field_button_rect(int *x, int *y, int *w, int *h)
