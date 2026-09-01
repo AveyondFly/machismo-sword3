@@ -65,7 +65,6 @@
 #define HOST_MENU_SKEXP 0x1002ab358ull
 #define HOST_MENU_SKEXP_STRIDE 0x60
 #define HOST_MENU_ITEM_NODE 0x130
-#define HOST_MENU_BAG_N 48
 #define HOST_MENU_SKILL_N 32
 #define HOST_MENU_EQUIP_N 11
 #define HOST_MENU_EQUIP_STRIDE 16
@@ -81,6 +80,7 @@
 #define HOST_MENU_ITEM_APPLY 0x100081130ull
 #define HOST_MENU_ITEM_DTOR 0x1000817b0ull
 #define HOST_MENU_ITEM_FREE 0x10023f7ccull
+#define HOST_MENU_ITEM_SORT 0x100080f34ull
 #define HOST_MENU_ITEM_SOUND 0x1001c076cull
 #define HOST_MENU_LUA_HAS 0x1001c7088ull
 #define HOST_MENU_LUA_INT 0x1001c6f70ull
@@ -112,9 +112,6 @@
 #define HOST_MENU_WIDGET_BITS 0x10030f500ull
 #define HOST_MENU_W_PARTY0 0x1e
 #define HOST_MENU_EQUIP_SWAP 0x100080f64ull
-#define HOST_MENU_NEW_EQUIP 0x100082e38ull
-#define HOST_MENU_LOAD_ITEM 0x100081548ull
-#define HOST_MENU_ITEM_CLASS 0x1002f40c8ull
 #define HOST_MENU_STR_ADDATK 0x100272b10ull
 #define HOST_MENU_STR_ADDDEF 0x100272b17ull
 #define HOST_MENU_STR_ADDSPD 0x100272b1eull
@@ -231,7 +228,8 @@ struct host_menu_item_meta {
 };
 
 static struct host_menu_actor g_party[HOST_MENU_PARTY_N];
-static struct host_menu_item g_bag[HOST_MENU_BAG_N];
+static struct host_menu_item *g_bag;
+static int g_bag_cap;
 static struct host_menu_item g_equip[HOST_MENU_EQUIP_N];
 static struct host_menu_item g_skills[HOST_MENU_SKILL_N];
 static struct host_menu_item_meta g_item_meta[HOST_MENU_ITEM_META_N];
@@ -386,6 +384,10 @@ void host_menu_close(void)
 	g_slot_focus = 0;
 	g_bestiary_n = 0;
 	g_bestiary_sel = 0;
+	free(g_bag);
+	g_bag = NULL;
+	g_bag_n = 0;
+	g_bag_cap = 0;
 	g_act_node = 0;
 	g_act_flags = 0;
 	g_act_from_new = 0;
@@ -425,7 +427,9 @@ void host_menu_open(void)
 	g_bestiary_n = 0;
 	g_bestiary_sel = 0;
 	memset(g_party, 0, sizeof(g_party));
-	memset(g_bag, 0, sizeof(g_bag));
+	free(g_bag);
+	g_bag = NULL;
+	g_bag_cap = 0;
 	memset(g_equip, 0, sizeof(g_equip));
 	memset(g_skills, 0, sizeof(g_skills));
 	memset(g_dir_down, 0, sizeof(g_dir_down));
@@ -789,7 +793,7 @@ static int host_menu_walk_list(struct host_menu_item *dst, int max,
 	int guard = 0;
 	int i;
 	uintptr_t node;
-	uintptr_t seen[HOST_MENU_BAG_N];
+	uintptr_t seen[HOST_MENU_SKILL_N];
 
 	node = head;
 	while (node && n < max && guard < max + 8) {
@@ -798,12 +802,68 @@ static int host_menu_walk_list(struct host_menu_item *dst, int max,
 			if (seen[i] == node)
 				return n;
 		}
-		if (seen_n < HOST_MENU_BAG_N)
+		if (seen_n < HOST_MENU_SKILL_N)
 			seen[seen_n++] = node;
 		if (host_menu_load_item(&dst[n], node))
 			n++;
 		node = host_menu_mem_ptr(node + HOST_MENU_OFF_NEXT);
 	}
+	return n;
+}
+
+static int host_menu_refresh_bag(uintptr_t head)
+{
+	struct host_menu_item *items;
+	uintptr_t *seen;
+	uintptr_t node;
+	uintptr_t next;
+	int cap;
+	int i;
+	int n;
+
+	seen = NULL;
+	cap = 0;
+	n = 0;
+	node = head;
+	while (node) {
+		if (!host_menu_heap_ok(node, HOST_MENU_ITEM_NODE))
+			break;
+		for (i = 0; i < n; i++) {
+			if (seen[i] == node) {
+				free(seen);
+				return n;
+			}
+		}
+		if (n == cap) {
+			int new_cap = cap > 0 ? cap * 2 : 32;
+			uintptr_t *grown;
+
+			grown = realloc(seen,
+					(size_t)new_cap * sizeof(*seen));
+			if (!grown)
+				break;
+			seen = grown;
+			cap = new_cap;
+		}
+		if (n == g_bag_cap) {
+			int new_cap = g_bag_cap > 0 ? g_bag_cap * 2 : 32;
+
+			items = realloc(g_bag,
+					(size_t)new_cap * sizeof(*g_bag));
+			if (!items)
+				break;
+			g_bag = items;
+			g_bag_cap = new_cap;
+		}
+		seen[n] = node;
+		if (host_menu_load_item(&g_bag[n], node))
+			n++;
+		else
+			break;
+		next = host_menu_mem_ptr(node + HOST_MENU_OFF_NEXT);
+		node = next;
+	}
+	free(seen);
 	return n;
 }
 
@@ -816,7 +876,6 @@ static void host_menu_refresh_inv(void)
 	uintptr_t node;
 	struct host_menu_actor *a;
 
-	memset(g_bag, 0, sizeof(g_bag));
 	memset(g_equip, 0, sizeof(g_equip));
 	memset(g_skills, 0, sizeof(g_skills));
 	g_bag_n = 0;
@@ -824,7 +883,7 @@ static void host_menu_refresh_inv(void)
 	if (host_menu_guest_ok(HOST_MENU_ITEM_REPO + HOST_MENU_OFF_NEXT, 8)) {
 		head = host_menu_guest_ptr(HOST_MENU_ITEM_REPO +
 					  HOST_MENU_OFF_NEXT);
-		g_bag_n = host_menu_walk_list(g_bag, HOST_MENU_BAG_N, head);
+		g_bag_n = host_menu_refresh_bag(head);
 	}
 	if (host_menu_guest_ok(HOST_MENU_EQUIP_REPO,
 			       (size_t)HOST_MENU_EQUIP_STRIDE * 8 *
@@ -894,28 +953,40 @@ static int host_menu_item_in_cat(const struct host_menu_item *it, int cat)
 	return (flags & special) == 0;
 }
 
-static int host_menu_item_view(int *out, int max)
+static int host_menu_item_view_count(void)
 {
 	int i;
 	int n = 0;
 
-	if (!out || max <= 0)
-		return 0;
-	for (i = 0; i < g_bag_n && n < max; i++) {
+	for (i = 0; i < g_bag_n; i++) {
 		if (host_menu_item_in_cat(&g_bag[i], g_item_cat))
-			out[n++] = i;
+			n++;
 	}
 	return n;
 }
 
+static struct host_menu_item *host_menu_item_view_at(int at)
+{
+	int i;
+
+	if (at < 0)
+		return NULL;
+	for (i = 0; i < g_bag_n; i++) {
+		if (!host_menu_item_in_cat(&g_bag[i], g_item_cat))
+			continue;
+		if (at-- == 0)
+			return &g_bag[i];
+	}
+	return NULL;
+}
+
 static void host_menu_clamp_item_sel(void)
 {
-	int view[HOST_MENU_BAG_N];
 	int n;
 
 	if (g_item_cat < 0 || g_item_cat >= HOST_MENU_ITEM_CAT)
 		g_item_cat = 0;
-	n = host_menu_item_view(view, HOST_MENU_BAG_N);
+	n = host_menu_item_view_count();
 	if (n <= 0)
 		g_item_sel = 0;
 	else if (g_item_sel >= n)
@@ -926,14 +997,13 @@ static void host_menu_clamp_item_sel(void)
 
 static struct host_menu_item *host_menu_item_current(void)
 {
-	int view[HOST_MENU_BAG_N];
 	int n;
 
 	host_menu_clamp_item_sel();
-	n = host_menu_item_view(view, HOST_MENU_BAG_N);
+	n = host_menu_item_view_count();
 	if (n <= 0 || g_item_sel < 0 || g_item_sel >= n)
 		return NULL;
-	return &g_bag[view[g_item_sel]];
+	return host_menu_item_view_at(g_item_sel);
 }
 
 static int host_menu_item_usable(const struct host_menu_item *it)
@@ -1156,7 +1226,7 @@ static void host_menu_item_unlink(uintptr_t target)
 		return;
 	prev = HOST_MENU_ITEM_REPO;
 	node = host_menu_guest_ptr(prev + HOST_MENU_OFF_NEXT);
-	while (node && guard < HOST_MENU_BAG_N + 8) {
+	while (node && guard <= g_bag_n) {
 		guard++;
 		next = host_menu_mem_ptr(node + HOST_MENU_OFF_NEXT);
 		if (node == target) {
@@ -1339,26 +1409,38 @@ static int host_menu_item_fits_slot(const struct host_menu_item *it, int slot)
 	return allow != 0 && ((unsigned)it->place & allow) != 0;
 }
 
-static int host_menu_equip_view(int *out, int max)
+static int host_menu_equip_view_count(void)
 {
 	int i;
 	int n = 0;
 
-	if (!out || max <= 0)
-		return 0;
-	for (i = 0; i < g_bag_n && n < max; i++) {
+	for (i = 0; i < g_bag_n; i++) {
 		if (host_menu_item_fits_slot(&g_bag[i], g_equip_focus))
-			out[n++] = i;
+			n++;
 	}
 	return n;
 }
 
+static struct host_menu_item *host_menu_equip_view_at(int at)
+{
+	int i;
+
+	if (at < 0)
+		return NULL;
+	for (i = 0; i < g_bag_n; i++) {
+		if (!host_menu_item_fits_slot(&g_bag[i], g_equip_focus))
+			continue;
+		if (at-- == 0)
+			return &g_bag[i];
+	}
+	return NULL;
+}
+
 static void host_menu_clamp_equip_sel(void)
 {
-	int view[HOST_MENU_BAG_N];
 	int n;
 
-	n = host_menu_equip_view(view, HOST_MENU_BAG_N);
+	n = host_menu_equip_view_count();
 	if (n <= 0)
 		g_equip_sel = 0;
 	else if (g_equip_sel >= n)
@@ -1367,14 +1449,13 @@ static void host_menu_clamp_equip_sel(void)
 
 static struct host_menu_item *host_menu_equip_current(void)
 {
-	int view[HOST_MENU_BAG_N];
 	int n;
 
 	host_menu_clamp_equip_sel();
-	n = host_menu_equip_view(view, HOST_MENU_BAG_N);
+	n = host_menu_equip_view_count();
 	if (n <= 0 || g_equip_sel < 0 || g_equip_sel >= n)
 		return NULL;
-	return &g_bag[view[g_equip_sel]];
+	return host_menu_equip_view_at(g_equip_sel);
 }
 
 static int host_menu_item_add(int temp, uintptr_t field)
@@ -1384,10 +1465,9 @@ static int host_menu_item_add(int temp, uintptr_t field)
 
 static void host_menu_move_equip_sel(int delta)
 {
-	int view[HOST_MENU_BAG_N];
 	int n;
 
-	n = host_menu_equip_view(view, HOST_MENU_BAG_N);
+	n = host_menu_equip_view_count();
 	if (n <= 0)
 		return;
 	g_equip_sel = (g_equip_sel + delta % n + n) % n;
@@ -1395,7 +1475,6 @@ static void host_menu_move_equip_sel(int delta)
 
 static void host_menu_equip_open(void)
 {
-	int view[HOST_MENU_BAG_N];
 	int n;
 
 	g_item_note[0] = 0;
@@ -1404,7 +1483,7 @@ static void host_menu_equip_open(void)
 		host_menu_item_say("无法装备", 0x8c);
 		return;
 	}
-	n = host_menu_equip_view(view, HOST_MENU_BAG_N);
+	n = host_menu_equip_view_count();
 	g_equip_sel = 0;
 	if (n <= 0) {
 		host_menu_item_say("没有可装备的物品", 0x8c);
@@ -1422,12 +1501,33 @@ static int host_menu_equip_node_temp(uintptr_t node)
 	return host_menu_mem_i32(node + HOST_MENU_OFF_TEMP);
 }
 
+static void host_menu_equip_delta(uintptr_t node, int out[3])
+{
+	int scratch[HOST_MENU_PARTY_STRIDE / sizeof(int)];
+
+	out[0] = 0;
+	out[1] = 0;
+	out[2] = 0;
+	if (host_menu_equip_node_temp(node) < 1)
+		return;
+	memset(scratch, 0, sizeof(scratch));
+	((void (*)(void *, void *))(uintptr_t)HOST_MENU_ITEM_APPLY)(
+		scratch, (void *)(uintptr_t)(node + HOST_MENU_OFF_INAME));
+	out[0] = scratch[HOST_MENU_OFF_HPMAX / sizeof(int)];
+	out[1] = scratch[HOST_MENU_OFF_MPMAX / sizeof(int)];
+	out[2] = scratch[HOST_MENU_OFF_SPMAX / sizeof(int)];
+}
+
 static int host_menu_equip_swap(uintptr_t bag_node, int slot)
 {
 	uintptr_t rec;
+	uintptr_t party;
 	uintptr_t worn;
+	int old_delta[3];
+	int new_delta[3];
 	int temp;
-	int empty;
+	int result;
+	int i;
 
 	if (!bag_node || !host_menu_heap_ok(bag_node, HOST_MENU_ITEM_NODE))
 		return 0;
@@ -1444,39 +1544,26 @@ static int host_menu_equip_swap(uintptr_t bag_node, int slot)
 	temp = host_menu_equip_node_temp(bag_node);
 	if (temp < 1)
 		return 0;
-	empty = host_menu_equip_node_temp(worn) < 1;
-	if (empty)
-		((int (*)(void *, int, int, int))(uintptr_t)HOST_MENU_NEW_EQUIP)(
-			(void *)(uintptr_t)HOST_MENU_ITEM_CLASS, temp,
-			g_party_i + 1, slot + 1);
-	else
-		((int (*)(void *, void *, int, int))(uintptr_t)
-			 HOST_MENU_EQUIP_SWAP)(
-			(void *)(uintptr_t)worn, (void *)(uintptr_t)bag_node,
-			g_party_i + 1, slot + 1);
-	worn = host_menu_guest_ptr(rec);
-	if (worn && host_menu_equip_node_temp(worn) != temp)
-		((void (*)(void *, int))(uintptr_t)HOST_MENU_LOAD_ITEM)(
-			(void *)(uintptr_t)worn, temp);
-	if (empty) {
-		uintptr_t party;
+	host_menu_equip_delta(worn, old_delta);
+	host_menu_equip_delta(bag_node, new_delta);
+	result = ((int (*)(void *, void *, int, int))(uintptr_t)
+			  HOST_MENU_EQUIP_SWAP)(
+		(void *)(uintptr_t)worn, (void *)(uintptr_t)bag_node,
+		g_party_i + 1, slot + 1);
+	if (!result ||
+	    host_menu_equip_node_temp(host_menu_guest_ptr(rec)) != temp)
+		return 0;
+	party = HOST_MENU_PARTY +
+		(uintptr_t)g_party_i * HOST_MENU_PARTY_STRIDE;
+	for (i = 0; i < 3; i++) {
+		uintptr_t field = party + HOST_MENU_OFF_HPMAX +
+				  (uintptr_t)i * sizeof(int);
+		int value = host_menu_guest_i32(field);
 
-		party = HOST_MENU_PARTY +
-			(uintptr_t)g_party_i * HOST_MENU_PARTY_STRIDE;
-		if (host_menu_guest_ok(party, HOST_MENU_PARTY_STRIDE))
-			((void (*)(void *, void *))(uintptr_t)
-				 HOST_MENU_ITEM_APPLY)(
-				(void *)(uintptr_t)party,
-				(void *)(uintptr_t)(bag_node +
-						    HOST_MENU_OFF_INAME));
+		host_menu_mem_set_i32(field,
+				      value - old_delta[i] + new_delta[i]);
 	}
-	if (empty && host_menu_equip_node_temp(bag_node) == temp &&
-	    host_menu_mem_i32(bag_node + HOST_MENU_OFF_COUNT) +
-			    host_menu_mem_i32(bag_node +
-					      HOST_MENU_OFF_COUNT_NEW) >
-		    0)
-		host_menu_item_consume(bag_node, 0);
-	return host_menu_equip_node_temp(host_menu_guest_ptr(rec)) == temp;
+	return 1;
 }
 
 static void host_menu_equip_commit(void)
@@ -1531,32 +1618,10 @@ static int host_menu_layer_page(void)
 
 static void host_menu_item_sort(void)
 {
-	uintptr_t node;
-	int count;
-	int count_new;
-	int n = 0;
-
-	if (!host_menu_guest_ok(HOST_MENU_ITEM_REPO + HOST_MENU_OFF_NEXT, 8))
-		return;
-	node = host_menu_guest_ptr(HOST_MENU_ITEM_REPO + HOST_MENU_OFF_NEXT);
-	while (node && n < HOST_MENU_BAG_N + 8) {
-		n++;
-		if (!host_menu_heap_ok(node, HOST_MENU_ITEM_NODE))
-			break;
-		count = host_menu_mem_i32(node + HOST_MENU_OFF_COUNT);
-		count_new = host_menu_mem_i32(node + HOST_MENU_OFF_COUNT_NEW);
-		if (count_new) {
-			if (count < 0)
-				count = 0;
-			host_menu_mem_set_i32(node + HOST_MENU_OFF_COUNT,
-					      count + count_new);
-			host_menu_mem_set_i32(node + HOST_MENU_OFF_COUNT_NEW,
-					      0);
-		}
-		node = host_menu_mem_ptr(node + HOST_MENU_OFF_NEXT);
-	}
+	((void (*)(void))(uintptr_t)HOST_MENU_ITEM_SORT)();
+	host_menu_refresh_inv();
 	host_menu_item_say("整理完成", 0x2d);
-	fprintf(stderr, "sword3-sdl: item sort\n");
+	fprintf(stderr, "sword3-sdl: native item repository sort\n");
 }
 
 static void host_menu_item_use(struct host_menu_item *it)
@@ -1782,10 +1847,9 @@ static void host_menu_move_item_cat(int delta)
 
 static void host_menu_move_item_sel(int delta)
 {
-	int view[HOST_MENU_BAG_N];
 	int n;
 
-	n = host_menu_item_view(view, HOST_MENU_BAG_N);
+	n = host_menu_item_view_count();
 	if (n <= 0)
 		return;
 	g_item_sel = (g_item_sel + delta % n + n) % n;
@@ -3429,16 +3493,14 @@ static void host_menu_draw_items(SDL_Renderer *renderer, int logical_w,
 	int rows;
 	int view_n;
 	int start;
-	int idx;
 	int count;
-	int view[HOST_MENU_BAG_N];
 	char line[48];
 	const SDL_Color *ink;
 	const struct host_menu_item *it;
 	const struct host_menu_item *sel;
 
 	host_menu_clamp_item_sel();
-	view_n = host_menu_item_view(view, HOST_MENU_BAG_N);
+	view_n = host_menu_item_view_count();
 	for (i = 0; i < HOST_MENU_ITEM_ACT; i++) {
 		row.x = host_sx(g_item_act_nx[i], logical_w);
 		row.y = host_sy(HOST_MENU_ITEM_ACT_NY, logical_h);
@@ -3484,7 +3546,7 @@ static void host_menu_draw_items(SDL_Renderer *renderer, int logical_w,
 	host_menu_well(renderer, well);
 	sel = NULL;
 	if (view_n > 0 && g_item_sel >= 0 && g_item_sel < view_n)
-		sel = &g_bag[view[g_item_sel]];
+		sel = host_menu_item_view_at(g_item_sel);
 	desc = well;
 	if ((g_item_note[0] || (sel && (sel->help[0] || sel->info[0]))) &&
 	    well.h > host_sy(56, logical_h)) {
@@ -3523,8 +3585,9 @@ static void host_menu_draw_items(SDL_Renderer *renderer, int logical_w,
 		start = view_n - rows;
 	host_menu_scroll(renderer, well, start, rows, view_n);
 	for (i = 0; i < rows; i++) {
-		idx = view[start + i];
-		it = &g_bag[idx];
+		it = host_menu_item_view_at(start + i);
+		if (!it)
+			continue;
 		count = (g_item_cat == 0) ? it->count_new : it->count;
 		if (count > 1)
 			snprintf(line, sizeof(line), "%s  x%d",
@@ -4223,7 +4286,6 @@ static void host_menu_draw_equip_pick(SDL_Renderer *renderer, SDL_Rect well,
 	SDL_Rect old_clip;
 	SDL_bool had_clip;
 	char line[96];
-	int view[HOST_MENU_BAG_N];
 	int n;
 	int i;
 	int rh;
@@ -4241,7 +4303,7 @@ static void host_menu_draw_equip_pick(SDL_Renderer *renderer, SDL_Rect well,
 	const struct host_menu_item *it;
 	const SDL_Color *ink;
 
-	n = host_menu_equip_view(view, HOST_MENU_BAG_N);
+	n = host_menu_equip_view_count();
 	host_menu_clamp_equip_sel();
 	list = well;
 	list.h = well.h * 3 / 5;
@@ -4281,7 +4343,9 @@ static void host_menu_draw_equip_pick(SDL_Renderer *renderer, SDL_Rect well,
 	if (n > 0)
 		host_menu_scroll(renderer, hit, start, rows, n);
 	for (i = 0; i < rows; i++) {
-		it = &g_bag[view[start + i]];
+		it = host_menu_equip_view_at(start + i);
+		if (!it)
+			continue;
 		on = g_layer == HOST_MENU_LAYER_EQUIP &&
 		     g_equip_sel == start + i;
 		hit.x = list.x;
@@ -4310,7 +4374,7 @@ static void host_menu_draw_equip_pick(SDL_Renderer *renderer, SDL_Rect well,
 
 	worn = &g_equip[g_equip_focus];
 	worn_temp = worn->used && worn->temp > 0 ? worn->temp : 0;
-	it = n > 0 ? &g_bag[view[g_equip_sel]] : NULL;
+	it = n > 0 ? host_menu_equip_view_at(g_equip_sel) : NULL;
 	cand_temp = it ? it->temp : 0;
 	SDL_RenderSetClipRect(renderer, &cmp);
 	host_menu_text_left(renderer,
