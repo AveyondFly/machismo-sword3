@@ -439,8 +439,13 @@ static void owner_drop(enum sword3_sdl_kind kind, void *pointer)
 #define GUEST_FIGHT_LEFT 0x10003dff8ull
 #define GUEST_FIGHT_CANCEL 0x10003f3ecull
 #define GUEST_BATTLE_UPDATE 0x100040c54ull
+#define GUEST_CLICK_SLOT 0x2d8u
+#define GUEST_CLICK_STRIDE 0x18u
+#define GUEST_CLICK_N 3
 #define GUEST_RESULT_TIMER 0x1002f1f64ull
 #define GUEST_RESULT_GATE 0x1002f3f98ull
+#define GUEST_BATTLE_SPELL_CAT 0x1002f1f5cull
+#define FIGHT_NOW_MAGIC 2
 #define FIGHT_NOW_TURN 99
 #define FIGHT_NOW_AUTO 100
 #define FIGHT_NOW_RESULT0 96
@@ -3663,6 +3668,21 @@ static uint8_t *fight_command_widget(void)
 	return fight_command_widget_at(selection - 1);
 }
 
+static void fight_clear_guest_clicks(void)
+{
+	uint8_t *pad;
+	int i;
+
+	if (!guest_data_ok(GUEST_UIGAMEPAD))
+		return;
+	pad = (uint8_t *)(uintptr_t)GUEST_UIGAMEPAD;
+	for (i = 0; i < GUEST_CLICK_N; i++)
+		clear_input_slot(pad + GUEST_CLICK_SLOT +
+				 i * GUEST_CLICK_STRIDE);
+	*(volatile int *)(pad + GUEST_INPUT_MODE) =
+		GUEST_INPUT_KEYBOARD;
+}
+
 static int fight_move_command(int direction)
 {
 	uint8_t *current;
@@ -3734,6 +3754,38 @@ static int fight_move_command(int direction)
 		return 1;
 	*(volatile int *)(uintptr_t)GUEST_CMD_SEL = best_slot + 1;
 	((void (*)(int))(uintptr_t)GUEST_PLAY_SOUND)(0x2e);
+	return 1;
+}
+
+static int fight_move_magic(int direction)
+{
+	static const float category_x[3] = {
+		245.0f / (float)GAME_W,
+		287.0f / (float)GAME_W,
+		329.0f / (float)GAME_W,
+	};
+	int category;
+
+	if (guest_now_menu() != FIGHT_NOW_MAGIC ||
+	    direction < 0 || direction >= 4)
+		return 0;
+	fight_clear_guest_clicks();
+	if (direction == 0) {
+		((void (*)(void))(uintptr_t)GUEST_FIGHT_LEFT)();
+		return 1;
+	}
+	if (direction == 2) {
+		((void (*)(void))(uintptr_t)GUEST_FIGHT_RIGHT)();
+		return 1;
+	}
+	category = guest_read_i32(GUEST_BATTLE_SPELL_CAT, 0);
+	if (category < 0 || category >= 3)
+		category = 0;
+	category = (category + (direction == 1 ? 1 : 2)) % 3;
+	push_finger_at(category_x[category],
+		       133.0f / (float)GAME_H, SDL_FINGERDOWN);
+	push_finger_at(category_x[category],
+		       133.0f / (float)GAME_H, SDL_FINGERUP);
 	return 1;
 }
 
@@ -4608,6 +4660,8 @@ static void fight_direction_edge(int index)
 		return;
 	if (fight_move_command(index))
 		return;
+	if (fight_move_magic(index))
+		return;
 	if (guest_data_ok(GUEST_UIGAMEPAD))
 		*(volatile int *)(uintptr_t)
 			(GUEST_UIGAMEPAD + GUEST_INPUT_MODE) =
@@ -4764,6 +4818,14 @@ static int fight_confirm_command(void)
 		       (float)(y + h / 2) / (float)GAME_H,
 		       SDL_FINGERUP);
 	return 1;
+}
+
+static int fight_confirm_magic(void)
+{
+	if (!g_fight_ui || guest_now_menu() != FIGHT_NOW_MAGIC)
+		return 0;
+	fight_clear_guest_clicks();
+	return host_battle_confirm_entry();
 }
 
 static void fight_confirm_result(void)
@@ -5351,6 +5413,12 @@ static int rewrite_event(SDL_Event *event)
 		if (g_fight_ui) {
 			if (down && guest_now_menu() == 1) {
 				if (fight_confirm_command())
+					g_fight_target_a_up = 1;
+				event->type = SDL_FIRSTEVENT;
+				return 0;
+			}
+			if (down && guest_now_menu() == FIGHT_NOW_MAGIC) {
+				if (fight_confirm_magic())
 					g_fight_target_a_up = 1;
 				event->type = SDL_FIRSTEVENT;
 				return 0;

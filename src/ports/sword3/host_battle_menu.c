@@ -521,6 +521,14 @@ static void battle_native_ok_entry(void)
 	battle_set_u8(GUEST_OK_CLICK, 0);
 }
 
+int host_battle_confirm_entry(void)
+{
+	if (!battle_in_fight())
+		return 0;
+	battle_native_ok_entry();
+	return 1;
+}
+
 static uintptr_t battle_unit_ptr(int index)
 {
 	if (index < 0 || index >= BATTLE_ENEMY_ID)

@@ -21,6 +21,7 @@ void host_battle_poll(void);
 void host_battle_close(void);
 int host_battle_button(int button, int down);
 int host_battle_axis(Uint8 axis, Sint16 value);
+int host_battle_confirm_entry(void);
 int host_battle_flee(void);
 int host_battle_skip_blit(int x, int y, int w, int h);
 void host_battle_draw(SDL_Renderer *renderer, int logical_w, int logical_h);
