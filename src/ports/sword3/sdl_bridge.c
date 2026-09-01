@@ -255,6 +255,7 @@ static void owner_drop(enum sword3_sdl_kind kind, void *pointer)
 #define GUEST_INSTALLER 0x100023d8cull
 #define GUEST_FEX_RET 0x10005b87cull
 #define GUEST_FEX_FIELD 0x1000831a8ull
+#define GUEST_OPEN_NATIVE_MENU 0x10005bd38ull
 #define GUEST_FEX_SYSPAGE 0x10002d018ull
 #define GUEST_FEX_ITEM 0x10002fffcull
 #define GUEST_FEX_EQUIP 0x100034da8ull
@@ -320,8 +321,6 @@ static void owner_drop(enum sword3_sdl_kind kind, void *pointer)
 #define GUEST_SAVE_INDEX 0x1002a9ca4ull
 #define GUEST_LAYER_FIELD 0xea60
 #define GUEST_LAYER_WALK 1
-#define GUEST_DRAW_OBJ 0x10030f488ull
-#define GUEST_STORE_DRAW 0x1001ccb98ull
 #define MENU_TRACE_PATH "/tmp/sword3-menu-trace"
 #define MENU_TRACE_Q 32
 #define MENU_OPEN_WAIT_MS 900
@@ -342,6 +341,8 @@ static void owner_drop(enum sword3_sdl_kind kind, void *pointer)
 #define GUEST_OVERLAY_ENABLE 0x328
 #define GUEST_OVERLAY_HUD 0x330
 #define GUEST_MENU_BACK 0x2495
+#define GUEST_SHOP_BUY 0x2491
+#define GUEST_SHOP_SELL 0x2492
 #define GUEST_MENU_TAB0 0x2496
 #define GUEST_MENU_TAB1 0x2497
 #define GUEST_MENU_TAB2 0x2498
@@ -364,6 +365,11 @@ static void owner_drop(enum sword3_sdl_kind kind, void *pointer)
 #define GUEST_CAPTION_NEXT 0x118
 #define GUEST_CAPTION_SKIP 0x128
 #define GUEST_CAPTION_BTN_NEXT 0x18
+#define GUEST_FIELD_HUD 0x100318980ull
+#define GUEST_FIELD_HUD_MASTER 0x328
+#define GUEST_FIELD_MARKER 0x138
+#define GUEST_FIELD_MARKER_TEXTURE 0x158
+#define GUEST_FIELD_MARKER_STATE 0x198
 #define GUEST_VIEW_ORIGIN 0x1c0
 #define GUEST_VIEW_SIZE 0x1c8
 #define GUEST_VIEW_SCALE 0x1c
@@ -470,13 +476,13 @@ static int g_menu_ui;
 static int g_menu_keys;
 static int g_menu_session;
 static int g_menu_open_pending;
+static int g_menu_open_from_field;
 static Uint32 g_menu_open_until;
 static int g_menu_seen_chrome;
 static Uint32 g_menu_gone_at;
 static Uint32 g_menu_back_until;
 static int g_menu_logged_postopen;
 static int g_menu_saw_draw;
-static int g_menu_open_direct;
 static Uint32 g_menu_reenter_until;
 static int g_menu_return_held;
 static Uint32 g_menu_return_up_at;
@@ -853,6 +859,23 @@ static int guest_on_title(void)
 	return map == 0;
 }
 
+static int guest_field_hud_visible(void)
+{
+	uintptr_t hud = GUEST_FIELD_HUD;
+
+	if (!guest_data_ok(hud) ||
+	    !guest_data_ok(hud + GUEST_FIELD_HUD_MASTER))
+		return 0;
+	return *(volatile int *)(uintptr_t)
+		       (hud + GUEST_FIELD_HUD_MASTER) != 0 &&
+	       *(volatile int *)(uintptr_t)
+		       (hud + GUEST_FIELD_MARKER) != 0 &&
+	       *(volatile uintptr_t *)(uintptr_t)
+		       (hud + GUEST_FIELD_MARKER_TEXTURE) != 0 &&
+	       *(volatile int *)(uintptr_t)
+		       (hud + GUEST_FIELD_MARKER_STATE) == 1;
+}
+
 static int guest_title_visible(void)
 {
 	if (!guest_data_ok(GUEST_TITLE_MODE))
@@ -883,7 +906,6 @@ static void menu_poll_open_pulse(void);
 static int menu_try_close(void);
 static int menu_click_open_button(void);
 static int menu_click_back(void);
-static void menu_open_field(void);
 static void guest_keyboard_key(SDL_Scancode scancode, int down);
 static void menu_trace_poll(void);
 
@@ -923,6 +945,15 @@ static int save_slot_pad(void)
  */
 static int guest_shop(void)
 {
+	int state;
+
+	if (guest_data_ok(GUEST_SHOP_STATE) &&
+	    guest_data_ok(GUEST_DRAW_GATE)) {
+		state = *(volatile int *)(uintptr_t)GUEST_SHOP_STATE;
+		if ((state == 1 || state == 2) &&
+		    *(volatile int *)(uintptr_t)GUEST_DRAW_GATE == 2)
+			return 1;
+	}
 	if (guest_data_ok(GUEST_SHOP_STATE) &&
 	    guest_data_ok(GUEST_SHOP_LIST_HEAD) &&
 	    *(volatile int *)(uintptr_t)GUEST_SHOP_STATE == 2 &&
@@ -3428,6 +3459,58 @@ static void menu_draw_focus(SDL_Renderer *renderer, int logical_w,
 	SDL_SetRenderDrawBlendMode(renderer, old_blend);
 }
 
+static void shop_draw_focus(SDL_Renderer *renderer, int logical_w,
+			    int logical_h)
+{
+	static const int ids[3] = {
+		GUEST_SHOP_BUY, GUEST_SHOP_SELL, GUEST_MENU_BACK,
+	};
+	uint8_t *widget;
+	SDL_Rect rect;
+	SDL_Rect outer;
+	Uint8 old_r;
+	Uint8 old_g;
+	Uint8 old_b;
+	Uint8 old_a;
+	SDL_BlendMode old_blend;
+	int selection;
+
+	if (!guest_shop() || guest_read_i32(GUEST_SHOP_STATE, 0) != 1)
+		return;
+	selection = guest_read_i32(GUEST_SHOP_STATE + 4, 0) & 3;
+	if (selection < 0 || selection >= 3)
+		selection = 0;
+	widget = menu_find_widget(ids[selection]);
+	if (!menu_widget_on_screen(widget))
+		return;
+	rect.x = *(volatile int *)(widget + GUEST_WIDGET_X);
+	rect.y = *(volatile int *)(widget + GUEST_WIDGET_Y);
+	rect.w = *(volatile int *)(widget + GUEST_WIDGET_W);
+	rect.h = *(volatile int *)(widget + GUEST_WIDGET_H);
+	if (logical_w <= 0)
+		logical_w = GAME_W;
+	if (logical_h <= 0)
+		logical_h = GAME_H;
+	rect.x = rect.x * logical_w / GAME_W;
+	rect.y = rect.y * logical_h / GAME_H;
+	rect.w = rect.w * logical_w / GAME_W;
+	rect.h = rect.h * logical_h / GAME_H;
+	outer = rect;
+	outer.x -= 3;
+	outer.y -= 3;
+	outer.w += 6;
+	outer.h += 6;
+	SDL_GetRenderDrawColor(renderer, &old_r, &old_g, &old_b, &old_a);
+	SDL_GetRenderDrawBlendMode(renderer, &old_blend);
+	SDL_SetRenderDrawBlendMode(renderer, SDL_BLENDMODE_BLEND);
+	SDL_SetRenderDrawColor(renderer, 0, 0, 0, 220);
+	SDL_RenderDrawRect(renderer, &outer);
+	SDL_SetRenderDrawColor(renderer, 255, 220, 64, 255);
+	SDL_RenderDrawRect(renderer, &rect);
+	SDL_SetRenderDrawColor(renderer, old_r, old_g, old_b, old_a);
+	SDL_SetRenderDrawBlendMode(renderer, old_blend);
+}
+
 static const SDL_Scancode g_menu_dir_keys[4] = {
 	SDL_SCANCODE_UP,
 	SDL_SCANCODE_RIGHT,
@@ -3552,6 +3635,7 @@ static void menu_enter_session(void)
 	g_menu_keys = 1;
 	g_menu_ui = 1;
 	g_menu_open_pending = 0;
+	g_menu_open_from_field = 0;
 	menu_reset_input_focus();
 	fprintf(stderr, "sword3-sdl: menu session start\n");
 }
@@ -3564,6 +3648,7 @@ static void menu_leave_session(void)
 		fprintf(stderr, "sword3-sdl: menu session end\n");
 	g_menu_session = 0;
 	g_menu_open_pending = 0;
+	g_menu_open_from_field = 0;
 	g_menu_close_pending = 0;
 	g_menu_keys = 0;
 	g_menu_ui = 0;
@@ -3571,7 +3656,6 @@ static void menu_leave_session(void)
 	g_menu_open_button = -1;
 	g_menu_seen_chrome = 0;
 	g_menu_saw_draw = 0;
-	g_menu_open_direct = 0;
 	g_menu_gone_at = 0;
 	g_menu_back_until = 0;
 	g_menu_reenter_until = SDL_GetTicks() + MENU_BACK_GRACE_MS;
@@ -3591,6 +3675,7 @@ static void menu_leave_session(void)
 static void menu_begin_open(int button)
 {
 	g_menu_open_button = button;
+	g_menu_open_from_field = 0;
 	g_menu_return_held = 0;
 	g_menu_open_pending = 1;
 	g_menu_open_until = SDL_GetTicks() + MENU_OPEN_WAIT_MS;
@@ -3613,60 +3698,18 @@ static void menu_finish_open(void)
 	g_menu_open_button = -1;
 }
 
-static void menu_park_pointer(void)
-{
-	uint8_t *pad;
-
-	g_cursor_x = (float)GAME_W / 2.0f;
-	g_cursor_y = (float)GAME_H / 2.0f;
-	g_cursor_ready = 1;
-	if (!guest_data_ok(GUEST_UIGAMEPAD))
-		return;
-	pad = (uint8_t *)(uintptr_t)GUEST_UIGAMEPAD;
-	*(volatile int *)(pad + GUEST_MOUSE_X) = GAME_W / 2;
-	*(volatile int *)(pad + GUEST_MOUSE_Y) = GAME_H / 2;
-	*(volatile int *)(pad + GUEST_INPUT_MODE) = 4;
-}
-
-static void menu_open_field(void)
-{
-	/*
-	 * Successful field open is draw_gate=1, layer=1, field fex.
-	 * 0x1001ccbb0(3) writes 0x80000003. The main draw frame
-	 * (0x100023004) treats bit 31 as title/boot: low bits 3 then
-	 * call enter_map(0, 0xea60), which is 再续前缘.
-	 * Store raw 1 with 0x1001ccb98, same as a tap-open that stuck.
-	 */
-	menu_park_pointer();
-	((void (*)(void *, int))(uintptr_t)GUEST_STORE_DRAW)(
-		(void *)(uintptr_t)GUEST_DRAW_OBJ, 1);
-	if (guest_data_ok(GUEST_SYS_LAYER))
-		*(volatile int *)(uintptr_t)GUEST_SYS_LAYER = GUEST_LAYER_WALK;
-	menu_park_pointer();
-	fprintf(stderr,
-		"sword3-sdl: SELECT -> field open draw=%#x layer=%d fex=%p map=%d title=%d page=%d\n",
-		(unsigned)guest_read_i32(GUEST_DRAW_GATE, -1),
-		guest_read_i32(GUEST_SYS_LAYER, -1),
-		(void *)guest_read_ptr(GUEST_FEXECUTE),
-		guest_map_id(),
-		guest_read_i32(GUEST_TITLE_MODE, -1),
-		guest_read_i32(GUEST_MENU_PAGE, -1));
-}
-
 static void menu_poll_open_pulse(void)
 {
 	Uint32 now = SDL_GetTicks();
 
-	if (g_menu_open_direct) {
-		g_menu_open_direct = 0;
-		menu_open_field();
-	}
 	if (g_menu_return_held && g_menu_open_button < 0 &&
 	    SDL_TICKS_PASSED(now, g_menu_return_up_at)) {
 		g_menu_return_held = 0;
 	}
 	if (menu_drawn() &&
-	    (g_menu_session || (g_menu_open_pending && !guest_on_title()))) {
+	    (g_menu_session ||
+	     (g_menu_open_pending && g_menu_open_from_field &&
+	      guest_read_i32(GUEST_DRAW_GATE, 0) == 1))) {
 		g_menu_saw_draw = 1;
 		g_menu_gone_at = 0;
 		g_menu_open_pending = 0;
@@ -3702,6 +3745,7 @@ static void menu_poll_open_pulse(void)
 	    SDL_TICKS_PASSED(now, g_menu_open_until)) {
 		fprintf(stderr, "sword3-sdl: menu open timeout\n");
 		g_menu_open_pending = 0;
+		g_menu_open_from_field = 0;
 		g_menu_close_pending = 0;
 	}
 	menu_reconcile_equip_focus();
@@ -3791,12 +3835,11 @@ static int menu_click_open_button(void)
 	int w;
 	int h;
 
-	if (!guest_load_ui() && !guest_on_title()) {
-		g_menu_open_direct = 1;
+	if (!guest_load_ui() && guest_field_hud_visible()) {
+		g_menu_open_from_field = 1;
+		((void (*)(void))(uintptr_t)GUEST_OPEN_NATIVE_MENU)();
 		fprintf(stderr,
-			"sword3-sdl: SELECT -> field open pending layer=%d draw=%d\n",
-			guest_read_i32(GUEST_SYS_LAYER, -1),
-			guest_read_i32(GUEST_DRAW_GATE, -1));
+			"sword3-sdl: SELECT -> native field menu action\n");
 		return 1;
 	}
 	if (!menu_field_button_rect(&x, &y, &w, &h))
@@ -5725,6 +5768,10 @@ void sword3_SDL_RenderPresent(SDL_Renderer *renderer)
 	} else if (host_battle_active() &&
 		   SDL_GetRenderTarget(renderer) == NULL) {
 		host_battle_draw(renderer, g_logical_w, g_logical_h);
+	} else if (guest_shop() &&
+		   guest_read_i32(GUEST_SHOP_STATE, 0) == 1 &&
+		   SDL_GetRenderTarget(renderer) == NULL) {
+		shop_draw_focus(renderer, g_logical_w, g_logical_h);
 	} else if (g_menu_session &&
 		   SDL_GetRenderTarget(renderer) == NULL) {
 		menu_draw_focus(renderer, g_logical_w, g_logical_h);
