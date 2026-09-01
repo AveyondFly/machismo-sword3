@@ -2384,6 +2384,75 @@ static int guest_caption_choice(void)
 	return caption_choice_widget(NULL) != 0;
 }
 
+static int caption_activate_selected(int cancel)
+{
+	uintptr_t widget;
+	uintptr_t button;
+	uintptr_t node;
+	uintptr_t *queue;
+	uint8_t *result;
+	int count;
+	int selection;
+	int i;
+
+	widget = caption_choice_widget(&count);
+	if (!widget || count < 2)
+		return 0;
+	selection = *(volatile int *)(widget + GUEST_CAPTION_SEL);
+	if (cancel)
+		selection = count;
+	if (selection < 1 || selection > count)
+		selection = 1;
+	button = *(volatile uintptr_t *)(widget + GUEST_CAPTION_BTNS);
+	for (i = 1; button && i < selection; i++) {
+		if (!guest_heap_ok(button, GUEST_CAPTION_BTN_NEXT + 8))
+			return 0;
+		button = *(volatile uintptr_t *)(button +
+						GUEST_CAPTION_BTN_NEXT);
+	}
+	if (!button || !guest_heap_ok(button, sizeof(int)))
+		return 0;
+	result = calloc(1, 0x18);
+	if (!result)
+		return 0;
+	result[8] = 1;
+	*(int *)(result + 0xc) = *(volatile int *)button;
+	queue = (uintptr_t *)(uintptr_t)
+		(GUEST_DLG_MGR + GUEST_DLG_DIR_GATE + 8);
+	node = *queue;
+	if (!node) {
+		*queue = (uintptr_t)result;
+	} else {
+		for (i = 0; i < 128; i++) {
+			uintptr_t next;
+
+			if (!guest_heap_ok(node, sizeof(uintptr_t))) {
+				free(result);
+				return 0;
+			}
+			next = *(volatile uintptr_t *)node;
+			if (!next) {
+				*(volatile uintptr_t *)node =
+					(uintptr_t)result;
+				break;
+			}
+			node = next;
+		}
+		if (i == 128) {
+			free(result);
+			return 0;
+		}
+	}
+	*(volatile int *)(widget + GUEST_CAPTION_SEL + 4) = -1;
+	*(volatile uint8_t *)(widget + GUEST_CAPTION_ACTIVE) = 0;
+	*(volatile int *)(uintptr_t)
+		(GUEST_DLG_MGR + GUEST_DLG_DIR_GATE) -=
+			*(volatile int *)(widget + GUEST_CAPTION_ACTIVE - 4);
+	*(volatile int *)(widget + GUEST_CAPTION_ACTIVE - 4) = 0;
+	caption_clear_dirs();
+	return 1;
+}
+
 static void caption_clear_dirs(void)
 {
 	memset(g_choice_dir_dpad, 0, sizeof(g_choice_dir_dpad));
@@ -4860,8 +4929,10 @@ static int rewrite_event(SDL_Event *event)
 	}
 	if (button == SDL_CONTROLLER_BUTTON_B) {
 		if (guest_caption_choice()) {
-			fill_key(event, SDL_SCANCODE_ESCAPE, down);
-			return 1;
+			if (down)
+				(void)caption_activate_selected(1);
+			event->type = SDL_FIRSTEVENT;
+			return 0;
 		}
 		if (!down)
 			host_battle_button(button, 0);
@@ -5001,8 +5072,10 @@ static int rewrite_event(SDL_Event *event)
 	}
 	if (button == SDL_CONTROLLER_BUTTON_A) {
 		if (guest_caption_choice()) {
-			fill_key(event, SDL_SCANCODE_RETURN, down);
-			return 1;
+			if (down)
+				(void)caption_activate_selected(0);
+			event->type = SDL_FIRSTEVENT;
+			return 0;
 		}
 		if (host_menu_active()) {
 			host_menu_button(button, down);
