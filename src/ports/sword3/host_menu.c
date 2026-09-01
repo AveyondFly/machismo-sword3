@@ -57,6 +57,9 @@
 #define HOST_MENU_TSW_TSWP 0x1001a7144ull
 #define HOST_MENU_TSW_HGA3 0x1001a730cull
 #define HOST_MENU_TSW_FREE 0x10023fb50ull
+#define HOST_MENU_ACT_RESOLVE 0x1001ec79cull
+#define HOST_MENU_FRAME_LOAD 0x1001ea094ull
+#define HOST_MENU_FACE_QQ 36
 #define HOST_MENU_TSW_KEY 0x100319dd8ull
 #define HOST_MENU_TSW_MAGIC 0x100319dc0ull
 #define HOST_MENU_ITEM_REPO 0x1002ab4d8ull
@@ -3061,8 +3064,11 @@ static SDL_Texture *host_menu_face_tex(SDL_Renderer *renderer, int slot)
 	const struct host_menu_actor *a;
 	SDL_Surface *surf;
 	SDL_Texture *tex;
+	int resolved[0xe0 / sizeof(int)];
+	uint8_t *animation;
 	uintptr_t obj;
 	int frame;
+	int tsw;
 	int tw;
 	int th;
 
@@ -3071,7 +3077,19 @@ static SDL_Texture *host_menu_face_tex(SDL_Renderer *renderer, int slot)
 	a = &g_party[slot];
 	if (!a->used || a->act <= 0)
 		return g_tex_face[slot];
-	obj = host_menu_tsw_obj(a->act);
+	memset(resolved, 0, sizeof(resolved));
+	animation = (uint8_t *)resolved;
+	*(int *)(animation + 0x04) = a->act;
+	*(int *)(animation + 0x0c) = HOST_MENU_FACE_QQ;
+	*(uint16_t *)(animation + 0x38) = 0;
+	if (!((int (*)(void *, int))(uintptr_t)HOST_MENU_ACT_RESOLVE)(
+		    animation, 0))
+		return NULL;
+	tsw = *(int *)(animation + 0x54);
+	frame = *(uint16_t *)(animation + 0x58);
+	((void *(*)(int, int, int))(uintptr_t)HOST_MENU_FRAME_LOAD)(
+		tsw, frame, 1);
+	obj = host_menu_tsw_obj(tsw);
 	if (g_tex_face[slot] && g_face_act[slot] == a->act &&
 	    g_face_obj[slot] == obj)
 		return g_tex_face[slot];
@@ -3081,9 +3099,7 @@ static SDL_Texture *host_menu_face_tex(SDL_Renderer *renderer, int slot)
 	}
 	g_face_act[slot] = a->act;
 	g_face_obj[slot] = obj;
-	surf = NULL;
-	for (frame = 0; frame < 3 && !surf; frame++)
-		surf = host_menu_tsw_surface(a->act, frame);
+	surf = host_menu_tsw_surface(tsw, frame);
 	tex = host_menu_tex_from_surf(renderer, surf);
 	g_tex_face[slot] = tex;
 	if (!tex && !obj) {
@@ -3095,8 +3111,9 @@ static SDL_Texture *host_menu_face_tex(SDL_Renderer *renderer, int slot)
 	th = 0;
 	if (tex)
 		SDL_QueryTexture(tex, NULL, NULL, &tw, &th);
-	fprintf(stderr, "sword3-sdl: face slot=%d act=%d %s %dx%d obj=%llx\n",
-		slot, a->act, tex ? "ok" : "miss", tw, th,
+	fprintf(stderr,
+		"sword3-sdl: face slot=%d act=%d -> tsw=%d frame=%d %s %dx%d obj=%llx\n",
+		slot, a->act, tsw, frame, tex ? "ok" : "miss", tw, th,
 		(unsigned long long)obj);
 	return tex;
 }
@@ -3258,6 +3275,10 @@ static void host_menu_draw_left(SDL_Renderer *renderer, int logical_w,
 	int available;
 	int card_h;
 	int bar_y;
+	int face_w;
+	int face_h;
+	int party_focus;
+	int focused;
 	int cur[3];
 	int maxv[3];
 	char name[40];
@@ -3284,17 +3305,23 @@ static void host_menu_draw_left(SDL_Renderer *renderer, int logical_w,
 		if (act)
 			members[member_n++] = (int)(act - g_party);
 	}
-	gap = host_sy(6, logical_h);
+	gap = host_sy(4, logical_h);
 	available = logical_h - host_sy(16, logical_h) -
-		    (member_n > 0 ? (member_n - 1) * gap : 0);
-	card_h = member_n > 0 ? available / member_n :
-			       host_sy(196, logical_h);
+		    (HOST_MENU_PARTY_N - 1) * gap;
+	card_h = available / HOST_MENU_PARTY_N;
 	if (card_h > host_sy(196, logical_h))
 		card_h = host_sy(196, logical_h);
+	party_focus = g_layer == HOST_MENU_LAYER_PICK ||
+		      g_layer == HOST_MENU_LAYER_EQUIP ||
+		      (g_layer == HOST_MENU_LAYER_INNER &&
+		       (g_tab == HOST_MENU_TAB_EQUIP ||
+			g_tab == HOST_MENU_TAB_SKILL ||
+			g_tab == HOST_MENU_TAB_STATUS));
 
 	for (j = 0; j < member_n; j++) {
 		party = members[j];
 		act = &g_party[party];
+		focused = party_focus && party == g_party_i;
 		if (act->name[0])
 			snprintf(name, sizeof(name), "%s", act->name);
 		else
@@ -3316,10 +3343,10 @@ static void host_menu_draw_left(SDL_Renderer *renderer, int logical_w,
 		card.y = host_sy(8, logical_h) + j * (card_h + gap);
 		card.w = left.w - host_sx(16, logical_w);
 		card.h = card_h;
-		host_menu_frame(renderer, card, party == g_party_i ? 3 : 2,
-				party == g_party_i ? g_ink_gold.r : 196,
-				party == g_party_i ? g_ink_gold.g : 164,
-				party == g_party_i ? g_ink_gold.b : 72, 255);
+		host_menu_frame(renderer, card, !party_focus || focused ? 3 : 2,
+				!party_focus || focused ? g_ink_gold.r : 196,
+				!party_focus || focused ? g_ink_gold.g : 164,
+				!party_focus || focused ? g_ink_gold.b : 72, 255);
 
 		portrait.x = card.x + host_sx(8, logical_w);
 		portrait.y = card.y + host_sy(10, logical_h);
@@ -3331,8 +3358,18 @@ static void host_menu_draw_left(SDL_Renderer *renderer, int logical_w,
 			portrait.h = host_sy(140, logical_h);
 		host_menu_fill(renderer, portrait, 32, 22, 12, 255);
 		face = host_menu_face_tex(renderer, party);
+		face_w = 0;
+		face_h = 0;
 		if (face)
+			SDL_QueryTexture(face, NULL, NULL, &face_w, &face_h);
+		if (face && (face_w <= 192 || face_h <= 192))
 			host_menu_blit_contain(renderer, face, portrait);
+		else
+			host_menu_text_center(renderer,
+					      act->name[0] ? act->name : "—",
+					      portrait.x + portrait.w / 2,
+					      portrait.y + portrait.h / 2, pt,
+					      g_ink_gold);
 		host_menu_frame(renderer, portrait, 2, 196, 164, 72, 255);
 
 		host_menu_text_left(
@@ -3373,6 +3410,10 @@ static void host_menu_draw_left(SDL_Renderer *renderer, int logical_w,
 					    track.x + host_sx(4, logical_w),
 					    track.y - 1, pt_small,
 					    g_ink_title);
+		}
+		if (party_focus && !focused) {
+			host_menu_fill(renderer, card, 12, 10, 8, 112);
+			host_menu_frame(renderer, card, 2, 196, 164, 72, 180);
 		}
 	}
 }
