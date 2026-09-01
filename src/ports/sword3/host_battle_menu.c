@@ -476,22 +476,23 @@ static int battle_flee_image_ready(uintptr_t actor)
  * battle input handler. That handler queues action 0x11; the normal battle
  * loop performs the escape roll and advances the round after a failed roll.
  */
-static void battle_flee(void)
+int host_battle_flee(void)
 {
 	uintptr_t actor;
 
 	actor = battle_actor_ptr();
 	if (!actor || battle_player_slot() < 0)
-		return;
+		return 0;
 	if (!battle_flee_image_ready(actor)) {
 		fprintf(stderr,
 			"sword3-sdl: battle flee aborted: no usable actor image\n");
-		return;
+		return 0;
 	}
 	battle_set_u8(GUEST_FLEE_FLAG, 1);
 	fprintf(stderr, "sword3-sdl: battle host act cmd=逃跑 native\n");
 	((void (*)(void))(uintptr_t)GUEST_BATTLE_INPUT_CLICK)();
 	battle_set_u8(GUEST_FLEE_FLAG, 0);
+	return 1;
 }
 
 static void battle_native_ok(void)
@@ -752,6 +753,7 @@ static int (*g_cmd_draw_orig)(void *btn, int x, int y);
 static void (*g_cmd_menu_orig)(void *a0, void *a1, void *a2, void *a3,
 			       void *a4, void *a5, void *a6, void *a7);
 static int g_flee_hooked;
+static int g_draw_hooked;
 static int g_overlay_hooked;
 static int g_native_logged;
 
@@ -764,6 +766,13 @@ static int battle_flee_step_hook(void *actor, int phase)
 
 static int battle_cmd_draw_hook(void *btn, int x, int y)
 {
+	if ((uintptr_t)btn == GUEST_CMD_TACTICS) {
+		char *label = *(char **)(uintptr_t)
+			(GUEST_CMD_TACTICS + GUEST_BTN_NAME);
+
+		if (label && strcmp(label, "逃跑") != 0)
+			memcpy(label, "逃跑", sizeof("逃跑"));
+	}
 	if (host_battle_active() && battle_is_native_cmd_obj((uintptr_t)btn))
 		return 0;
 	return g_cmd_draw_orig(btn, x, y);
@@ -802,6 +811,17 @@ void host_battle_install(void)
 		fprintf(stderr,
 			"sword3-sdl: battle flee image guard installed\n");
 	}
+	if (!g_draw_hooked) {
+		g_cmd_draw_orig = battle_make_tramp(GUEST_CMD_DRAW);
+		if (!g_cmd_draw_orig ||
+		    battle_patch_jump(GUEST_CMD_DRAW, battle_cmd_draw_hook,
+				      draw_expect) != 0) {
+			fprintf(stderr,
+				"sword3-sdl: battle command draw hook failed\n");
+			return;
+		}
+		g_draw_hooked = 1;
+	}
 	if (battle_native_ui_enabled()) {
 		if (!g_native_logged) {
 			g_native_logged = 1;
@@ -812,15 +832,11 @@ void host_battle_install(void)
 	}
 	if (g_overlay_hooked)
 		return;
-	g_cmd_draw_orig = battle_make_tramp(GUEST_CMD_DRAW);
 	g_cmd_menu_orig = battle_make_tramp(GUEST_CMD_MENU_DRAW);
-	if (!g_cmd_draw_orig || !g_cmd_menu_orig) {
+	if (!g_cmd_menu_orig) {
 		fprintf(stderr, "sword3-sdl: battle overlay tramp failed\n");
 		return;
 	}
-	if (battle_patch_jump(GUEST_CMD_DRAW, battle_cmd_draw_hook,
-			      draw_expect) != 0)
-		return;
 	if (battle_patch_jump(GUEST_CMD_MENU_DRAW, battle_cmd_menu_hook,
 			      menu_expect) != 0)
 		return;
@@ -1885,7 +1901,7 @@ static void battle_confirm_command(void)
 		return;
 	}
 	if (slot == SLOT_FLEE) {
-		battle_flee();
+		(void)host_battle_flee();
 		return;
 	}
 	wanted = slot + 1;

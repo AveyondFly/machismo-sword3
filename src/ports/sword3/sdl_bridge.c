@@ -4748,6 +4748,8 @@ static int fight_confirm_command(void)
 
 	if (!g_fight_ui || guest_now_menu() != 1)
 		return 0;
+	if (guest_cmd_sel() == 9)
+		return host_battle_flee();
 	widget = fight_command_widget();
 	if (!menu_widget_on_screen(widget))
 		return 0;
