@@ -430,6 +430,7 @@ static void owner_drop(enum sword3_sdl_kind kind, void *pointer)
 #define GUEST_BATTLE_CMD_TACTICS 0x1002ac380ull
 #define GUEST_BATTLE_CMD_RETREAT 0x1002ac2c0ull
 #define GUEST_BATTLE_CMD_STRIDE 0xc0u
+#define GUEST_BATTLE_CMD_ENABLE 0x1002f3568ull
 #define GUEST_PLAY_SOUND 0x1001c076cull
 #define GUEST_INPUT_TRANSITION 0x1001c15fcull
 #define GUEST_FIGHT_OK 0x10003ddf8ull
@@ -445,7 +446,18 @@ static void owner_drop(enum sword3_sdl_kind kind, void *pointer)
 #define GUEST_RESULT_TIMER 0x1002f1f64ull
 #define GUEST_RESULT_GATE 0x1002f3f98ull
 #define GUEST_BATTLE_SPELL_CAT 0x1002f1f5cull
+#define GUEST_BATTLE_SPELL_IDX 0x1002a5318ull
+#define GUEST_BATTLE_SPELL_SCROLL 0x1002f1f48ull
+#define GUEST_BATTLE_ITEM_PAGE 0x1002a5330ull
+#define GUEST_BATTLE_ITEM_IDX 0x1002a531cull
+#define GUEST_BATTLE_ITEM_SCROLL 0x1002f1f4cull
+#define GUEST_BATTLE_PLAYER_ID 0x1002f1ff8ull
+#define GUEST_BATTLE_LUA_BIND 0x10030aef0ull
+#define GUEST_BATTLE_LUA_SET_INT 0x1001c78d8ull
+#define GUEST_BATTLE_MAGIC_CAT_KEY 0x100274386ull
+#define GUEST_BATTLE_ITEM_CAT_KEY 0x1002743a0ull
 #define FIGHT_NOW_MAGIC 2
+#define FIGHT_NOW_ITEM 4
 #define FIGHT_NOW_TURN 99
 #define FIGHT_NOW_AUTO 100
 #define FIGHT_NOW_RESULT0 96
@@ -513,6 +525,8 @@ static int g_fight_dir_axis[4];
 static int g_fight_dir_down[4];
 static int g_fight_dir_release[4];
 static int g_fight_target_a_up;
+static int g_fight_command_focus = 1;
+static int g_fight_last_now = -1;
 static unsigned g_fight_key_seen;
 static int g_menu_open_button = -1;
 static int g_menu_close_widget;
@@ -3661,7 +3675,7 @@ static uint8_t *fight_command_widget_at(int slot)
 
 static uint8_t *fight_command_widget(void)
 {
-	int selection = guest_cmd_sel();
+	int selection = g_fight_command_focus;
 
 	if (selection < 1)
 		selection = 1;
@@ -3683,6 +3697,30 @@ static void fight_clear_guest_clicks(void)
 		GUEST_INPUT_KEYBOARD;
 }
 
+static void fight_sync_input_layer(void)
+{
+	uint8_t *widget;
+	int now;
+	int selection;
+
+	now = guest_now_menu();
+	if (now == g_fight_last_now)
+		return;
+	g_fight_last_now = now;
+	if (now != 1)
+		return;
+	selection = guest_cmd_sel();
+	widget = fight_command_widget_at(selection - 1);
+	if (selection >= 1 && selection <= 10 &&
+	    menu_widget_on_screen(widget))
+		g_fight_command_focus = selection;
+	else if (!menu_widget_on_screen(
+			 fight_command_widget_at(g_fight_command_focus - 1)))
+		g_fight_command_focus = 1;
+	*(volatile int *)(uintptr_t)GUEST_CMD_SEL = 0;
+	fight_clear_guest_clicks();
+}
+
 static int fight_move_command(int direction)
 {
 	uint8_t *current;
@@ -3697,7 +3735,8 @@ static int fight_move_command(int direction)
 
 	if (guest_now_menu() != 1 || direction < 0 || direction >= 4)
 		return 0;
-	current_slot = guest_cmd_sel() - 1;
+	fight_sync_input_layer();
+	current_slot = g_fight_command_focus - 1;
 	if (current_slot < 0)
 		current_slot = 0;
 	current = fight_command_widget_at(current_slot);
@@ -3752,18 +3791,13 @@ static int fight_move_command(int direction)
 	}
 	if (best_slot < 0)
 		return 1;
-	*(volatile int *)(uintptr_t)GUEST_CMD_SEL = best_slot + 1;
+	g_fight_command_focus = best_slot + 1;
 	((void (*)(int))(uintptr_t)GUEST_PLAY_SOUND)(0x2e);
 	return 1;
 }
 
 static int fight_move_magic(int direction)
 {
-	static const float category_x[3] = {
-		245.0f / (float)GAME_W,
-		287.0f / (float)GAME_W,
-		329.0f / (float)GAME_W,
-	};
 	int category;
 
 	if (guest_now_menu() != FIGHT_NOW_MAGIC ||
@@ -3782,10 +3816,49 @@ static int fight_move_magic(int direction)
 	if (category < 0 || category >= 3)
 		category = 0;
 	category = (category + (direction == 1 ? 1 : 2)) % 3;
-	push_finger_at(category_x[category],
-		       133.0f / (float)GAME_H, SDL_FINGERDOWN);
-	push_finger_at(category_x[category],
-		       133.0f / (float)GAME_H, SDL_FINGERUP);
+	((void (*)(int))(uintptr_t)GUEST_PLAY_SOUND)(0x2e);
+	*(volatile int *)(uintptr_t)GUEST_BATTLE_SPELL_CAT = category;
+	((void (*)(void *, const void *, int, int))(uintptr_t)
+		GUEST_BATTLE_LUA_SET_INT)(
+			(void *)(uintptr_t)GUEST_BATTLE_LUA_BIND,
+			(const void *)(uintptr_t)GUEST_BATTLE_MAGIC_CAT_KEY,
+			guest_read_i32(GUEST_BATTLE_PLAYER_ID, 8) - 8,
+			category);
+	*(volatile int *)(uintptr_t)GUEST_BATTLE_SPELL_IDX = 1;
+	*(volatile int *)(uintptr_t)GUEST_BATTLE_SPELL_SCROLL = 0;
+	return 1;
+}
+
+static int fight_move_item(int direction)
+{
+	int category;
+
+	if (guest_now_menu() != FIGHT_NOW_ITEM ||
+	    direction < 0 || direction >= 4)
+		return 0;
+	fight_clear_guest_clicks();
+	if (direction == 0) {
+		((void (*)(void))(uintptr_t)GUEST_FIGHT_LEFT)();
+		return 1;
+	}
+	if (direction == 2) {
+		((void (*)(void))(uintptr_t)GUEST_FIGHT_RIGHT)();
+		return 1;
+	}
+	category = guest_read_i32(GUEST_BATTLE_ITEM_PAGE, 0);
+	if (category < 0 || category >= 4)
+		category = 0;
+	category = (category + (direction == 1 ? 1 : 3)) % 4;
+	((void (*)(int))(uintptr_t)GUEST_PLAY_SOUND)(0x2e);
+	*(volatile int *)(uintptr_t)GUEST_BATTLE_ITEM_PAGE = category;
+	((void (*)(void *, const void *, int, int))(uintptr_t)
+		GUEST_BATTLE_LUA_SET_INT)(
+			(void *)(uintptr_t)GUEST_BATTLE_LUA_BIND,
+			(const void *)(uintptr_t)GUEST_BATTLE_ITEM_CAT_KEY,
+			guest_read_i32(GUEST_BATTLE_PLAYER_ID, 8) - 8,
+			category);
+	*(volatile int *)(uintptr_t)GUEST_BATTLE_ITEM_IDX = 1;
+	*(volatile int *)(uintptr_t)GUEST_BATTLE_ITEM_SCROLL = 0;
 	return 1;
 }
 
@@ -3803,6 +3876,7 @@ static void fight_draw_command_focus(SDL_Renderer *renderer, int logical_w,
 
 	if (!g_fight_ui || guest_now_menu() != 1)
 		return;
+	fight_sync_input_layer();
 	widget = fight_command_widget();
 	if (!menu_widget_on_screen(widget))
 		return;
@@ -4662,6 +4736,8 @@ static void fight_direction_edge(int index)
 		return;
 	if (fight_move_magic(index))
 		return;
+	if (fight_move_item(index))
+		return;
 	if (guest_data_ok(GUEST_UIGAMEPAD))
 		*(volatile int *)(uintptr_t)
 			(GUEST_UIGAMEPAD + GUEST_INPUT_MODE) =
@@ -4757,6 +4833,7 @@ static void fight_release_directions(void)
 		g_fight_dir_down[i] = 0;
 	}
 	g_fight_target_a_up = 0;
+	g_fight_last_now = -1;
 }
 
 static void fight_flush_direction_releases(void)
@@ -4794,35 +4871,41 @@ static void fight_confirm_target(void)
 
 static int fight_confirm_command(void)
 {
-	uint8_t *widget;
-	int x;
-	int y;
-	int w;
-	int h;
+	int selection;
+	int result;
 
 	if (!g_fight_ui || guest_now_menu() != 1)
 		return 0;
-	if (guest_cmd_sel() == 9)
+	fight_sync_input_layer();
+	selection = g_fight_command_focus;
+	if (selection == 9)
 		return host_battle_flee();
-	widget = fight_command_widget();
-	if (!menu_widget_on_screen(widget))
+	if (selection < 1 || selection > 10)
 		return 0;
-	x = *(volatile int *)(widget + GUEST_WIDGET_X);
-	y = *(volatile int *)(widget + GUEST_WIDGET_Y);
-	w = *(volatile int *)(widget + GUEST_WIDGET_W);
-	h = *(volatile int *)(widget + GUEST_WIDGET_H);
-	push_finger_at((float)(x + w / 2) / (float)GAME_W,
-		       (float)(y + h / 2) / (float)GAME_H,
-		       SDL_FINGERDOWN);
-	push_finger_at((float)(x + w / 2) / (float)GAME_W,
-		       (float)(y + h / 2) / (float)GAME_H,
-		       SDL_FINGERUP);
-	return 1;
+	if (guest_data_ok(GUEST_BATTLE_CMD_ENABLE +
+			  (uintptr_t)(selection - 1)) &&
+	    *(volatile uint8_t *)(uintptr_t)
+		    (GUEST_BATTLE_CMD_ENABLE +
+		     (uintptr_t)(selection - 1)) == 0)
+		return 1;
+	fight_clear_guest_clicks();
+	*(volatile int *)(uintptr_t)GUEST_CMD_SEL = selection;
+	result = host_battle_confirm_command();
+	g_fight_last_now = guest_now_menu();
+	return result;
 }
 
 static int fight_confirm_magic(void)
 {
 	if (!g_fight_ui || guest_now_menu() != FIGHT_NOW_MAGIC)
+		return 0;
+	fight_clear_guest_clicks();
+	return host_battle_confirm_entry();
+}
+
+static int fight_confirm_item(void)
+{
+	if (!g_fight_ui || guest_now_menu() != FIGHT_NOW_ITEM)
 		return 0;
 	fight_clear_guest_clicks();
 	return host_battle_confirm_entry();
@@ -5183,6 +5266,7 @@ static int rewrite_event(SDL_Event *event)
 				event->type = SDL_FIRSTEVENT;
 				return 0;
 			}
+			g_fight_last_now = guest_now_menu();
 			((void (*)(void))(uintptr_t)GUEST_FIGHT_CANCEL)();
 			if (g_fight_key_seen++ < 48)
 				fprintf(stderr,
@@ -5419,6 +5503,12 @@ static int rewrite_event(SDL_Event *event)
 			}
 			if (down && guest_now_menu() == FIGHT_NOW_MAGIC) {
 				if (fight_confirm_magic())
+					g_fight_target_a_up = 1;
+				event->type = SDL_FIRSTEVENT;
+				return 0;
+			}
+			if (down && guest_now_menu() == FIGHT_NOW_ITEM) {
+				if (fight_confirm_item())
 					g_fight_target_a_up = 1;
 				event->type = SDL_FIRSTEVENT;
 				return 0;

@@ -509,6 +509,14 @@ static void battle_native_ok(void)
 	battle_set_i32(GUEST_DIR_A, 0);
 }
 
+int host_battle_confirm_command(void)
+{
+	if (!battle_in_fight())
+		return 0;
+	battle_native_ok();
+	return 1;
+}
+
 /* Magic/item/special confirm: NowMenu 2/4/8 aborts if DIR_A is set. */
 static void battle_native_ok_entry(void)
 {
