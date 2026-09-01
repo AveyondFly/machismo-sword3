@@ -425,6 +425,12 @@ static void owner_drop(enum sword3_sdl_kind kind, void *pointer)
 #define GUEST_TITLE_MODE 0x1002f40e4ull
 #define GUEST_NOW_MENU 0x1002f1f0cull
 #define GUEST_CMD_SEL 0x1002a5308ull
+#define GUEST_BATTLE_CMD_BUTTONS 0x1002ab900ull
+#define GUEST_BATTLE_CMD_EXTRA 0x1002abe40ull
+#define GUEST_BATTLE_CMD_TACTICS 0x1002ac380ull
+#define GUEST_BATTLE_CMD_RETREAT 0x1002ac2c0ull
+#define GUEST_BATTLE_CMD_STRIDE 0xc0u
+#define GUEST_PLAY_SOUND 0x1001c076cull
 #define GUEST_INPUT_TRANSITION 0x1001c15fcull
 #define GUEST_FIGHT_OK 0x10003ddf8ull
 #define GUEST_FIGHT_UP 0x10003f13cull
@@ -3627,6 +3633,155 @@ static void shop_draw_focus(SDL_Renderer *renderer, int logical_w,
 	SDL_SetRenderDrawBlendMode(renderer, old_blend);
 }
 
+static uint8_t *fight_command_widget_at(int slot)
+{
+	uintptr_t address;
+
+	if (slot < 0)
+		return NULL;
+	if (slot < 5)
+		address = GUEST_BATTLE_CMD_BUTTONS +
+			  (uintptr_t)slot * GUEST_BATTLE_CMD_STRIDE;
+	else if (slot < 8)
+		address = GUEST_BATTLE_CMD_EXTRA +
+			  (uintptr_t)(slot - 5) * GUEST_BATTLE_CMD_STRIDE;
+	else if (slot == 8)
+		address = GUEST_BATTLE_CMD_TACTICS;
+	else if (slot == 9)
+		address = GUEST_BATTLE_CMD_RETREAT;
+	else
+		return NULL;
+	return (uint8_t *)(uintptr_t)address;
+}
+
+static uint8_t *fight_command_widget(void)
+{
+	int selection = guest_cmd_sel();
+
+	if (selection < 1)
+		selection = 1;
+	return fight_command_widget_at(selection - 1);
+}
+
+static int fight_move_command(int direction)
+{
+	uint8_t *current;
+	uint8_t *candidate;
+	int current_slot;
+	int current_order;
+	int current_x;
+	int current_y;
+	int best_slot = -1;
+	int best_score = INT_MAX;
+	int slot;
+
+	if (guest_now_menu() != 1 || direction < 0 || direction >= 4)
+		return 0;
+	current_slot = guest_cmd_sel() - 1;
+	if (current_slot < 0)
+		current_slot = 0;
+	current = fight_command_widget_at(current_slot);
+	if (!menu_widget_on_screen(current))
+		return 1;
+	current_x = *(volatile int *)(current + GUEST_WIDGET_X) +
+		    *(volatile int *)(current + GUEST_WIDGET_W) / 2;
+	current_y = *(volatile int *)(current + GUEST_WIDGET_Y) +
+		    *(volatile int *)(current + GUEST_WIDGET_H) / 2;
+	current_order = current_y * GAME_W + current_x;
+	for (slot = 0; slot < 10; slot++) {
+		int candidate_order;
+		int delta;
+		int dx;
+		int dy;
+		int score;
+
+		if (slot == current_slot)
+			continue;
+		candidate = fight_command_widget_at(slot);
+		if (!menu_widget_on_screen(candidate))
+			continue;
+		dx = *(volatile int *)(candidate + GUEST_WIDGET_X) +
+		     *(volatile int *)(candidate + GUEST_WIDGET_W) / 2 -
+		     current_x;
+		dy = *(volatile int *)(candidate + GUEST_WIDGET_Y) +
+		     *(volatile int *)(candidate + GUEST_WIDGET_H) / 2 -
+		     current_y;
+		if (direction == 0 || direction == 2) {
+			if ((direction == 0 && dy >= 0) ||
+			    (direction == 2 && dy <= 0))
+				continue;
+			score = abs(dy) * 1024 + abs(dx);
+		} else {
+			candidate_order = (current_y + dy) * GAME_W +
+					  current_x + dx;
+			if (direction == 1) {
+				delta = candidate_order - current_order;
+				if (delta <= 0)
+					delta += GAME_W * GAME_H;
+			} else {
+				delta = current_order - candidate_order;
+				if (delta <= 0)
+					delta += GAME_W * GAME_H;
+			}
+			score = delta;
+		}
+		if (score < best_score) {
+			best_score = score;
+			best_slot = slot;
+		}
+	}
+	if (best_slot < 0)
+		return 1;
+	*(volatile int *)(uintptr_t)GUEST_CMD_SEL = best_slot + 1;
+	((void (*)(int))(uintptr_t)GUEST_PLAY_SOUND)(0x2e);
+	return 1;
+}
+
+static void fight_draw_command_focus(SDL_Renderer *renderer, int logical_w,
+				     int logical_h)
+{
+	uint8_t *widget;
+	SDL_Rect rect;
+	SDL_Rect outer;
+	Uint8 old_r;
+	Uint8 old_g;
+	Uint8 old_b;
+	Uint8 old_a;
+	SDL_BlendMode old_blend;
+
+	if (!g_fight_ui || guest_now_menu() != 1)
+		return;
+	widget = fight_command_widget();
+	if (!menu_widget_on_screen(widget))
+		return;
+	rect.x = *(volatile int *)(widget + GUEST_WIDGET_X);
+	rect.y = *(volatile int *)(widget + GUEST_WIDGET_Y);
+	rect.w = *(volatile int *)(widget + GUEST_WIDGET_W);
+	rect.h = *(volatile int *)(widget + GUEST_WIDGET_H);
+	if (logical_w <= 0)
+		logical_w = GAME_W;
+	if (logical_h <= 0)
+		logical_h = GAME_H;
+	rect.x = rect.x * logical_w / GAME_W;
+	rect.y = rect.y * logical_h / GAME_H;
+	rect.w = rect.w * logical_w / GAME_W;
+	rect.h = rect.h * logical_h / GAME_H;
+	outer = rect;
+	outer.x -= 3;
+	outer.y -= 3;
+	outer.w += 6;
+	outer.h += 6;
+	SDL_GetRenderDrawColor(renderer, &old_r, &old_g, &old_b, &old_a);
+	SDL_GetRenderDrawBlendMode(renderer, &old_blend);
+	SDL_SetRenderDrawBlendMode(renderer, SDL_BLENDMODE_BLEND);
+	SDL_SetRenderDrawColor(renderer, 0, 0, 0, 220);
+	SDL_RenderDrawRect(renderer, &outer);
+	SDL_SetRenderDrawColor(renderer, 255, 220, 64, 255);
+	SDL_RenderDrawRect(renderer, &rect);
+	SDL_SetRenderDrawColor(renderer, old_r, old_g, old_b, old_a);
+	SDL_SetRenderDrawBlendMode(renderer, old_blend);
+}
+
 static const SDL_Scancode g_menu_dir_keys[4] = {
 	SDL_SCANCODE_UP,
 	SDL_SCANCODE_RIGHT,
@@ -4451,6 +4606,8 @@ static void fight_direction_edge(int index)
 
 	if (index < 0 || index >= 4)
 		return;
+	if (fight_move_command(index))
+		return;
 	if (guest_data_ok(GUEST_UIGAMEPAD))
 		*(volatile int *)(uintptr_t)
 			(GUEST_UIGAMEPAD + GUEST_INPUT_MODE) =
@@ -4579,6 +4736,32 @@ static void fight_confirm_target(void)
 	transition(pad, slot, 0);
 	set_scancode_state(SDL_SCANCODE_RETURN, 0);
 	((void (*)(int))(uintptr_t)GUEST_FIGHT_OK)(0);
+}
+
+static int fight_confirm_command(void)
+{
+	uint8_t *widget;
+	int x;
+	int y;
+	int w;
+	int h;
+
+	if (!g_fight_ui || guest_now_menu() != 1)
+		return 0;
+	widget = fight_command_widget();
+	if (!menu_widget_on_screen(widget))
+		return 0;
+	x = *(volatile int *)(widget + GUEST_WIDGET_X);
+	y = *(volatile int *)(widget + GUEST_WIDGET_Y);
+	w = *(volatile int *)(widget + GUEST_WIDGET_W);
+	h = *(volatile int *)(widget + GUEST_WIDGET_H);
+	push_finger_at((float)(x + w / 2) / (float)GAME_W,
+		       (float)(y + h / 2) / (float)GAME_H,
+		       SDL_FINGERDOWN);
+	push_finger_at((float)(x + w / 2) / (float)GAME_W,
+		       (float)(y + h / 2) / (float)GAME_H,
+		       SDL_FINGERUP);
+	return 1;
 }
 
 /*
@@ -4952,6 +5135,10 @@ static int rewrite_event(SDL_Event *event)
 				event->type = SDL_FIRSTEVENT;
 				return 0;
 			}
+			if (guest_now_menu() == 1) {
+				event->type = SDL_FIRSTEVENT;
+				return 0;
+			}
 			((void (*)(void))(uintptr_t)GUEST_FIGHT_CANCEL)();
 			if (g_fight_key_seen++ < 48)
 				fprintf(stderr,
@@ -5180,6 +5367,12 @@ static int rewrite_event(SDL_Event *event)
 			return 0;
 		}
 		if (g_fight_ui) {
+			if (down && guest_now_menu() == 1) {
+				if (fight_confirm_command())
+					g_fight_target_a_up = 1;
+				event->type = SDL_FIRSTEVENT;
+				return 0;
+			}
 			if (down && guest_now_menu() == 3) {
 				fight_confirm_target();
 				g_fight_target_a_up = 1;
@@ -5914,6 +6107,10 @@ void sword3_SDL_RenderPresent(SDL_Renderer *renderer)
 		   guest_read_i32(GUEST_SHOP_STATE, 0) == 1 &&
 		   SDL_GetRenderTarget(renderer) == NULL) {
 		shop_draw_focus(renderer, g_logical_w, g_logical_h);
+	} else if (g_fight_ui && guest_now_menu() == 1 &&
+		   SDL_GetRenderTarget(renderer) == NULL) {
+		fight_draw_command_focus(renderer, g_logical_w,
+					 g_logical_h);
 	} else if (g_menu_session &&
 		   SDL_GetRenderTarget(renderer) == NULL) {
 		menu_draw_focus(renderer, g_logical_w, g_logical_h);

@@ -242,6 +242,18 @@ static struct {
 } g_text[BATTLE_TEXT_CACHE];
 static int g_text_clock;
 
+static int battle_native_ui_enabled(void)
+{
+	static int cached = -1;
+	const char *value;
+
+	if (cached >= 0)
+		return cached;
+	value = getenv("SWORD3_NATIVE_BATTLE");
+	cached = !value || strcmp(value, "0") != 0;
+	return cached;
+}
+
 static int battle_guest_ok(uintptr_t addr, size_t n)
 {
 	return addr >= BATTLE_GUEST_LO && addr + n - 1 < BATTLE_GUEST_HI;
@@ -739,7 +751,9 @@ static int (*g_flee_step_orig)(void *actor, int phase);
 static int (*g_cmd_draw_orig)(void *btn, int x, int y);
 static void (*g_cmd_menu_orig)(void *a0, void *a1, void *a2, void *a3,
 			       void *a4, void *a5, void *a6, void *a7);
-static int g_native_hooked;
+static int g_flee_hooked;
+static int g_overlay_hooked;
+static int g_native_logged;
 
 static int battle_flee_step_hook(void *actor, int phase)
 {
@@ -775,13 +789,33 @@ void host_battle_install(void)
 		0xd10103ffu, 0xa90157f6u, 0xa9024ff4u, 0xa9037bfdu
 	};
 
-	if (g_native_hooked)
+	if (!g_flee_hooked) {
+		g_flee_step_orig = battle_make_tramp(GUEST_FLEE_STEP);
+		if (!g_flee_step_orig ||
+		    battle_patch_jump(GUEST_FLEE_STEP, battle_flee_step_hook,
+				      flee_step_expect) != 0) {
+			fprintf(stderr,
+				"sword3-sdl: battle flee guard install failed\n");
+			return;
+		}
+		g_flee_hooked = 1;
+		fprintf(stderr,
+			"sword3-sdl: battle flee image guard installed\n");
+	}
+	if (battle_native_ui_enabled()) {
+		if (!g_native_logged) {
+			g_native_logged = 1;
+			fprintf(stderr,
+				"sword3-sdl: native battle UI enabled; host overlay disabled\n");
+		}
 		return;
-	g_flee_step_orig = battle_make_tramp(GUEST_FLEE_STEP);
+	}
+	if (g_overlay_hooked)
+		return;
 	g_cmd_draw_orig = battle_make_tramp(GUEST_CMD_DRAW);
 	g_cmd_menu_orig = battle_make_tramp(GUEST_CMD_MENU_DRAW);
-	if (!g_flee_step_orig || !g_cmd_draw_orig || !g_cmd_menu_orig) {
-		fprintf(stderr, "sword3-sdl: battle native tramp failed\n");
+	if (!g_cmd_draw_orig || !g_cmd_menu_orig) {
+		fprintf(stderr, "sword3-sdl: battle overlay tramp failed\n");
 		return;
 	}
 	if (battle_patch_jump(GUEST_CMD_DRAW, battle_cmd_draw_hook,
@@ -790,12 +824,9 @@ void host_battle_install(void)
 	if (battle_patch_jump(GUEST_CMD_MENU_DRAW, battle_cmd_menu_hook,
 			      menu_expect) != 0)
 		return;
-	if (battle_patch_jump(GUEST_FLEE_STEP, battle_flee_step_hook,
-			      flee_step_expect) != 0)
-		return;
-	g_native_hooked = 1;
+	g_overlay_hooked = 1;
 	fprintf(stderr,
-		"sword3-sdl: battle native cmd draw disabled; flee image guard installed\n");
+		"sword3-sdl: legacy host battle overlay enabled\n");
 }
 
 static int battle_rects_spread(const struct battle_cmd *r, int n)
@@ -1613,6 +1644,8 @@ void host_battle_close(void)
 
 int host_battle_active(void)
 {
+	if (battle_native_ui_enabled())
+		return 0;
 	return g_layer == BATTLE_COMMAND || g_layer == BATTLE_MAGIC ||
 	       g_layer == BATTLE_ITEM || g_layer == BATTLE_SPECIAL;
 }
@@ -1629,6 +1662,10 @@ void host_battle_poll(void)
 	int host_sub;
 
 	host_battle_install();
+	if (battle_native_ui_enabled()) {
+		host_battle_close();
+		return;
+	}
 	if (!battle_in_fight()) {
 		host_battle_close();
 		return;
@@ -2434,6 +2471,8 @@ static void battle_draw_list(SDL_Renderer *renderer, int logical_w,
 
 void host_battle_draw(SDL_Renderer *renderer, int logical_w, int logical_h)
 {
+	if (battle_native_ui_enabled())
+		return;
 	SDL_BlendMode blend;
 
 	if (!renderer || logical_w <= 0 || logical_h <= 0)
@@ -2458,6 +2497,8 @@ void host_battle_draw(SDL_Renderer *renderer, int logical_w, int logical_h)
 
 int host_battle_skip_blit(int x, int y, int w, int h)
 {
+	if (battle_native_ui_enabled())
+		return 0;
 	int i;
 	int cx;
 	int cy;
