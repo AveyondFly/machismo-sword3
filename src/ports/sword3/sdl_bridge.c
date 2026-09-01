@@ -1,6 +1,7 @@
 #include "sdl_bridge.h"
 #include "input_context.h"
 #include "native_menu_input.h"
+#include "native_item_menu_input.h"
 #include "host_menu.h"
 #include "host_battle_menu.h"
 #include "host_cheat.h"
@@ -257,7 +258,6 @@ static void owner_drop(enum sword3_sdl_kind kind, void *pointer)
 #define GUEST_FEX_FIELD 0x1000831a8ull
 #define GUEST_OPEN_NATIVE_MENU 0x10005bd38ull
 #define GUEST_FEX_SYSPAGE 0x10002d018ull
-#define GUEST_FEX_ITEM 0x10002fffcull
 #define GUEST_FEX_EQUIP 0x100034da8ull
 #define GUEST_FEX_SKILL 0x100057eacull
 #define GUEST_FEX_STATUS 0x10005a7b4ull
@@ -293,10 +293,6 @@ static void owner_drop(enum sword3_sdl_kind kind, void *pointer)
 #define GUEST_BOOK_RIGHT 0x10002df1cull
 #define GUEST_BOOK_OK 0x10002dad8ull
 #define GUEST_BOOK_BACK 0x10002da28ull
-#define GUEST_ITEM_OK 0x100030a20ull
-#define GUEST_ITEM_CATEGORY_PREV 0x1000314a8ull
-#define GUEST_ITEM_CATEGORY_NEXT 0x1000315f0ull
-#define GUEST_ITEM_CATEGORY 0x1002aa798ull
 #define GUEST_ITEM_CONFIRM_SELECTION 0x1002aa78cull
 #define GUEST_EQUIP_STATE 0x1002aab88ull
 #define GUEST_EQUIP_PERSON 0x1002a99e0ull
@@ -1146,6 +1142,28 @@ static void clear_input_slot(uint8_t *slot)
 {
 	slot[0] = 0;
 	slot[8] = 0;
+}
+
+static void clear_released_guest_clicks(void)
+{
+	uint8_t *pad;
+	uint8_t *slot;
+	int cleared = 0;
+	int i;
+
+	if (!guest_data_ok(GUEST_UIGAMEPAD))
+		return;
+	pad = (uint8_t *)(uintptr_t)GUEST_UIGAMEPAD;
+	for (i = 0; i < GUEST_CLICK_N; i++) {
+		slot = pad + GUEST_CLICK_SLOT + i * GUEST_CLICK_STRIDE;
+		if (slot[0] != 2)
+			continue;
+		clear_input_slot(slot);
+		cleared = 1;
+	}
+	if (cleared)
+		*(volatile int *)(pad + GUEST_INPUT_MODE) =
+			GUEST_INPUT_KEYBOARD;
 }
 
 static void release_guest_walk(void)
@@ -2754,22 +2772,18 @@ static int menu_syspage_active(void)
 
 static int menu_item_route_active(void)
 {
-	int route = guest_read_i32(GUEST_MAP_ID, -1);
-
-	return g_menu_session && g_menu_keys &&
-	       g_native_menu_input.focus ==
-		       SWORD3_NATIVE_MENU_FOCUS_CONTENT &&
-	       g_native_menu_input.tab == 0 &&
-	       guest_read_i32(GUEST_MENU_SELECTION, -1) == 11 &&
-	       guest_read_i32(GUEST_SYS_LAYER, 0) >= 2 &&
-	       route >= 30 && route <= 32 &&
-	       guest_read_ptr(GUEST_FEXECUTE) == GUEST_FEX_ITEM;
+	return sword3_native_item_menu_active(
+		g_menu_session, g_menu_keys,
+		g_native_menu_input.focus ==
+			SWORD3_NATIVE_MENU_FOCUS_CONTENT);
 }
 
 static int menu_item_content_active(void)
 {
-	return menu_item_route_active() &&
-	       guest_read_i32(GUEST_SYS_LAYER, 0) == 2;
+	return sword3_native_item_menu_content_active(
+		g_menu_session, g_menu_keys,
+		g_native_menu_input.focus ==
+			SWORD3_NATIVE_MENU_FOCUS_CONTENT);
 }
 
 static int menu_equip_native_active(void)
@@ -3379,61 +3393,38 @@ static int menu_content_is_nested(void)
 
 static int menu_item_move_category(int index)
 {
-	uintptr_t callback;
-	uintptr_t expected;
+	return sword3_native_item_menu_move_category(
+		g_menu_session, g_menu_keys,
+		g_native_menu_input.focus ==
+			SWORD3_NATIVE_MENU_FOCUS_CONTENT,
+		index);
+}
 
-	if (!menu_item_content_active() || (index != 1 && index != 3))
-		return 0;
-	callback = guest_read_ptr(GUEST_FEXECUTE +
-				  (index == 1 ? 0x30u : 0x28u));
-	expected = index == 1 ? GUEST_ITEM_CATEGORY_NEXT
-			      : GUEST_ITEM_CATEGORY_PREV;
-	if (callback != expected)
-		return 0;
-	((void (*)(void))callback)();
-	fprintf(stderr, "sword3-sdl: menu item category=%d\n",
-		guest_read_i32(GUEST_ITEM_CATEGORY, -1));
-	return 1;
+static int menu_item_move_direction(int index)
+{
+	return sword3_native_item_menu_move_item(
+		g_menu_session, g_menu_keys,
+		g_native_menu_input.focus ==
+			SWORD3_NATIVE_MENU_FOCUS_CONTENT,
+		index);
 }
 
 static int menu_item_move_nested(int index)
 {
-	uintptr_t callback;
-
-	if (!menu_item_route_active() ||
-	    guest_read_i32(GUEST_SYS_LAYER, 0) <= 2 ||
-	    (index != 1 && index != 3))
-		return 0;
-	callback = guest_read_ptr(GUEST_FEXECUTE +
-				  (index == 1 ? 8u : 16u));
-	if (!callback)
-		return 0;
-	((void (*)(void))callback)();
-	fprintf(stderr, "sword3-sdl: menu item nested %s selection=%d\n",
-		index == 1 ? "right" : "left",
-		guest_read_i32(GUEST_ITEM_CONFIRM_SELECTION, -1));
-	return 1;
+	return sword3_native_item_menu_move_nested(
+		g_menu_session, g_menu_keys,
+		g_native_menu_input.focus ==
+			SWORD3_NATIVE_MENU_FOCUS_CONTENT,
+		index);
 }
 
 static int menu_item_confirm_action(void)
 {
-	uintptr_t callback;
-	int action;
-	int layer;
-
-	if (!menu_item_route_active())
-		return 0;
-	callback = guest_read_ptr(GUEST_FEXECUTE + 0x48);
-	if (callback != GUEST_ITEM_OK)
-		return 0;
-	layer = guest_read_i32(GUEST_SYS_LAYER, 0);
-	action = g_native_menu_input.item_action;
-	if (layer == 2)
-		*(volatile int *)(uintptr_t)GUEST_MAP_ID = 30 + action;
-	fprintf(stderr, "sword3-sdl: menu item action=%d layer=%d\n",
-		action, layer);
-	((void (*)(void))callback)();
-	return 1;
+	return sword3_native_item_menu_confirm(
+		g_menu_session, g_menu_keys,
+		g_native_menu_input.focus ==
+			SWORD3_NATIVE_MENU_FOCUS_CONTENT,
+		g_native_menu_input.item_action);
 }
 
 static int menu_native_tab_count(void)
@@ -4234,6 +4225,7 @@ static int menu_click_open_button(void)
 
 	if (!guest_load_ui() && guest_field_hud_visible()) {
 		g_menu_open_from_field = 1;
+		clear_released_guest_clicks();
 		((void (*)(void))(uintptr_t)GUEST_OPEN_NATIVE_MENU)();
 		fprintf(stderr,
 			"sword3-sdl: SELECT -> native field menu action\n");
@@ -4604,6 +4596,12 @@ static void menu_set_dir_source(int index, int axis, int down)
 			else
 				(void)menu_item_move_nested(index);
 		}
+		return;
+	}
+	if (menu_item_content_active() && (index == 0 || index == 2)) {
+		g_menu_dir_down[index] = wanted;
+		if (wanted)
+			(void)menu_item_move_direction(index);
 		return;
 	}
 	if (index == 1 || index == 3) {
@@ -6291,6 +6289,7 @@ void sword3_SDL_RenderPresent(SDL_Renderer *renderer)
 		host_cheat_draw(renderer, g_logical_w, g_logical_h);
 	SDL_RenderPresent(renderer);
 	save_flush_direction_releases();
+	sword3_native_item_menu_flush();
 	menu_flush_direction_releases();
 	fight_flush_direction_releases();
 	if (!guest_caption_choice())
