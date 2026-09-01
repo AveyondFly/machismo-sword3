@@ -263,6 +263,11 @@ static void owner_drop(enum sword3_sdl_kind kind, void *pointer)
 #define GUEST_FEX_STATUS 0x10005a7b4ull
 #define GUEST_FEX_REFINING 0x10001f708ull
 #define GUEST_EQUIP_BACK 0x1000351e4ull
+#define GUEST_EQUIP_OK 0x100035328ull
+#define GUEST_EQUIP_DOWN 0x1000355b0ull
+#define GUEST_EQUIP_UP 0x100035794ull
+#define GUEST_EQUIP_LEFT 0x100035a9cull
+#define GUEST_EQUIP_RIGHT 0x100035ae8ull
 #define GUEST_SKILL_BACK 0x100058364ull
 #define GUEST_SKILL_OK 0x1000584c4ull
 #define GUEST_SKILL_DOWN 0x100058b78ull
@@ -2687,7 +2692,7 @@ static int menu_equip_native_active(void)
 
 static int menu_equip_route_active(void)
 {
-	return g_menu_session && g_menu_keys &&
+	return g_menu_keys &&
 	       g_native_menu_input.focus ==
 		       SWORD3_NATIVE_MENU_FOCUS_CONTENT &&
 	       menu_equip_native_active();
@@ -2695,7 +2700,7 @@ static int menu_equip_route_active(void)
 
 static void menu_reconcile_equip_focus(void)
 {
-	if (!g_menu_session)
+	if (!g_menu_keys)
 		return;
 	if (menu_equip_native_active()) {
 		g_native_menu_input.tab = 1;
@@ -2703,6 +2708,8 @@ static void menu_reconcile_equip_focus(void)
 			SWORD3_NATIVE_MENU_FOCUS_CONTENT;
 		return;
 	}
+	if (!g_menu_session)
+		return;
 	if (g_native_menu_input.tab == 1 &&
 	    g_native_menu_input.focus ==
 		    SWORD3_NATIVE_MENU_FOCUS_CONTENT &&
@@ -2727,11 +2734,14 @@ static int menu_equip_move_person(int delta)
 	volatile int *person;
 	int count;
 	int current;
+	int state;
 	int target;
 	int predecessor;
 
-	if (!menu_equip_route_active() ||
-	    guest_read_i32(GUEST_EQUIP_STATE, 0) != 0 || !delta)
+	if (!menu_equip_route_active() || !delta)
+		return 0;
+	state = guest_read_i32(GUEST_EQUIP_STATE, 0);
+	if (state != 0 && state != 1)
 		return 0;
 	callback = guest_read_ptr(GUEST_FEXECUTE + 0x38);
 	if (callback != GUEST_EQUIP_NEXT_PERSON)
@@ -2748,9 +2758,46 @@ static int menu_equip_move_person(int delta)
 		predecessor = (target + count - 1) % count;
 		*person = predecessor;
 	}
+	if (state == 1)
+		*(volatile int *)(uintptr_t)GUEST_EQUIP_STATE = 0;
 	((void (*)(void))callback)();
+	if (state == 1)
+		*(volatile int *)(uintptr_t)GUEST_EQUIP_STATE = 1;
 	fprintf(stderr, "sword3-sdl: menu equip person=%d/%d\n",
 		*person, count);
+	return 1;
+}
+
+static int menu_equip_move_direction(int index)
+{
+	static const unsigned offsets[4] = {
+		0x10, 0x30, 0x08, 0x28,
+	};
+	static const uintptr_t expected[4] = {
+		GUEST_EQUIP_UP, GUEST_EQUIP_RIGHT,
+		GUEST_EQUIP_DOWN, GUEST_EQUIP_LEFT,
+	};
+	uintptr_t callback;
+
+	if (!menu_equip_route_active() || index < 0 || index >= 4)
+		return 0;
+	callback = guest_read_ptr(GUEST_FEXECUTE + offsets[index]);
+	if (callback != expected[index])
+		return 0;
+	((void (*)(void))callback)();
+	return 1;
+}
+
+static int menu_equip_confirm(void)
+{
+	uintptr_t callback;
+
+	if (!menu_equip_route_active())
+		return 0;
+	callback = guest_read_ptr(GUEST_FEXECUTE + 0x48);
+	if (callback != GUEST_EQUIP_OK)
+		return 0;
+	((void (*)(void))callback)();
 	return 1;
 }
 
@@ -4171,6 +4218,12 @@ static void menu_set_dir_source(int index, int axis, int down)
 			menu_move_tab_focus(index == 1 ? 1 : -1);
 		return;
 	}
+	if (menu_equip_route_active()) {
+		g_menu_dir_down[index] = wanted;
+		if (wanted)
+			(void)menu_equip_move_direction(index);
+		return;
+	}
 	if (menu_book_route_active()) {
 		g_menu_dir_down[index] = wanted;
 		if (wanted)
@@ -4645,6 +4698,11 @@ static int rewrite_event(SDL_Event *event)
 			event->type = SDL_FIRSTEVENT;
 			return 0;
 		}
+		if (guest_caption_choice()) {
+			caption_axis_event(event->caxis.axis, event->caxis.value);
+			event->type = SDL_FIRSTEVENT;
+			return 0;
+		}
 		if (host_menu_active()) {
 			host_menu_axis(event->caxis.axis, event->caxis.value);
 			event->type = SDL_FIRSTEVENT;
@@ -4677,11 +4735,6 @@ static int rewrite_event(SDL_Event *event)
 		}
 		if (g_menu_keys) {
 			menu_axis_event(event->caxis.axis, event->caxis.value);
-			event->type = SDL_FIRSTEVENT;
-			return 0;
-		}
-		if (guest_caption_choice()) {
-			caption_axis_event(event->caxis.axis, event->caxis.value);
 			event->type = SDL_FIRSTEVENT;
 			return 0;
 		}
@@ -4806,6 +4859,10 @@ static int rewrite_event(SDL_Event *event)
 		return 0;
 	}
 	if (button == SDL_CONTROLLER_BUTTON_B) {
+		if (guest_caption_choice()) {
+			fill_key(event, SDL_SCANCODE_ESCAPE, down);
+			return 1;
+		}
 		if (!down)
 			host_battle_button(button, 0);
 		if (!down && g_menu_captured_b) {
@@ -4943,6 +5000,10 @@ static int rewrite_event(SDL_Event *event)
 		return 0;
 	}
 	if (button == SDL_CONTROLLER_BUTTON_A) {
+		if (guest_caption_choice()) {
+			fill_key(event, SDL_SCANCODE_RETURN, down);
+			return 1;
+		}
 		if (host_menu_active()) {
 			host_menu_button(button, down);
 			event->type = SDL_FIRSTEVENT;
@@ -4986,6 +5047,14 @@ static int rewrite_event(SDL_Event *event)
 					menu_release_directions();
 					g_menu_captured_a = 1;
 					(void)menu_activate_tab();
+				}
+				event->type = SDL_FIRSTEVENT;
+				return 0;
+			}
+			if (menu_equip_route_active()) {
+				if (down) {
+					g_menu_captured_a = 1;
+					(void)menu_equip_confirm();
 				}
 				event->type = SDL_FIRSTEVENT;
 				return 0;
@@ -5209,6 +5278,11 @@ static int rewrite_event(SDL_Event *event)
 	    button == SDL_CONTROLLER_BUTTON_DPAD_DOWN ||
 	    button == SDL_CONTROLLER_BUTTON_DPAD_LEFT ||
 	    button == SDL_CONTROLLER_BUTTON_DPAD_RIGHT) {
+		if (guest_caption_choice()) {
+			caption_dpad_event(button, down);
+			event->type = SDL_FIRSTEVENT;
+			return 0;
+		}
 		if (host_menu_active()) {
 			host_menu_button(button, down);
 			event->type = SDL_FIRSTEVENT;
@@ -5248,11 +5322,6 @@ static int rewrite_event(SDL_Event *event)
 		}
 		if (g_menu_keys) {
 			menu_dpad_event(button, down);
-			event->type = SDL_FIRSTEVENT;
-			return 0;
-		}
-		if (guest_caption_choice()) {
-			caption_dpad_event(button, down);
 			event->type = SDL_FIRSTEVENT;
 			return 0;
 		}
