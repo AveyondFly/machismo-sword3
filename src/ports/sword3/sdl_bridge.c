@@ -318,6 +318,10 @@ static void owner_drop(enum sword3_sdl_kind kind, void *pointer)
 #define GUEST_ACTION7_MASK 0x40u
 #define GUEST_SAVE_FILE 0x100028318ull
 #define GUEST_LOAD_GAME 0x100028f20ull
+#define GUEST_SAVE_UI_OPEN 0x100026298ull
+#define GUEST_SAVE_UI_READY 0x1002a8134ull
+#define GUEST_SAVE_UI_LOAD 0x1002a8138ull
+#define GUEST_SAVE_UI_STATE 0x1002a812cull
 #define GUEST_RESET_KEYS 0x1001c18d4ull
 #define GUEST_SAVE_INDEX 0x1002a9ca4ull
 #define GUEST_LAYER_FIELD 0xea60
@@ -478,6 +482,9 @@ static int g_save_ui;
 static int g_save_list_ui;
 static int g_save_list_hit;
 static Uint32 g_save_list_ms;
+static int g_host_save_owner;
+static int g_host_save_seen;
+static int g_host_save_return_pending;
 static int g_shop_ui;
 static int g_shop_hit;
 static Uint32 g_shop_ms;
@@ -4943,6 +4950,8 @@ static void fight_confirm_result(void)
 	((void (*)(void))(uintptr_t)GUEST_BATTLE_UPDATE)();
 }
 
+static void host_open_native_save_ui(int load);
+
 static void host_native_menu_handoff_poll(void)
 {
 	Uint32 now;
@@ -5004,6 +5013,53 @@ static void host_native_menu_handoff_poll(void)
 	fprintf(stderr, "sword3-sdl: host menu -> native journal\n");
 }
 
+static void host_open_native_save_ui(int load)
+{
+	g_host_save_owner = load ? 2 : 1;
+	g_host_save_seen = 0;
+	g_host_save_return_pending = 0;
+	if (guest_data_ok(GUEST_MENU_PAGE))
+		*(volatile int *)(uintptr_t)GUEST_MENU_PAGE = load ? 2 : 1;
+	if (guest_data_ok(GUEST_SAVE_UI_READY))
+		*(volatile int *)(uintptr_t)GUEST_SAVE_UI_READY = 1;
+	if (guest_data_ok(GUEST_SAVE_UI_LOAD))
+		*(volatile int *)(uintptr_t)GUEST_SAVE_UI_LOAD = load ? 1 : 0;
+	if (guest_data_ok(GUEST_SAVE_UI_STATE))
+		*(volatile int *)(uintptr_t)GUEST_SAVE_UI_STATE = 3;
+	release_guest_walk();
+	((void (*)(void))(uintptr_t)GUEST_SAVE_UI_OPEN)();
+	fprintf(stderr, "sword3-sdl: host menu -> native %s UI\n",
+		load ? "load" : "save");
+}
+
+static void host_save_owner_poll(void)
+{
+	if (!g_host_save_owner)
+		return;
+	if (guest_save_list()) {
+		g_host_save_seen = 1;
+		return;
+	}
+	if (!g_host_save_seen)
+		return;
+	if (!g_host_save_return_pending) {
+		g_host_save_owner = 0;
+		g_host_save_seen = 0;
+		return;
+	}
+	if (menu_drawn()) {
+		if (!g_menu_close_pending)
+			(void)menu_try_close();
+		return;
+	}
+	g_host_save_owner = 0;
+	g_host_save_seen = 0;
+	g_host_save_return_pending = 0;
+	release_guest_walk();
+	host_menu_open_book();
+	fprintf(stderr, "sword3-sdl: native save back -> host book menu\n");
+}
+
 static void host_menu_run_pending(void)
 {
 	int action;
@@ -5017,6 +5073,10 @@ static void host_menu_run_pending(void)
 	action = host_menu_take_pending(&slot);
 	if (action < 0)
 		return;
+	if (action == 4 || action == 5) {
+		host_open_native_save_ui(action == 5);
+		return;
+	}
 	if (action == 2 || action == 3) {
 		menu_begin_open(-1);
 		g_menu_open_from_field = 1;
@@ -5058,6 +5118,7 @@ static void apply_pad_pointer(void)
 	host_unlink_return_menu();
 	host_menu_run_pending();
 	sync_ui_mode();
+	host_save_owner_poll();
 	menu_poll_open_pulse();
 	menu_trace_poll();
 	ensure_cursor();
@@ -5383,6 +5444,12 @@ static int rewrite_event(SDL_Event *event)
 				g_after_continue = 0;
 				g_load_context_done = 1;
 			}
+			fill_key(event, SDL_SCANCODE_ESCAPE, down);
+			return 1;
+		}
+		if (g_host_save_owner && guest_save_list()) {
+			if (down)
+				g_host_save_return_pending = 1;
 			fill_key(event, SDL_SCANCODE_ESCAPE, down);
 			return 1;
 		}

@@ -62,6 +62,8 @@
 #define HOST_MENU_FACE_QQ 36
 #define HOST_MENU_TSW_KEY 0x100319dd8ull
 #define HOST_MENU_TSW_MAGIC 0x100319dc0ull
+#define HOST_MENU_SCREEN 0x100319450ull
+#define HOST_MENU_REFRESH_SNAPSHOT 0x100201568ull
 #define HOST_MENU_ITEM_REPO 0x1002ab4d8ull
 #define HOST_MENU_EQUIP_REPO 0x1002ab628ull
 #define HOST_MENU_SKILL_REPO 0x1002ab608ull
@@ -403,6 +405,8 @@ void host_menu_close(void)
 
 void host_menu_open(void)
 {
+	((void (*)(void *, float))(uintptr_t)HOST_MENU_REFRESH_SNAPSHOT)(
+		(void *)(uintptr_t)HOST_MENU_SCREEN, 0.25f);
 	g_open = 1;
 	g_tab = HOST_MENU_TAB_ITEM;
 	g_layer = HOST_MENU_LAYER_TABS;
@@ -1768,15 +1772,6 @@ static void host_menu_enter_inner(void)
 	fprintf(stderr, "sword3-sdl: host menu enter tab=%d\n", g_tab);
 }
 
-static void host_menu_enter_slots(int mode)
-{
-	g_tab = HOST_MENU_TAB_BOOK;
-	g_layer = HOST_MENU_LAYER_SLOTS;
-	g_slot_mode = mode;
-	g_slot_focus = 0;
-	fprintf(stderr, "sword3-sdl: host menu slots mode=%d\n", mode);
-}
-
 static void host_menu_move_slot(int dx, int dy)
 {
 	int delta;
@@ -2031,7 +2026,12 @@ static void host_menu_confirm(void)
 		return;
 	}
 	if (g_book_focus == 0 || g_book_focus == 1) {
-		host_menu_enter_slots(g_book_focus);
+		g_pending = g_book_focus == 0 ? 4 : 5;
+		g_pending_slot = 0;
+		host_menu_close();
+		fprintf(stderr,
+			"sword3-sdl: host menu native %s pending\n",
+			g_book_focus == 0 ? "save" : "load");
 		return;
 	}
 	if (g_book_focus == 2) {
