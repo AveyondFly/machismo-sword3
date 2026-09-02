@@ -191,23 +191,18 @@ static void owner_drop(enum sword3_sdl_kind kind, void *pointer)
  * after Continue and after battle; it is not a save-screen flag.
  *
  * Field and system menu:
- *   SELECT        -> open the host-drawn system menu on the field
- *                    (does not open the iOS touch menu). Title/load
- *                    still send Escape. SWORD3_NATIVE_MENU=1 restores
- *                    the old tap / draw_gate path on SELECT.
- *   L3            -> open the original iOS system menu (compare only).
- *                    Tabs still tap-switch; 天书 buttons are not
- *                    host-focused or host-clicked.
  *   B             -> close/back in the host menu. Original menu: tap
  *                    the back icon. Field: swallowed.
  *   A             -> confirm in the host menu; field Return talks.
+ *   X             -> open the host menu from the field.
+ *   SELECT        -> open the original native system menu.
  *   D-pad / stick in host menu -> tabs, or 天书 存盘/读取/记载/设置/离开.
  *                    Up on 天书 returns to the tab strip.
  *
  * In the field the physical pad is the pad:
  *   stick         -> same CONTROLLER_DPAD slots the D-pad uses (polled)
  *   D-pad         -> native controller buttons (pad+0x20c0)
- *   A talks (Return); B back-only; SELECT host menu; L3 original menu
+ *   A talks (Return); B back-only; X host menu; SELECT original menu
  * Guest analog writes hat slots that field GetDirState does not poll;
  * D-pad buttons are the bindings it actually walks. Walk vs run is
  * decided in PlayerMove (speed 1 vs 16), not by rewriting every
@@ -1030,14 +1025,6 @@ static int menu_select_busy(void)
 	if (menu_drawn() || menu_opening())
 		return 1;
 	return g_menu_session && !g_menu_saw_draw;
-}
-
-static int native_system_menu(void)
-{
-	const char *value;
-
-	value = getenv("SWORD3_NATIVE_MENU");
-	return value && value[0] == '1' && value[1] == '\0';
 }
 
 static int guest_system_menu(void)
@@ -5375,9 +5362,30 @@ static int rewrite_event(SDL_Event *event)
 		event->type = SDL_FIRSTEVENT;
 		return 0;
 	}
+	if (button == SDL_CONTROLLER_BUTTON_X) {
+		if (host_menu_active() || list_arrow_pad() || g_title_keys ||
+		    g_fight_ui || host_battle_owns_pad() || g_pointer_ui ||
+		    menu_drawn() || menu_opening() || g_menu_session) {
+			event->type = SDL_FIRSTEVENT;
+			return 0;
+		}
+		if (down) {
+			if (g_menu_open_pending || g_menu_close_pending)
+				menu_leave_session();
+			release_guest_walk();
+			host_menu_open();
+			fprintf(stderr, "sword3-sdl: X -> host menu\n");
+		}
+		event->type = SDL_FIRSTEVENT;
+		return 0;
+	}
 	if (button == SDL_CONTROLLER_BUTTON_BACK) {
 		g_btn_back = down;
 		maybe_combo_exit();
+		if (g_quit_queued) {
+			event->type = SDL_FIRSTEVENT;
+			return 0;
+		}
 		if (g_save_ui) {
 			if (down) {
 				g_after_continue = 0;
@@ -5411,16 +5419,9 @@ static int rewrite_event(SDL_Event *event)
 			if (g_menu_session || g_menu_open_pending ||
 			    g_menu_close_pending)
 				menu_leave_session();
-			if (native_system_menu()) {
-				menu_begin_open(SDL_CONTROLLER_BUTTON_BACK);
-				fprintf(stderr,
-					"sword3-sdl: SELECT -> native menu\n");
-			} else {
-				release_guest_walk();
-				host_menu_open();
-				fprintf(stderr,
-					"sword3-sdl: SELECT -> host menu\n");
-			}
+			release_guest_walk();
+			menu_begin_open(SDL_CONTROLLER_BUTTON_BACK);
+			fprintf(stderr, "sword3-sdl: SELECT -> native menu\n");
 			event->type = SDL_FIRSTEVENT;
 			return 0;
 		}
@@ -5951,34 +5952,6 @@ static int rewrite_event(SDL_Event *event)
 		return 1;
 	}
 	if (button == SDL_CONTROLLER_BUTTON_LEFTSTICK) {
-		if (list_arrow_pad() || g_title_keys || g_fight_ui ||
-		    g_pointer_ui) {
-			event->type = SDL_FIRSTEVENT;
-			return 0;
-		}
-		if (g_menu_open_button == SDL_CONTROLLER_BUTTON_LEFTSTICK) {
-			if (!down) {
-				menu_finish_open();
-				fprintf(stderr,
-					"sword3-sdl: L3 menu button up\n");
-			}
-			event->type = SDL_FIRSTEVENT;
-			return 0;
-		}
-		if (menu_drawn() || menu_opening() || g_menu_session) {
-			event->type = SDL_FIRSTEVENT;
-			return 0;
-		}
-		if (down) {
-			if (host_menu_active())
-				host_menu_close();
-			if (g_menu_session || g_menu_open_pending ||
-			    g_menu_close_pending)
-				menu_leave_session();
-			release_guest_walk();
-			menu_begin_open(SDL_CONTROLLER_BUTTON_LEFTSTICK);
-			fprintf(stderr, "sword3-sdl: L3 -> native menu\n");
-		}
 		event->type = SDL_FIRSTEVENT;
 		return 0;
 	}
