@@ -92,6 +92,17 @@
 #define HOST_MENU_LUA_NUM 0x1001c7040ull
 #define HOST_MENU_LUA_STR 0x1001c7168ull
 #define HOST_MENU_LUA_DB 0x1001c0108ull
+#define HOST_MENU_LUA_GETTOP 0x10009648cull
+#define HOST_MENU_LUA_GETGLOBAL 0x1000970d4ull
+#define HOST_MENU_LUA_PUSHSTRING 0x100096e78ull
+#define HOST_MENU_LUA_GETTABLE 0x10009714cull
+#define HOST_MENU_LUA_TYPE 0x100096780ull
+#define HOST_MENU_LUA_PUSHNIL 0x100096d78ull
+#define HOST_MENU_LUA_NEXT 0x100097d00ull
+#define HOST_MENU_LUA_TOINTEGER 0x100096a48ull
+#define HOST_MENU_LUA_GETFIELD 0x100097180ull
+#define HOST_MENU_LUA_TOBOOLEAN 0x100096b20ull
+#define HOST_MENU_LUA_SETTOP 0x1000964a8ull
 #define HOST_MENU_FN_BOOK 0x100274071ull
 #define HOST_MENU_BOOK_BUILD 0x100056318ull
 #define HOST_MENU_BOOK_N 0x1002f3634ull
@@ -105,6 +116,11 @@
 #define HOST_MENU_STR_SPD 0x100272a31ull
 #define HOST_MENU_STR_HELP 0x10027297dull
 #define HOST_MENU_STR_INFO 0x100272986ull
+#define HOST_MENU_STR_SAVE_DATA 0x100272b99ull
+#define HOST_MENU_STR_QUEST 0x100273e98ull
+#define HOST_MENU_STR_ENABLE 0x100273e9eull
+#define HOST_MENU_STR_QUEST_INFO 0x100273fd0ull
+#define HOST_MENU_STR_MAIN_STORY 0x100273fd5ull
 #define HOST_MENU_BOOK_SRC 0x1002a85d8ull
 #define HOST_MENU_BOOK_SRC_N 0x1002a85d0ull
 #define HOST_MENU_BESTIARY_N 128
@@ -143,6 +159,7 @@ enum host_menu_layer {
 	HOST_MENU_LAYER_BESTIARY,
 	HOST_MENU_LAYER_PICK,
 	HOST_MENU_LAYER_ASK,
+	HOST_MENU_LAYER_JOURNAL,
 	HOST_MENU_LAYER_EQUIP
 };
 
@@ -232,6 +249,12 @@ struct host_menu_item_meta {
 	char info[64];
 };
 
+struct host_menu_journal {
+	int id;
+	int main_story;
+	char text[160];
+};
+
 static struct host_menu_actor g_party[HOST_MENU_PARTY_N];
 static struct host_menu_item *g_bag;
 static int g_bag_cap;
@@ -239,6 +262,10 @@ static struct host_menu_item g_equip[HOST_MENU_EQUIP_N];
 static struct host_menu_item g_skills[HOST_MENU_SKILL_N];
 static struct host_menu_item_meta g_item_meta[HOST_MENU_ITEM_META_N];
 static int g_item_meta_n;
+static struct host_menu_journal *g_journal;
+static int g_journal_n;
+static int g_journal_cap;
+static int g_journal_focus;
 static int g_party_i;
 static int g_party_logged;
 static int g_pick_logged;
@@ -304,6 +331,7 @@ static void host_menu_draw_equip_pick(SDL_Renderer *renderer, SDL_Rect well,
 static int host_menu_lua_text(int temp, uintptr_t field, char *dst,
 			      size_t dstn);
 static void host_menu_load_item_meta(struct host_menu_item *it);
+static void host_menu_journal_open(void);
 
 static const char *g_tab_text[HOST_MENU_TABS] = {
 	"物品", "装备", "奇术", "状态", "炼妖", "天书"
@@ -393,6 +421,11 @@ void host_menu_close(void)
 	g_bag = NULL;
 	g_bag_n = 0;
 	g_bag_cap = 0;
+	free(g_journal);
+	g_journal = NULL;
+	g_journal_n = 0;
+	g_journal_cap = 0;
+	g_journal_focus = 0;
 	g_act_node = 0;
 	g_act_flags = 0;
 	g_act_from_new = 0;
@@ -437,6 +470,11 @@ void host_menu_open(void)
 	free(g_bag);
 	g_bag = NULL;
 	g_bag_cap = 0;
+	free(g_journal);
+	g_journal = NULL;
+	g_journal_n = 0;
+	g_journal_cap = 0;
+	g_journal_focus = 0;
 	memset(g_equip, 0, sizeof(g_equip));
 	memset(g_skills, 0, sizeof(g_skills));
 	memset(g_dir_down, 0, sizeof(g_dir_down));
@@ -1074,7 +1112,8 @@ static int host_menu_lua_int(uintptr_t fn, int temp, uintptr_t field)
 		(const void *)(uintptr_t)field);
 }
 
-static int host_menu_lua_text(int temp, uintptr_t field, char *dst, size_t dstn)
+static int host_menu_lua_table_text(uintptr_t table, int temp, uintptr_t field,
+				    char *dst, size_t dstn)
 {
 	const char *raw;
 	const char *shown;
@@ -1087,13 +1126,19 @@ static int host_menu_lua_text(int temp, uintptr_t field, char *dst, size_t dstn)
 	raw = ((const char *(*)(void *, const void *, int, const void *))(
 			uintptr_t)HOST_MENU_LUA_STR)(
 		(void *)(uintptr_t)HOST_MENU_LUA_BIND,
-		(const void *)(uintptr_t)HOST_MENU_STR_ITEMTEMP, temp,
+		(const void *)(uintptr_t)table, temp,
 		(const void *)(uintptr_t)field);
 	if (!raw)
 		return 0;
 	shown = ((const char *(*)(const void *))(uintptr_t)HOST_MENU_LUA_DB)(
 		raw);
 	return host_menu_copy_name(dst, dstn, (uintptr_t)shown);
+}
+
+static int host_menu_lua_text(int temp, uintptr_t field, char *dst, size_t dstn)
+{
+	return host_menu_lua_table_text(HOST_MENU_STR_ITEMTEMP, temp, field,
+					dst, dstn);
 }
 
 static void host_menu_load_item_meta(struct host_menu_item *it)
@@ -1128,6 +1173,94 @@ static void host_menu_load_item_meta(struct host_menu_item *it)
 	}
 	snprintf(it->help, sizeof(it->help), "%s", meta->help);
 	snprintf(it->info, sizeof(it->info), "%s", meta->info);
+}
+
+static int host_menu_journal_add(int id)
+{
+	struct host_menu_journal *entries;
+	struct host_menu_journal *entry;
+	int new_cap;
+
+	if (id <= 0)
+		return 0;
+	if (g_journal_n == g_journal_cap) {
+		new_cap = g_journal_cap > 0 ? g_journal_cap * 2 : 16;
+		entries = realloc(g_journal,
+				  (size_t)new_cap * sizeof(*g_journal));
+		if (!entries)
+			return 0;
+		g_journal = entries;
+		g_journal_cap = new_cap;
+	}
+	entry = &g_journal[g_journal_n];
+	memset(entry, 0, sizeof(*entry));
+	entry->id = id;
+	if (!host_menu_lua_table_text(
+		    HOST_MENU_STR_QUEST, id, HOST_MENU_STR_QUEST_INFO,
+		    entry->text, sizeof(entry->text)))
+		snprintf(entry->text, sizeof(entry->text), "事件 #%d", id);
+	entry->main_story =
+		((int (*)(void *, const void *, int, const void *))(
+			 uintptr_t)HOST_MENU_LUA_HAS)(
+			(void *)(uintptr_t)HOST_MENU_LUA_BIND,
+			(const void *)(uintptr_t)HOST_MENU_STR_QUEST, id,
+			(const void *)(uintptr_t)HOST_MENU_STR_MAIN_STORY) != 0;
+	g_journal_n++;
+	return 1;
+}
+
+static void host_menu_journal_open(void)
+{
+	void *lua;
+	int (*gettop)(void *);
+	int (*next)(void *, int);
+	int top;
+
+	free(g_journal);
+	g_journal = NULL;
+	g_journal_n = 0;
+	g_journal_cap = 0;
+	g_journal_focus = 0;
+	if (!host_menu_lua_ready())
+		return;
+	lua = (void *)(uintptr_t)host_menu_guest_ptr(HOST_MENU_LUA_BIND);
+	if (!lua)
+		return;
+	gettop = (int (*)(void *))(uintptr_t)HOST_MENU_LUA_GETTOP;
+	next = (int (*)(void *, int))(uintptr_t)HOST_MENU_LUA_NEXT;
+	top = gettop(lua);
+	((void (*)(void *, const char *))(uintptr_t)HOST_MENU_LUA_GETGLOBAL)(
+		lua, (const char *)(uintptr_t)HOST_MENU_STR_SAVE_DATA);
+	((void (*)(void *, const char *))(uintptr_t)HOST_MENU_LUA_PUSHSTRING)(
+		lua, (const char *)(uintptr_t)HOST_MENU_STR_QUEST);
+	((void (*)(void *, int))(uintptr_t)HOST_MENU_LUA_GETTABLE)(lua, -2);
+	if (((int (*)(void *, int))(uintptr_t)HOST_MENU_LUA_TYPE)(lua, -1) !=
+	    0) {
+		((void (*)(void *))(uintptr_t)HOST_MENU_LUA_PUSHNIL)(lua);
+		while (next(lua, -2)) {
+			long long id;
+			int enabled;
+
+			id = ((long long (*)(void *, int, int *))(uintptr_t)
+				      HOST_MENU_LUA_TOINTEGER)(lua, -2, NULL);
+			((void (*)(void *, int, const char *))(uintptr_t)
+				 HOST_MENU_LUA_GETFIELD)(
+				lua, -1,
+				(const char *)(uintptr_t)HOST_MENU_STR_ENABLE);
+			enabled = ((int (*)(void *, int))(uintptr_t)
+					   HOST_MENU_LUA_TOBOOLEAN)(lua, -1);
+			((void (*)(void *, int))(uintptr_t)HOST_MENU_LUA_SETTOP)(
+				lua, -2);
+			if (enabled && id > 0 && id <= INT_MAX &&
+			    !host_menu_journal_add((int)id))
+				break;
+			((void (*)(void *, int))(uintptr_t)HOST_MENU_LUA_SETTOP)(
+				lua, -2);
+		}
+	}
+	((void (*)(void *, int))(uintptr_t)HOST_MENU_LUA_SETTOP)(lua, top);
+	g_layer = HOST_MENU_LAYER_JOURNAL;
+	fprintf(stderr, "sword3-sdl: host journal open n=%d\n", g_journal_n);
 }
 
 static void host_menu_bestiary_load_sel(void)
@@ -1218,6 +1351,15 @@ static void host_menu_move_bestiary(int delta)
 			  g_bestiary_n) %
 			 g_bestiary_n;
 	host_menu_bestiary_load_sel();
+}
+
+static void host_menu_move_journal(int delta)
+{
+	if (g_journal_n <= 0)
+		return;
+	g_journal_focus = (g_journal_focus + delta % g_journal_n +
+			   g_journal_n) %
+			  g_journal_n;
 }
 
 static void host_menu_item_unlink(uintptr_t target)
@@ -1620,7 +1762,8 @@ static int host_menu_layer_page(void)
 	       g_layer == HOST_MENU_LAYER_STUB ||
 	       g_layer == HOST_MENU_LAYER_BESTIARY ||
 	       g_layer == HOST_MENU_LAYER_PICK ||
-	       g_layer == HOST_MENU_LAYER_ASK;
+	       g_layer == HOST_MENU_LAYER_ASK ||
+	       g_layer == HOST_MENU_LAYER_JOURNAL;
 }
 
 static void host_menu_item_sort(void)
@@ -1905,6 +2048,13 @@ static void host_menu_dir(int index, int down)
 			host_menu_move_bestiary(-1);
 		return;
 	}
+	if (g_layer == HOST_MENU_LAYER_JOURNAL) {
+		if (index == 2)
+			host_menu_move_journal(1);
+		else if (index == 0)
+			host_menu_move_journal(-1);
+		return;
+	}
 
 	if (g_layer == HOST_MENU_LAYER_SLOTS) {
 		if (index == 1)
@@ -1970,7 +2120,8 @@ static void host_menu_set_dir(int index, int axis, int down)
 static void host_menu_confirm(void)
 {
 	if (g_layer == HOST_MENU_LAYER_STUB ||
-	    g_layer == HOST_MENU_LAYER_BESTIARY)
+	    g_layer == HOST_MENU_LAYER_BESTIARY ||
+	    g_layer == HOST_MENU_LAYER_JOURNAL)
 		return;
 	if (g_layer == HOST_MENU_LAYER_PICK) {
 		host_menu_item_use_commit();
@@ -2035,10 +2186,7 @@ static void host_menu_confirm(void)
 		return;
 	}
 	if (g_book_focus == 2) {
-		g_pending = 2;
-		g_pending_slot = 0;
-		host_menu_close();
-		fprintf(stderr, "sword3-sdl: host menu journal pending\n");
+		host_menu_journal_open();
 		return;
 	}
 	g_stub = g_book_focus;
@@ -2059,6 +2207,7 @@ static void host_menu_back(void)
 	if (g_layer == HOST_MENU_LAYER_STUB ||
 	    g_layer == HOST_MENU_LAYER_SLOTS ||
 	    g_layer == HOST_MENU_LAYER_BESTIARY ||
+	    g_layer == HOST_MENU_LAYER_JOURNAL ||
 	    g_layer == HOST_MENU_LAYER_PICK ||
 	    g_layer == HOST_MENU_LAYER_ASK) {
 		g_layer = HOST_MENU_LAYER_INNER;
@@ -4233,6 +4382,89 @@ static void host_menu_draw_bestiary(SDL_Renderer *renderer, SDL_Rect well,
 			    g_ink_hint);
 }
 
+static void host_menu_draw_journal(SDL_Renderer *renderer, SDL_Rect well,
+				  int logical_w, int logical_h, int pt,
+				  int pt_small)
+{
+	SDL_Rect list;
+	SDL_Rect row;
+	SDL_Rect old_clip;
+	SDL_bool had_clip;
+	int rows;
+	int start;
+	int rh;
+	int i;
+	int index;
+	int selected;
+
+	host_menu_fill(renderer, well, 8, 12, 10, 230);
+	host_menu_frame(renderer, well, 2, 212, 176, 88, 255);
+	host_menu_text_left(renderer, "记载",
+			    well.x + host_sx(14, logical_w),
+			    well.y + host_sy(10, logical_h), pt, g_ink_gold);
+	list = well;
+	list.x += host_sx(10, logical_w);
+	list.y += host_sy(44, logical_h);
+	list.w -= host_sx(20, logical_w);
+	list.h -= host_sy(76, logical_h);
+	if (g_journal_n <= 0) {
+		host_menu_text_center(renderer, "当前没有记载",
+				      list.x + list.w / 2,
+				      list.y + list.h / 2, pt, g_ink_hint);
+	} else {
+		rh = host_sy(64, logical_h);
+		if (rh < 36)
+			rh = 36;
+		rows = list.h / rh;
+		if (rows < 1)
+			rows = 1;
+		if (rows > g_journal_n)
+			rows = g_journal_n;
+		start = g_journal_focus - rows / 2;
+		if (start < 0)
+			start = 0;
+		if (start + rows > g_journal_n)
+			start = g_journal_n - rows;
+		host_menu_scroll(renderer, list, start, rows, g_journal_n);
+		had_clip = SDL_RenderIsClipEnabled(renderer);
+		SDL_RenderGetClipRect(renderer, &old_clip);
+		SDL_RenderSetClipRect(renderer, &list);
+		for (i = 0; i < rows; i++) {
+			index = start + i;
+			selected = index == g_journal_focus;
+			row.x = list.x;
+			row.y = list.y + i * rh;
+			row.w = list.w - host_sx(14, logical_w);
+			row.h = rh - host_sy(4, logical_h);
+			if (selected)
+				host_menu_fill(renderer, row, 88, 68, 28, 180);
+			if (selected)
+				host_menu_frame(renderer, row, 2, g_ink_gold.r,
+						g_ink_gold.g, g_ink_gold.b,
+						255);
+			if (g_journal[index].main_story)
+				host_menu_text_center(
+					renderer, "主",
+					row.x + host_sx(15, logical_w),
+					row.y + row.h / 2, pt_small,
+					g_ink_gold);
+			host_menu_text_left(
+				renderer, g_journal[index].text,
+				row.x + host_sx(34, logical_w),
+				row.y + row.h / 2 - pt_small / 2, pt_small,
+				selected ? g_ink_gold : g_ink_body);
+		}
+		if (had_clip)
+			SDL_RenderSetClipRect(renderer, &old_clip);
+		else
+			SDL_RenderSetClipRect(renderer, NULL);
+	}
+	host_menu_text_center(renderer, "上下查看    B 返回",
+			      well.x + well.w / 2,
+			      well.y + well.h - host_sy(20, logical_h),
+			      pt_small, g_ink_hint);
+}
+
 static void host_menu_draw_pick(SDL_Renderer *renderer, SDL_Rect well,
 			       int logical_w, int logical_h, int pt,
 			       int pt_small)
@@ -4577,6 +4809,9 @@ void host_menu_draw(SDL_Renderer *renderer, int logical_w, int logical_h)
 	else if (g_layer == HOST_MENU_LAYER_BESTIARY)
 		host_menu_draw_bestiary(renderer, well, logical_w, logical_h,
 					pt, pt_small);
+	else if (g_layer == HOST_MENU_LAYER_JOURNAL)
+		host_menu_draw_journal(renderer, well, logical_w, logical_h,
+				      pt, pt_small);
 	else if (g_layer == HOST_MENU_LAYER_PICK)
 		host_menu_draw_pick(renderer, well, logical_w, logical_h, pt,
 				    pt_small);
