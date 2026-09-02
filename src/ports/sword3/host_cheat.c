@@ -67,6 +67,7 @@
 #define CHEAT_CATCH_ROLL0_RA 0x10000bad4ull
 #define CHEAT_CATCH_ROLL1_RA 0x10000bb1cull
 #define CHEAT_CATCH_ROLL2_RA 0x10000bb6cull
+#define CHEAT_STEAL_ROLL_RA 0x10000dc78ull
 #define CHEAT_CAL_LIFE 0x10007b398ull
 #define CHEAT_LOAD_BATTLE 0x100046188ull
 #define CHEAT_LOAD_BATTLE_PLAYERMOVE_RA 0x100073d1cull
@@ -605,6 +606,8 @@ static int cheat_random_hook(int limit)
 	     caller == CHEAT_CATCH_ROLL1_RA ||
 	     caller == CHEAT_CATCH_ROLL2_RA))
 		return 0;
+	if (g_steal && limit == 100 && caller == CHEAT_STEAL_ROLL_RA)
+		return 0;
 	return result;
 }
 
@@ -742,6 +745,11 @@ static void cheat_apply(void)
 	if (g_sel == CHEAT_CATCH) {
 		g_catch = !g_catch;
 		cheat_set_status(g_catch ? "抓怪必成已开" : "抓怪必成已关");
+		return;
+	}
+	if (g_sel == CHEAT_STEAL) {
+		g_steal = !g_steal;
+		cheat_set_status(g_steal ? "偷窃必成已开" : "偷窃必成已关");
 		return;
 	}
 	cheat_set_status("尚未实现");
