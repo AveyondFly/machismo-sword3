@@ -476,6 +476,7 @@ static int g_cursor_ready;
 static int g_finger_down;
 static int g_btn_back;
 static int g_btn_start;
+static int g_quit_queued;
 static int g_menu_item;
 static int g_pointer_ui = 1;
 static int g_save_ui;
@@ -1860,6 +1861,21 @@ static void emit_finger_motion(void)
 	SDL_PushEvent(&event);
 }
 
+static int queue_normal_quit(void)
+{
+	SDL_Event event;
+
+	if (g_quit_queued)
+		return 1;
+	memset(&event, 0, sizeof(event));
+	event.type = SDL_QUIT;
+	event.quit.timestamp = SDL_GetTicks();
+	if (SDL_PushEvent(&event) < 0)
+		return 0;
+	g_quit_queued = 1;
+	return 1;
+}
+
 static void maybe_combo_exit(void)
 {
 	int start = g_btn_start;
@@ -1871,10 +1887,14 @@ static void maybe_combo_exit(void)
 		back |= SDL_GameControllerGetButton(g_pad,
 						    SDL_CONTROLLER_BUTTON_BACK);
 	}
-	if (start && back) {
-		fprintf(stderr, "sword3-sdl: SELECT+START -> exit\n");
-		_exit(0);
-	}
+	if (!start || !back || g_quit_queued)
+		return;
+	if (queue_normal_quit())
+		fprintf(stderr,
+			"sword3-sdl: SELECT+START -> quit queued (no extra save)\n");
+	else
+		fprintf(stderr, "sword3-sdl: SELECT+START quit failed: %s\n",
+			SDL_GetError());
 }
 
 static void ensure_gamecontroller(void)
@@ -5073,6 +5093,24 @@ static void host_menu_run_pending(void)
 	action = host_menu_take_pending(&slot);
 	if (action < 0)
 		return;
+	if (action == 6) {
+		/*
+		 * Native auto-save calls SaveFileACT(0) synchronously from the
+		 * field update thread.  Running one final save here serializes
+		 * behind any prior write; only enqueue quit after it returns.
+		 */
+		((void (*)(int))(uintptr_t)GUEST_SAVE_FILE)(0);
+		if (!queue_normal_quit()) {
+			fprintf(stderr,
+				"sword3-sdl: safe exit event failed: %s\n",
+				SDL_GetError());
+			host_menu_open_book();
+			return;
+		}
+		fprintf(stderr,
+			"sword3-sdl: final auto-save complete; quit queued\n");
+		return;
+	}
 	if (action == 4 || action == 5) {
 		host_open_native_save_ui(action == 5);
 		return;

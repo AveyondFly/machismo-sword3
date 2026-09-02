@@ -159,6 +159,7 @@ enum host_menu_layer {
 	HOST_MENU_LAYER_BESTIARY,
 	HOST_MENU_LAYER_PICK,
 	HOST_MENU_LAYER_ASK,
+	HOST_MENU_LAYER_EXIT_ASK,
 	HOST_MENU_LAYER_JOURNAL,
 	HOST_MENU_LAYER_EQUIP
 };
@@ -1763,6 +1764,7 @@ static int host_menu_layer_page(void)
 	       g_layer == HOST_MENU_LAYER_BESTIARY ||
 	       g_layer == HOST_MENU_LAYER_PICK ||
 	       g_layer == HOST_MENU_LAYER_ASK ||
+	       g_layer == HOST_MENU_LAYER_EXIT_ASK ||
 	       g_layer == HOST_MENU_LAYER_JOURNAL;
 }
 
@@ -2135,6 +2137,14 @@ static void host_menu_confirm(void)
 		host_menu_item_drop_commit();
 		return;
 	}
+	if (g_layer == HOST_MENU_LAYER_EXIT_ASK) {
+		g_pending = 6;
+		g_pending_slot = 0;
+		host_menu_close();
+		fprintf(stderr,
+			"sword3-sdl: host menu safe exit pending\n");
+		return;
+	}
 	if (g_layer == HOST_MENU_LAYER_TABS) {
 		if (g_tab == HOST_MENU_TAB_REFINING &&
 		    host_menu_refining_enabled()) {
@@ -2173,7 +2183,7 @@ static void host_menu_confirm(void)
 	if (g_tab != HOST_MENU_TAB_BOOK)
 		return;
 	if (g_book_focus == 4) {
-		host_menu_close();
+		g_layer = HOST_MENU_LAYER_EXIT_ASK;
 		return;
 	}
 	if (g_book_focus == 0 || g_book_focus == 1) {
@@ -2209,7 +2219,8 @@ static void host_menu_back(void)
 	    g_layer == HOST_MENU_LAYER_BESTIARY ||
 	    g_layer == HOST_MENU_LAYER_JOURNAL ||
 	    g_layer == HOST_MENU_LAYER_PICK ||
-	    g_layer == HOST_MENU_LAYER_ASK) {
+	    g_layer == HOST_MENU_LAYER_ASK ||
+	    g_layer == HOST_MENU_LAYER_EXIT_ASK) {
 		g_layer = HOST_MENU_LAYER_INNER;
 		g_stub = -1;
 		host_menu_item_clear_hold();
@@ -4549,6 +4560,27 @@ static void host_menu_draw_ask(SDL_Renderer *renderer, SDL_Rect well,
 			      pt_small, g_ink_hint);
 }
 
+static void host_menu_draw_exit_ask(SDL_Renderer *renderer, SDL_Rect well,
+				   int logical_w, int logical_h, int pt,
+				   int pt_small)
+{
+	(void)logical_w;
+	host_menu_fill(renderer, well, 8, 12, 10, 230);
+	host_menu_frame(renderer, well, 2, 212, 176, 88, 255);
+	host_menu_text_center(renderer, "确定退出游戏？",
+			      well.x + well.w / 2,
+			      well.y + well.h / 2 - host_sy(24, logical_h), pt,
+			      g_ink_gold);
+	host_menu_text_center(renderer, "退出前将完成一次自动存档",
+			      well.x + well.w / 2,
+			      well.y + well.h / 2 + host_sy(12, logical_h),
+			      pt_small, g_ink_body);
+	host_menu_text_center(renderer, "A 确定    B 取消",
+			      well.x + well.w / 2,
+			      well.y + well.h / 2 + host_sy(48, logical_h),
+			      pt_small, g_ink_hint);
+}
+
 static void host_menu_draw_equip_pick(SDL_Renderer *renderer, SDL_Rect well,
 				     int logical_w, int logical_h, int pt,
 				     int pt_small)
@@ -4818,6 +4850,9 @@ void host_menu_draw(SDL_Renderer *renderer, int logical_w, int logical_h)
 	else if (g_layer == HOST_MENU_LAYER_ASK)
 		host_menu_draw_ask(renderer, well, logical_w, logical_h, pt,
 				   pt_small);
+	else if (g_layer == HOST_MENU_LAYER_EXIT_ASK)
+		host_menu_draw_exit_ask(renderer, well, logical_w, logical_h,
+					pt, pt_small);
 	else if (g_layer == HOST_MENU_LAYER_STUB && g_stub >= 0 &&
 		 g_stub < HOST_MENU_ACTIONS) {
 		host_menu_fill(renderer, well, 8, 12, 10, 230);
