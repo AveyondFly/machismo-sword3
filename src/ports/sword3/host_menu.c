@@ -14,7 +14,7 @@
 #include <SDL2/SDL_ttf.h>
 
 #define HOST_MENU_DEADZONE 14000
-#define HOST_MENU_TABS 6
+#define HOST_MENU_TABS 7
 #define HOST_MENU_ACTIONS 5
 #define HOST_MENU_SLOTS 10
 #define HOST_MENU_SAV_THUMB_W 160
@@ -148,7 +148,8 @@ enum host_menu_tab {
 	HOST_MENU_TAB_SKILL,
 	HOST_MENU_TAB_STATUS,
 	HOST_MENU_TAB_REFINING,
-	HOST_MENU_TAB_BOOK
+	HOST_MENU_TAB_BOOK,
+	HOST_MENU_TAB_HELP
 };
 
 enum host_menu_layer {
@@ -335,7 +336,7 @@ static void host_menu_load_item_meta(struct host_menu_item *it);
 static void host_menu_journal_open(void);
 
 static const char *g_tab_text[HOST_MENU_TABS] = {
-	"物品", "装备", "奇术", "状态", "炼妖", "天书"
+	"物品", "装备", "奇术", "状态", "炼妖", "天书", "说明"
 };
 
 static const char *g_book_text[HOST_MENU_ACTIONS] = {
@@ -1700,8 +1701,18 @@ static int host_menu_equip_swap(uintptr_t bag_node, int slot)
 			  HOST_MENU_EQUIP_SWAP)(
 		(void *)(uintptr_t)worn, (void *)(uintptr_t)bag_node,
 		g_party_i + 1, slot + 1);
-	if (!result ||
-	    host_menu_equip_node_temp(host_menu_guest_ptr(rec)) != temp)
+	worn = host_menu_guest_ptr(rec);
+	fprintf(stderr,
+		"sword3-sdl: equip transaction slot=%d party=%d result=%d "
+		"want=%d got=%d\n",
+		slot, g_party_i, result, temp,
+		host_menu_equip_node_temp(worn));
+	/*
+	 * ExchangeEqu's return value is an internal Lua result code. Native
+	 * equipment code ignores it and validates the resulting slot instead;
+	 * some talisman transactions update the slot while returning zero.
+	 */
+	if (host_menu_equip_node_temp(worn) != temp)
 		return 0;
 	party = HOST_MENU_PARTY +
 		(uintptr_t)g_party_i * HOST_MENU_PARTY_STRIDE;
@@ -2155,6 +2166,8 @@ static void host_menu_confirm(void)
 				"sword3-sdl: host menu refining pending\n");
 			return;
 		}
+		if (g_tab == HOST_MENU_TAB_HELP)
+			return;
 		host_menu_enter_inner();
 		return;
 	}
@@ -4121,6 +4134,78 @@ static void host_menu_draw_book(SDL_Renderer *renderer, int logical_w,
 	}
 }
 
+static void host_menu_draw_help(SDL_Renderer *renderer, int logical_w,
+			       int logical_h, int pt, int pt_small)
+{
+	static const struct {
+		const char *key;
+		const char *action;
+	} basic[] = {
+		{ "方向键 / 左摇杆", "移动、选择" },
+		{ "A", "确认、对话" },
+		{ "B", "返回、取消" },
+		{ "X", "打开适配菜单" },
+		{ "SELECT", "打开原生菜单" },
+		{ "Y", "打开作弊菜单" },
+		{ "L1 / R1", "按页面切换分页、人物或分类" },
+	}, cursor[] = {
+		{ "按住 R1 + 方向键 / 左摇杆", "移动临时光标" },
+		{ "光标显示时按 START", "模拟触摸点击" },
+		{ "短按 R1", "保留当前页面的 R1 功能" },
+		{ "停止操作 5 秒", "自动隐藏光标" },
+		{ "SELECT + START", "安全退出（不额外存档）" },
+	};
+	SDL_Rect well;
+	int key_x;
+	int action_x;
+	int y;
+	int row_h;
+	size_t i;
+
+	well.x = host_sx(HOST_MENU_SPLIT_X + 16, logical_w);
+	well.y = host_sy(78, logical_h);
+	well.w = logical_w - well.x - host_sx(24, logical_w);
+	well.h = logical_h - well.y - host_sy(16, logical_h);
+	host_menu_well(renderer, well);
+
+	key_x = well.x + host_sx(24, logical_w);
+	action_x = well.x + host_sx(270, logical_w);
+	row_h = host_sy(34, logical_h);
+	if (row_h < pt_small + 5)
+		row_h = pt_small + 5;
+	y = well.y + host_sy(20, logical_h);
+	host_menu_text_left(renderer, "适配版操作说明", key_x, y, pt,
+			    g_ink_gold);
+	y += host_sy(48, logical_h);
+	host_menu_text_left(renderer, "基础操作", key_x, y, pt_small,
+			    g_ink_title);
+	y += host_sy(34, logical_h);
+	for (i = 0; i < sizeof(basic) / sizeof(basic[0]); i++) {
+		host_menu_text_left(renderer, basic[i].key, key_x, y, pt_small,
+				    g_ink_body);
+		host_menu_text_left(renderer, basic[i].action, action_x, y,
+				    pt_small, g_ink_hint);
+		y += row_h;
+	}
+
+	y += host_sy(12, logical_h);
+	host_menu_text_left(renderer, "应急触摸光标", key_x, y, pt_small,
+			    g_ink_title);
+	y += host_sy(34, logical_h);
+	for (i = 0; i < sizeof(cursor) / sizeof(cursor[0]); i++) {
+		host_menu_text_left(renderer, cursor[i].key, key_x, y, pt_small,
+				    g_ink_body);
+		host_menu_text_left(renderer, cursor[i].action, action_x, y,
+				    pt_small, g_ink_hint);
+		y += row_h;
+	}
+
+	host_menu_text_center(renderer, "真实触屏仍可直接操作",
+			      well.x + well.w / 2,
+			      well.y + well.h - host_sy(24, logical_h),
+			      pt_small, g_ink_hint);
+}
+
 static void host_menu_load_slot(SDL_Renderer *renderer, int slot)
 {
 	char path[PATH_MAX];
@@ -4829,6 +4914,9 @@ void host_menu_draw(SDL_Renderer *renderer, int logical_w, int logical_h)
 					       pt, pt_small);
 		else if (g_tab == HOST_MENU_TAB_BOOK)
 			host_menu_draw_book(renderer, logical_w, logical_h, pt);
+		else if (g_tab == HOST_MENU_TAB_HELP)
+			host_menu_draw_help(renderer, logical_w, logical_h, pt,
+					    pt_small);
 	}
 
 	well.x = host_sx(HOST_MENU_SPLIT_X + 12, logical_w);

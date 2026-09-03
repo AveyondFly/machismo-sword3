@@ -147,6 +147,62 @@ set_target_properties(sword3_objc_shim PROPERTIES
     PREFIX "lib"
 )
 
+# Host-owned services.  These never create a second window or renderer; the
+# game-specific hooks feed them paths/events and upload decoded frames into
+# the one SDL/EGL context owned by the host SDL implementation.
+if(LINARO_EXTRA)
+    # extra is the SDL2/GLES/png/z prefix from linaro_build.md. Remaining
+    # host sonames are linked by full path from LINARO_HOST_SYSROOT so the
+    # newer sysroot's libc linker scripts never enter -L.
+    macro(sword3_linaro_lib var name)
+	find_library(${var} ${name} HINTS "${LINARO_EXTRA}/lib" NO_DEFAULT_PATH)
+	if(NOT ${var} AND LINARO_HOST_SYSROOT)
+	    find_library(${var} ${name}
+			 HINTS "${LINARO_HOST_SYSROOT}/usr/lib"
+			       "${LINARO_HOST_SYSROOT}/lib"
+			 NO_DEFAULT_PATH)
+	endif()
+	if(NOT ${var})
+	    message(FATAL_ERROR
+		"Linaro host link needs lib${name}. extra only ships SDL2/"
+		"GLES/png/z; build it with the same GCC into LINARO_EXTRA or "
+		"set LINARO_HOST_SYSROOT for link-time sonames.")
+	endif()
+    endmacro()
+    sword3_linaro_lib(SWORD3_LIB_SDL2 SDL2)
+    sword3_linaro_lib(SWORD3_LIB_SDL2_MIXER SDL2_mixer)
+    sword3_linaro_lib(SWORD3_LIB_SDL2_IMAGE SDL2_image)
+    sword3_linaro_lib(SWORD3_LIB_SDL2_TTF SDL2_ttf)
+    sword3_linaro_lib(SWORD3_LIB_AVFORMAT avformat)
+    sword3_linaro_lib(SWORD3_LIB_AVCODEC avcodec)
+    sword3_linaro_lib(SWORD3_LIB_AVUTIL avutil)
+    sword3_linaro_lib(SWORD3_LIB_SWSCALE swscale)
+    sword3_linaro_lib(SWORD3_LIB_EGL EGL)
+    sword3_linaro_lib(SWORD3_LIB_GLESV2 GLESv2)
+    sword3_linaro_lib(SWORD3_LIB_GLESV1 GLESv1_CM)
+    set(SWORD3_HOST_LIBS
+	${SWORD3_LIB_SDL2}
+	${SWORD3_LIB_SDL2_MIXER}
+	${SWORD3_LIB_SDL2_IMAGE}
+	${SWORD3_LIB_SDL2_TTF}
+	${SWORD3_LIB_AVFORMAT}
+	${SWORD3_LIB_AVCODEC}
+	${SWORD3_LIB_AVUTIL}
+	${SWORD3_LIB_SWSCALE})
+else()
+    if(NOT PkgConfig_FOUND)
+	message(FATAL_ERROR "Sword3 host services require pkg-config")
+    endif()
+    pkg_check_modules(SWORD3_SDL REQUIRED IMPORTED_TARGET
+		      sdl2 SDL2_mixer SDL2_image)
+    pkg_check_modules(SWORD3_FFMPEG REQUIRED IMPORTED_TARGET
+		      libavformat libavcodec libavutil libswscale)
+    set(SWORD3_HOST_LIBS
+	PkgConfig::SWORD3_SDL
+	PkgConfig::SWORD3_FFMPEG
+	SDL2_ttf)
+endif()
+
 # OpenGLES.framework contains a mix of GLES1 and GLES2 symbols.  A single
 # dependency cannot satisfy it on Linux, so expose both APIs through one
 # resolver handle.
@@ -154,22 +210,19 @@ add_library(sword3_gl_bridge SHARED
     src/ports/sword3/gl_bridge.c
 )
 target_link_options(sword3_gl_bridge PRIVATE -Wl,--no-as-needed)
-target_link_libraries(sword3_gl_bridge PRIVATE GLESv2 GLESv1_CM EGL dl)
+if(LINARO_EXTRA)
+    target_link_libraries(sword3_gl_bridge PRIVATE
+			  ${SWORD3_LIB_GLESV2} ${SWORD3_LIB_GLESV1}
+			  ${SWORD3_LIB_EGL} dl)
+else()
+    target_link_libraries(sword3_gl_bridge PRIVATE GLESv2 GLESv1_CM EGL dl)
+endif()
 target_compile_options(sword3_gl_bridge PRIVATE -Wall -Wextra -O2 -g)
 set_target_properties(sword3_gl_bridge PROPERTIES
     OUTPUT_NAME "sword3_gl_bridge"
     PREFIX "lib"
 )
 
-# Host-owned services.  These never create a second window or renderer; the
-# game-specific hooks feed them paths/events and upload decoded frames into
-# the one SDL/EGL context owned by the host SDL implementation.
-if(NOT PkgConfig_FOUND)
-    message(FATAL_ERROR "Sword3 host services require pkg-config")
-endif()
-pkg_check_modules(SWORD3_SDL REQUIRED IMPORTED_TARGET sdl2 SDL2_mixer SDL2_image)
-pkg_check_modules(SWORD3_FFMPEG REQUIRED IMPORTED_TARGET
-    libavformat libavcodec libavutil libswscale)
 add_library(sword3_host SHARED
     src/ports/sword3/host_prepare.c
     src/ports/sword3/sdl_bridge.c
@@ -187,13 +240,15 @@ add_library(sword3_host SHARED
 )
 target_include_directories(sword3_host PUBLIC src/ports/sword3)
 target_compile_options(sword3_host PRIVATE -Wall -Wextra -O2 -g)
+if(LINARO_EXTRA AND LINARO_HOST_SYSROOT)
+    # After Linaro libc headers, so stdio.h stays 2.17 while mixer/ffmpeg
+    # headers can still be found.
+    target_compile_options(sword3_host PRIVATE
+	-idirafter "${LINARO_HOST_SYSROOT}/usr/include")
+endif()
 set_source_files_properties(src/ports/sword3/host_cheat.c PROPERTIES
     COMPILE_FLAGS "-fno-omit-frame-pointer")
-target_link_libraries(sword3_host PRIVATE
-    PkgConfig::SWORD3_SDL
-    PkgConfig::SWORD3_FFMPEG
-    SDL2_ttf
-)
+target_link_libraries(sword3_host PRIVATE ${SWORD3_HOST_LIBS})
 set_target_properties(sword3_host PROPERTIES
     OUTPUT_NAME "sword3_host"
     PREFIX "lib"

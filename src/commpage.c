@@ -132,8 +132,10 @@ void commpage_setup(bool _64bit)
 		caps |= kHasCRC32;
 	if (hwcap & HWCAP_ATOMICS)
 		caps |= kHasLSE;
+#if defined(HWCAP_ASIMDDP)
 	if (hwcap & HWCAP_ASIMDDP)
 		caps |= kHasFEAT_DotProd;
+#endif
 
 	/* hwcap2 features (Linux 5.x+) */
 	(void)hwcap2;

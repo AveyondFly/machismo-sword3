@@ -8,7 +8,9 @@ libsystem_shim.so
 build/
 build-aarch64/
 build-rocknix/
+build-linaro/
 build-libcxx-rocknix/
+build-libcxx-linaro/
 CMakeCache.txt
 CMakeFiles/
 cmake_install.cmake

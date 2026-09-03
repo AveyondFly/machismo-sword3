@@ -519,6 +519,22 @@ size_t strlcat(char *dst, const char *src, size_t size)
 
 #endif
 
+/* Darwin libSystem FORTIFY wrappers. glibc 2.38+ has strlcpy itself but
+ * still no __strlcpy_chk; the iOS binary binds these from libSystem. */
+size_t __strlcpy_chk(char *dst, const char *src, size_t size, size_t bos)
+{
+	if (bos != (size_t)-1 && size > bos)
+		abort();
+	return strlcpy(dst, src, size);
+}
+
+size_t __strlcat_chk(char *dst, const char *src, size_t size, size_t bos)
+{
+	if (bos != (size_t)-1 && size > bos)
+		abort();
+	return strlcat(dst, src, size);
+}
+
 /* ===== memset_pattern ===== */
 
 void memset_pattern4(void *dst, const void *pattern, size_t len)
