@@ -1597,49 +1597,34 @@ const Uint8 *sword3_SDL_GetKeyboardState(int *numkeys)
 
 static int ensure_host_mixer(void);
 
+/*
+ * Same contract as master/Sword3: the guest mixer owns a real SDL device and
+ * its callback. Host Mix_PlayMusic is a second path used only for
+ * AVAudioPlayer MP3s. Do not steal this open — Pal2's story/field cues go
+ * through the guest callback, and a fake device id leaves them silent.
+ */
 SDL_AudioDeviceID sword3_SDL_OpenAudioDevice(const char *device, int iscapture,
 					     const SDL_AudioSpec *desired,
 					     SDL_AudioSpec *obtained,
 					     int allowed_changes)
 {
-	int freq = 0;
-	int channels = 0;
-	Uint16 format = 0;
+	SDL_AudioDeviceID id;
 
 	if (desired)
 		fprintf(stderr,
 			"sword3-sdl: OpenAudioDevice want freq=%d fmt=0x%x ch=%u samples=%u cb=%p\n",
 			desired->freq, desired->format, desired->channels,
 			desired->samples, (void *)desired->callback);
-	if (iscapture)
-		return SDL_OpenAudioDevice(device, iscapture, desired, obtained,
-					   allowed_changes);
-	/*
-	 * Guest SDL_mixer installs its own callback on a second device. On
-	 * ALSA/Pulse that stream can keep the sink even while paused, and
-	 * host Mix_PlayMusic then plays into a silent extra device. Own the
-	 * hardware with the host mixer and report its spec back.
-	 */
-	if (!ensure_host_mixer()) {
-		fprintf(stderr,
-			"sword3-sdl: OpenAudioDevice host mixer failed\n");
-		return 0;
-	}
-	Mix_QuerySpec(&freq, &format, &channels);
-	if (obtained) {
-		SDL_zero(*obtained);
-		obtained->freq = freq ? freq : (desired ? desired->freq : 44100);
-		obtained->format = format ? format
-					  : (desired ? desired->format
-						     : MIX_DEFAULT_FORMAT);
-		obtained->channels = channels ? (Uint8)channels : 2;
-		obtained->samples =
-			desired && desired->samples ? desired->samples : 2048;
-	}
-	fprintf(stderr,
-		"sword3-sdl: OpenAudioDevice -> 2 (host mixer %dHz fmt=0x%x ch=%d; guest cb dropped)\n",
-		freq, format, channels);
-	return 2;
+	id = SDL_OpenAudioDevice(device, iscapture, desired, obtained,
+				 allowed_changes);
+	fprintf(stderr, "sword3-sdl: OpenAudioDevice -> %u%s%s", id,
+		id ? "" : " ", id ? "" : SDL_GetError());
+	if (id && obtained)
+		fprintf(stderr, " got freq=%d fmt=0x%x ch=%u samples=%u",
+			obtained->freq, obtained->format, obtained->channels,
+			obtained->samples);
+	fprintf(stderr, "\n");
+	return id;
 }
 
 void sword3_SDL_PauseAudioDevice(SDL_AudioDeviceID dev, int pause_on)
@@ -1647,8 +1632,6 @@ void sword3_SDL_PauseAudioDevice(SDL_AudioDeviceID dev, int pause_on)
 	fprintf(stderr, "sword3-sdl: PauseAudioDevice %u pause=%d\n", dev,
 		pause_on);
 	SDL_PauseAudioDevice(dev, pause_on);
-	if (dev == 1)
-		SDL_PauseAudioDevice(2, pause_on);
 }
 
 void sword3_SDL_LockAudioDevice(SDL_AudioDeviceID dev)
@@ -1760,12 +1743,6 @@ int sword3_host_play_memory_audio(const void *data, size_t size, int loops)
 	 */
 	if (loops <= 0)
 		loops = -1;
-	{
-		SDL_AudioDeviceID dev;
-
-		for (dev = 1; dev <= 4; dev++)
-			SDL_PauseAudioDevice(dev, 0);
-	}
 	if (seen < 12) {
 		int freq = 0, ch = 0, rc;
 		Uint16 fmt = 0;
@@ -1807,10 +1784,6 @@ void sword3_host_pause_memory_audio(void)
 __attribute__((visibility("default")))
 void sword3_host_resume_memory_audio(void)
 {
-	SDL_AudioDeviceID dev;
-
-	for (dev = 1; dev <= 4; dev++)
-		SDL_PauseAudioDevice(dev, 0);
 	Mix_ResumeMusic();
 	fprintf(stderr, "sword3-sdl: resume music playing=%d paused=%d\n",
 		Mix_PlayingMusic(), Mix_PausedMusic());

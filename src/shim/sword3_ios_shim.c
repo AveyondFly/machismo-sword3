@@ -95,7 +95,10 @@ struct proxy_av_audio_player {
     void *copy;
     size_t copy_len;
     int playing;
+    float volume;
 };
+
+static struct proxy_av_audio_player *g_current_av_player;
 
 struct proxy_url {
     sword3_objc_Class isa;
@@ -2147,19 +2150,6 @@ static void host_pause_bytes(void)
         fn();
 }
 
-static void host_resume_bytes(void)
-{
-    static void (*fn)(void);
-    static int resolved;
-
-    if (!resolved) {
-        resolved = 1;
-        fn = (void (*)(void))dlsym(RTLD_DEFAULT, "sword3_host_resume_memory_audio");
-    }
-    if (fn)
-        fn();
-}
-
 static int host_bytes_playing(void)
 {
     static int (*fn)(void);
@@ -2210,6 +2200,7 @@ static sword3_objc_id proxy_av_audio_init_data(sword3_objc_id self,
     player->copy = NULL;
     player->copy_len = 0;
     player->playing = 0;
+    player->volume = 1.0f;
     if (copy_nsdata_bytes(data, &player->copy, &player->copy_len) != 0)
         copy_url_file_bytes(data, &player->copy, &player->copy_len);
     fprintf(stderr,
@@ -2268,9 +2259,14 @@ static void proxy_av_audio_set_pan(sword3_objc_id self, sword3_objc_sel selector
 static void proxy_av_audio_set_volume(sword3_objc_id self,
                                       sword3_objc_sel selector, float volume)
 {
-    (void)self;
+    struct proxy_av_audio_player *player = self;
+
     (void)selector;
-    host_set_volume(volume);
+    if (!player)
+        return;
+    player->volume = volume;
+    if (g_current_av_player == player)
+        host_set_volume(volume);
 }
 
 static unsigned proxy_av_audio_play(sword3_objc_id self, sword3_objc_sel selector)
@@ -2283,25 +2279,19 @@ static unsigned proxy_av_audio_play(sword3_objc_id self, sword3_objc_sel selecto
         return 0;
     loops = (int)player->loops;
     fprintf(stderr,
-            "sword3-ios-shim: AVAudioPlayer play self=%p bytes=%zu loops=%d playing=%d\n",
-            self, player->copy_len, loops, host_bytes_playing());
+            "sword3-ios-shim: AVAudioPlayer play self=%p bytes=%zu loops=%d host_playing=%d current=%p\n",
+            self, player->copy_len, loops, host_bytes_playing(),
+            (void *)g_current_av_player);
     if (!player->copy || player->copy_len == 0)
         return 0;
-    if (!host_bytes_playing()) {
-        host_resume_bytes();
-        if (host_bytes_playing()) {
-            player->playing = 1;
-            return 1;
-        }
-        if (host_play_bytes(player->copy, player->copy_len, loops) == 0) {
-            player->playing = 1;
-            return 1;
-        }
-        player->playing = 0;
-        return 0;
+    if (host_play_bytes(player->copy, player->copy_len, loops) == 0) {
+        g_current_av_player = player;
+        player->playing = 1;
+        host_set_volume(player->volume);
+        return 1;
     }
-    player->playing = 1;
-    return 1;
+    player->playing = 0;
+    return 0;
 }
 
 static void proxy_av_audio_stop(sword3_objc_id self, sword3_objc_sel selector)
@@ -2309,8 +2299,13 @@ static void proxy_av_audio_stop(sword3_objc_id self, sword3_objc_sel selector)
     struct proxy_av_audio_player *player = self;
 
     (void)selector;
-    fprintf(stderr, "sword3-ios-shim: AVAudioPlayer stop self=%p\n", self);
-    host_stop_bytes();
+    fprintf(stderr,
+            "sword3-ios-shim: AVAudioPlayer stop self=%p current=%p\n",
+            self, (void *)g_current_av_player);
+    if (player && g_current_av_player == player) {
+        host_stop_bytes();
+        g_current_av_player = NULL;
+    }
     if (player)
         player->playing = 0;
 }
@@ -2320,8 +2315,11 @@ static void proxy_av_audio_pause(sword3_objc_id self, sword3_objc_sel selector)
     struct proxy_av_audio_player *player = self;
 
     (void)selector;
-    fprintf(stderr, "sword3-ios-shim: AVAudioPlayer pause self=%p\n", self);
-    host_pause_bytes();
+    fprintf(stderr,
+            "sword3-ios-shim: AVAudioPlayer pause self=%p current=%p\n",
+            self, (void *)g_current_av_player);
+    if (player && g_current_av_player == player)
+        host_pause_bytes();
     if (player)
         player->playing = 0;
 }
@@ -2342,7 +2340,7 @@ static unsigned proxy_av_audio_is_playing(sword3_objc_id self,
     (void)selector;
     if (!player)
         return 0;
-    player->playing = host_bytes_playing() != 0;
+    player->playing = (g_current_av_player == player && host_bytes_playing());
     return player->playing;
 }
 
