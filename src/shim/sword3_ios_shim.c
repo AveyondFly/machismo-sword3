@@ -34,6 +34,12 @@ struct proxy_string {
     char *value;
 };
 
+struct proxy_data {
+    sword3_objc_Class isa;
+    unsigned char *bytes;
+    size_t length;
+};
+
 struct proxy_array {
     sword3_objc_Class isa;
     sword3_objc_id *items;
@@ -172,6 +178,9 @@ struct proxy_method_list {
 extern struct sword3_objc_class proxy_string_class
     __asm__("OBJC_CLASS_$_NSString");
 static struct sword3_objc_class proxy_string_metaclass;
+extern struct sword3_objc_class proxy_data_class
+    __asm__("OBJC_CLASS_$_NSData");
+static struct sword3_objc_class proxy_data_metaclass;
 extern struct sword3_objc_class proxy_array_class
     __asm__("OBJC_CLASS_$_NSArray");
 static struct sword3_objc_class proxy_array_metaclass;
@@ -279,11 +288,18 @@ static size_t display_link_count;
 static _Atomic int display_link_reentrant;
 static unsigned char cf_runloop_token[64];
 static struct constant_string_layout cf_runloop_default_mode_string;
+static struct constant_string_layout nsfile_modification_date_string = {
+    .flags = 0x07c8u,
+    .bytes = "NSFileModificationDate",
+    .length = 22,
+};
 
 static struct proxy_array *make_proxy_array(size_t count);
 static sword3_objc_id proxy_array_with_array(sword3_objc_id cls,
                                              sword3_objc_sel selector,
                                              struct proxy_array *other);
+static const char *path_from_object(sword3_objc_id object);
+static int mkdir_parents(const char *path);
 
 static const char *object_cstring(const void *object)
 {
@@ -1355,6 +1371,30 @@ static sword3_objc_id proxy_string_with_cstring(sword3_objc_id cls,
     return make_proxy_string(utf8);
 }
 
+static sword3_objc_id proxy_string_init_cstring(struct proxy_string *self,
+                                                 sword3_objc_sel selector,
+                                                 const char *utf8,
+                                                 uintptr_t encoding)
+{
+    (void)selector;
+    (void)encoding;
+    if (!self)
+        return make_proxy_string(utf8);
+    free(self->value);
+    self->value = strdup(utf8 ? utf8 : "");
+    if (!self->value)
+        return NULL;
+    self->isa = &proxy_string_class;
+    return self;
+}
+
+static sword3_objc_id proxy_string_init_utf8(struct proxy_string *self,
+                                              sword3_objc_sel selector,
+                                              const char *utf8)
+{
+    return proxy_string_init_cstring(self, selector, utf8, 4);
+}
+
 static sword3_objc_id proxy_locale_preferred_languages(
     sword3_objc_id cls,
     sword3_objc_sel selector
@@ -1519,6 +1559,7 @@ static void ensure_cf_constants(void)
     cf_runloop_default_mode_string.flags = 0x07c8u;
     cf_runloop_default_mode_string.bytes = "kCFRunLoopDefaultMode";
     cf_runloop_default_mode_string.length = 21;
+    nsfile_modification_date_string.isa = &proxy_string_class;
 }
 
 static void register_display_link(struct proxy_display_link *link)
@@ -2381,7 +2422,7 @@ static int proxy_file_manager_exists(struct proxy_file_manager *self,
     struct stat status;
     (void)self;
     (void)selector;
-    return stat(object_cstring(path_object), &status) == 0;
+    return stat(path_from_object(path_object), &status) == 0;
 }
 
 static int path_has_dotdot(const char *path)
@@ -2412,15 +2453,104 @@ static int path_under_root(const char *path, const char *root)
     return path[root_len] == '/' && path[root_len + 1] != '\0';
 }
 
+static const char *data_dir_root(void)
+{
+    const char *path = getenv("SWORD3_DATA_DIR");
+
+    if (!path || path[0] != '/')
+        return "/tmp/sword3";
+    return path;
+}
+
+static int search_path_copy(char *out, size_t cap, uintptr_t directory)
+{
+    const char *data = data_dir_root();
+    const char *tmpdir = getenv("TMPDIR");
+    int written;
+
+    /*
+     * NSDocumentDirectory (9) is persistent game data. The old shim returned
+     * that same directory for NSCachesDirectory and every other query, so the
+     * game's startup cache cleanup enumerated and deleted PAL2_*.sav. Keep
+     * non-document searches in a separate transient tree, matching master.
+     */
+    if (directory == 9)
+        written = snprintf(out, cap, "%s", data);
+    else {
+        if (!tmpdir || tmpdir[0] != '/')
+            tmpdir = "/tmp/sword3";
+        written = snprintf(out, cap, "%s/ns-search-%llu", tmpdir,
+                           (unsigned long long)directory);
+    }
+    if (written < 0 || (size_t)written >= cap)
+        return -1;
+    if (mkdir_parents(out) != 0 && errno != EEXIST)
+        fprintf(stderr,
+                "sword3-ios-shim: cannot create search path %s: %s\n",
+                out, strerror(errno));
+    return 0;
+}
+
+static int path_is_data_root(const char *path)
+{
+    const char *root = data_dir_root();
+    size_t root_len;
+
+    if (!path || !root)
+        return 0;
+    root_len = strlen(root);
+    while (root_len > 1 && root[root_len - 1] == '/')
+        root_len--;
+    if (strncmp(path, root, root_len) != 0)
+        return 0;
+    return path[root_len] == '\0' ||
+           (path[root_len] == '/' && path[root_len + 1] == '\0');
+}
+
+static int is_persistent_save_path(const char *path)
+{
+    const char *base;
+    size_t length;
+
+    if (!path || !path[0])
+        return 0;
+    if (path_is_data_root(path))
+        return 1;
+    base = strrchr(path, '/');
+    base = base ? base + 1 : path;
+    if (!strcmp(base, "Interface.sav") || !strcmp(base, "setting_v2.lua"))
+        return 1;
+    if (strncmp(base, "PAL2_", 5) != 0)
+        return 0;
+    length = strlen(base);
+    return length > 4 && !strcmp(base + length - 4, ".sav");
+}
+
+static const char *path_from_object(sword3_objc_id object)
+{
+    const struct proxy_url *url = object;
+    const char *path;
+
+    if (!object)
+        return "";
+    if (url->isa == &proxy_url_class)
+        path = url->path ? url->path : "";
+    else
+        path = object_cstring(object);
+    if (!strncmp(path, "file://", 7))
+        path += 7;
+    return path;
+}
+
 static int file_manager_path_allowed(const char *path)
 {
-    const char *data = getenv("SWORD3_DATA_DIR");
     const char *bundle = getenv("SWORD3_BUNDLE_DIR");
     const char *tmpdir = getenv("TMPDIR");
 
     if (!path || path[0] != '/' || path_has_dotdot(path))
         return 0;
-    if (path_under_root(path, data) ||
+    if (path_is_data_root(path) ||
+        path_under_root(path, data_dir_root()) ||
         path_under_root(path, bundle) ||
         path_under_root(path, "/tmp/sword3") ||
         path_under_root(path, tmpdir))
@@ -2460,6 +2590,19 @@ static int remove_tree(const char *path)
     return unlink(path);
 }
 
+static int proxy_remove_cpath(const char *path)
+{
+    int ok = 0;
+
+    if (is_persistent_save_path(path))
+        return 1;
+    if (!file_manager_path_allowed(path))
+        errno = EPERM;
+    else if (remove_tree(path) == 0)
+        ok = 1;
+    return ok;
+}
+
 static int proxy_file_manager_remove(
     struct proxy_file_manager *self,
     sword3_objc_sel selector,
@@ -2467,17 +2610,19 @@ static int proxy_file_manager_remove(
     sword3_objc_id *error
 )
 {
-    const char *path = object_cstring(path_object);
-    int ok = 0;
+    const char *path = path_from_object(path_object);
+    int ok;
     (void)self;
     (void)selector;
 
     if (error)
         *error = NULL;
-    if (!file_manager_path_allowed(path))
-        errno = EPERM;
-    else if (remove_tree(path) == 0)
-        ok = 1;
+    if (is_persistent_save_path(path)) {
+        fprintf(stderr, "sword3-ios-shim: removeItemAtPath:%s -> keep save\n",
+                path);
+        return 1;
+    }
+    ok = proxy_remove_cpath(path);
     fprintf(stderr, "sword3-ios-shim: removeItemAtPath:%s -> %s%s%s\n",
             path, ok ? "ok" : "no",
             ok ? "" : " ", ok ? "" : strerror(errno));
@@ -2520,7 +2665,7 @@ static int proxy_file_manager_create_directory(
     sword3_objc_id *error
 )
 {
-    const char *path = object_cstring(path_object);
+    const char *path = path_from_object(path_object);
     int ok = 0;
     (void)self;
     (void)selector;
@@ -2560,7 +2705,7 @@ static sword3_objc_id proxy_file_manager_contents(
 
     if (error)
         *error = NULL;
-    directory = opendir(object_cstring(path_object));
+    directory = opendir(path_from_object(path_object));
     if (!directory)
         return make_proxy_array(0);
     items = calloc(capacity, sizeof(*items));
@@ -2599,9 +2744,291 @@ static sword3_objc_id proxy_file_manager_contents(
     return array;
 }
 
+static struct proxy_data *make_proxy_data(void *bytes, size_t length)
+{
+    struct proxy_data *data = calloc(1, sizeof(*data));
+
+    if (!data) {
+        free(bytes);
+        return NULL;
+    }
+    data->isa = &proxy_data_class;
+    data->bytes = bytes;
+    data->length = length;
+    return data;
+}
+
+static const void *proxy_data_bytes(struct proxy_data *self,
+                                    sword3_objc_sel selector)
+{
+    (void)selector;
+    return self ? self->bytes : NULL;
+}
+
+static uintptr_t proxy_data_length(struct proxy_data *self,
+                                   sword3_objc_sel selector)
+{
+    (void)selector;
+    return self ? self->length : 0;
+}
+
+static sword3_objc_id proxy_data_with_bytes(sword3_objc_id cls,
+                                            sword3_objc_sel selector,
+                                            const void *bytes,
+                                            uintptr_t length)
+{
+    unsigned char *copy;
+    (void)cls;
+    (void)selector;
+
+    if (!bytes && length)
+        return NULL;
+    copy = malloc(length ? length : 1);
+    if (!copy)
+        return NULL;
+    if (length)
+        memcpy(copy, bytes, length);
+    return make_proxy_data(copy, length);
+}
+
+static int read_file_bytes(const char *path, void **out, size_t *out_len)
+{
+    FILE *fp;
+    long size;
+    void *copy;
+
+    *out = NULL;
+    *out_len = 0;
+    fp = fopen(path, "rb");
+    if (!fp)
+        return -1;
+    if (fseek(fp, 0, SEEK_END) != 0) {
+        fclose(fp);
+        return -1;
+    }
+    size = ftell(fp);
+    if (size < 0 || size > 32L * 1024L * 1024L) {
+        fclose(fp);
+        return -1;
+    }
+    if (fseek(fp, 0, SEEK_SET) != 0) {
+        fclose(fp);
+        return -1;
+    }
+    copy = malloc(size ? (size_t)size : 1);
+    if (!copy) {
+        fclose(fp);
+        return -1;
+    }
+    if (size && fread(copy, 1, (size_t)size, fp) != (size_t)size) {
+        free(copy);
+        fclose(fp);
+        return -1;
+    }
+    fclose(fp);
+    *out = copy;
+    *out_len = (size_t)size;
+    return 0;
+}
+
+static sword3_objc_id proxy_file_manager_contents_at_path(
+    struct proxy_file_manager *self,
+    sword3_objc_sel selector,
+    sword3_objc_id path_object
+)
+{
+    void *bytes;
+    size_t length;
+    (void)self;
+    (void)selector;
+
+    if (read_file_bytes(path_from_object(path_object), &bytes, &length) != 0)
+        return NULL;
+    return make_proxy_data(bytes, length);
+}
+
+static int proxy_file_manager_contents_equal(
+    struct proxy_file_manager *self,
+    sword3_objc_sel selector,
+    sword3_objc_id left_object,
+    sword3_objc_id right_object
+)
+{
+    void *left = NULL;
+    void *right = NULL;
+    size_t left_len = 0;
+    size_t right_len = 0;
+    int equal = 0;
+    (void)self;
+    (void)selector;
+
+    if (read_file_bytes(path_from_object(left_object), &left, &left_len) != 0 ||
+        read_file_bytes(path_from_object(right_object), &right, &right_len) != 0)
+        equal = 0;
+    else
+        equal = left_len == right_len &&
+                (left_len == 0 || memcmp(left, right, left_len) == 0);
+    free(left);
+    free(right);
+    return equal;
+}
+
+static int proxy_file_manager_exists_dir(
+    struct proxy_file_manager *self,
+    sword3_objc_sel selector,
+    sword3_objc_id path_object,
+    signed char *is_directory
+)
+{
+    struct stat status;
+    int ok;
+    (void)self;
+    (void)selector;
+
+    ok = stat(path_from_object(path_object), &status) == 0;
+    if (is_directory)
+        *is_directory = (signed char)(ok && S_ISDIR(status.st_mode));
+    return ok;
+}
+
+static sword3_objc_id make_file_attributes(const char *path)
+{
+    struct stat status;
+    struct proxy_dictionary *dict;
+    struct proxy_dict_entry *entries;
+
+    if (stat(path, &status) != 0)
+        return NULL;
+    dict = calloc(1, sizeof(*dict));
+    entries = calloc(4, sizeof(*entries));
+    if (!dict || !entries) {
+        free(dict);
+        free(entries);
+        return NULL;
+    }
+    entries[0].key = "NSFileSize";
+    entries[0].object = make_proxy_number_int((long long)status.st_size);
+    entries[1].key = "NSFileType";
+    entries[1].object = make_proxy_string(
+        S_ISDIR(status.st_mode) ? "NSFileTypeDirectory" : "NSFileTypeRegular");
+    entries[2].key = "NSFileModificationDate";
+    entries[2].object = make_proxy_date((double)status.st_mtime);
+    entries[3].key = "NSFileCreationDate";
+    entries[3].object = make_proxy_date((double)status.st_ctime);
+    dict->isa = &proxy_dictionary_class;
+    dict->entries = entries;
+    dict->count = 4;
+    if (!entries[0].object || !entries[1].object || !entries[2].object ||
+        !entries[3].object) {
+        free(dict);
+        free(entries);
+        return NULL;
+    }
+    return dict;
+}
+
+static sword3_objc_id proxy_file_manager_attributes(
+    struct proxy_file_manager *self,
+    sword3_objc_sel selector,
+    sword3_objc_id path_object,
+    sword3_objc_id *error
+)
+{
+    (void)self;
+    (void)selector;
+    if (error)
+        *error = NULL;
+    return make_file_attributes(path_from_object(path_object));
+}
+
+static sword3_objc_id proxy_dictionary_file_attr(
+    struct proxy_dictionary *self,
+    sword3_objc_sel selector
+)
+{
+    const char *key = "NSFileModificationDate";
+
+    if (selector && !strcmp(selector, "fileSize"))
+        key = "NSFileSize";
+    else if (selector && !strcmp(selector, "fileCreationDate"))
+        key = "NSFileCreationDate";
+    else if (selector && !strcmp(selector, "fileType"))
+        key = "NSFileType";
+    return proxy_dictionary_object_for_key(self, selector,
+                                           make_proxy_string(key));
+}
+
+static struct proxy_array *search_path_array(uintptr_t directory, int as_url)
+{
+    char path[PATH_MAX];
+    struct proxy_array *array;
+
+    if (search_path_copy(path, sizeof(path), directory) != 0)
+        return NULL;
+    array = make_proxy_array(1);
+    if (!array)
+        return NULL;
+    array->items[0] = as_url ? proxy_url_from_cstring(path)
+                             : make_proxy_string(path);
+    if (!array->items[0]) {
+        free(array->items);
+        free(array);
+        return NULL;
+    }
+    return array;
+}
+
+static sword3_objc_id proxy_file_manager_urls_for_directory(
+    struct proxy_file_manager *self,
+    sword3_objc_sel selector,
+    uintptr_t directory,
+    uintptr_t domain_mask
+)
+{
+    (void)self;
+    (void)selector;
+    (void)domain_mask;
+    return search_path_array(directory, 1);
+}
+
+static int proxy_file_manager_create_directory_url(
+    struct proxy_file_manager *self,
+    sword3_objc_sel selector,
+    sword3_objc_id url,
+    int with_intermediates,
+    sword3_objc_id attributes,
+    sword3_objc_id *error
+)
+{
+    return proxy_file_manager_create_directory(
+        self, selector, url, with_intermediates, attributes, error);
+}
+
+static int proxy_file_manager_remove_url(
+    struct proxy_file_manager *self,
+    sword3_objc_sel selector,
+    sword3_objc_id url,
+    sword3_objc_id *error
+)
+{
+    return proxy_file_manager_remove(self, selector, url, error);
+}
+
+static sword3_objc_id proxy_file_manager_ubiquity_container(
+    struct proxy_file_manager *self,
+    sword3_objc_sel selector,
+    sword3_objc_id identifier
+)
+{
+    (void)self;
+    (void)selector;
+    (void)identifier;
+    return NULL;
+}
+
 static const struct proxy_method_list proxy_string_methods = {
     .entsize_and_flags = sizeof(struct sword3_objc_method),
-    .count = 12,
+    .count = 14,
     .methods = {
         {"UTF8String", "*16@0:8", (sword3_objc_imp)proxy_string_utf8},
         {"fileSystemRepresentation", "*16@0:8",
@@ -2624,6 +3051,10 @@ static const struct proxy_method_list proxy_string_methods = {
         {"stringByAppendingString:", "@24@0:8@16",
          (sword3_objc_imp)proxy_string_append_string},
         {"intValue", "i16@0:8", (sword3_objc_imp)proxy_string_int_value},
+        {"initWithCString:encoding:", "@32@0:8*16Q24",
+         (sword3_objc_imp)proxy_string_init_cstring},
+        {"initWithUTF8String:", "@24@0:8*16",
+         (sword3_objc_imp)proxy_string_init_utf8},
     },
 };
 
@@ -2741,6 +3172,24 @@ static const struct proxy_method_list proxy_number_class_methods = {
     },
 };
 
+static const struct proxy_method_list proxy_data_methods = {
+    .entsize_and_flags = sizeof(struct sword3_objc_method),
+    .count = 2,
+    .methods = {
+        {"bytes", "^v16@0:8", (sword3_objc_imp)proxy_data_bytes},
+        {"length", "Q16@0:8", (sword3_objc_imp)proxy_data_length},
+    },
+};
+
+static const struct proxy_method_list proxy_data_class_methods = {
+    .entsize_and_flags = sizeof(struct sword3_objc_method),
+    .count = 1,
+    .methods = {
+        {"dataWithBytes:length:", "@32@0:8^v16Q24",
+         (sword3_objc_imp)proxy_data_with_bytes},
+    },
+};
+
 static const struct proxy_method_list proxy_date_methods = {
     .entsize_and_flags = sizeof(struct sword3_objc_method),
     .count = 5,
@@ -2843,29 +3292,52 @@ static const struct proxy_method_list proxy_bundle_class_methods = {
 
 static const struct proxy_method_list proxy_dictionary_methods = {
     .entsize_and_flags = sizeof(struct sword3_objc_method),
-    .count = 3,
+    .count = 6,
     .methods = {
         {"objectForKey:", "@24@0:8@16",
          (sword3_objc_imp)proxy_dictionary_object_for_key},
         {"objectForKeyedSubscript:", "@24@0:8@16",
          (sword3_objc_imp)proxy_dictionary_object_for_key},
         {"count", "Q16@0:8", (sword3_objc_imp)proxy_dictionary_count},
+        {"fileModificationDate", "@16@0:8",
+         (sword3_objc_imp)proxy_dictionary_file_attr},
+        {"fileSize", "@16@0:8",
+         (sword3_objc_imp)proxy_dictionary_file_attr},
+        {"fileCreationDate", "@16@0:8",
+         (sword3_objc_imp)proxy_dictionary_file_attr},
     },
 };
 
 static const struct proxy_method_list proxy_file_manager_methods = {
     .entsize_and_flags = sizeof(struct sword3_objc_method),
-    .count = 4,
+    .count = 12,
     .methods = {
         {"fileExistsAtPath:", "B24@0:8@16",
          (sword3_objc_imp)proxy_file_manager_exists},
+        {"fileExistsAtPath:isDirectory:", "B32@0:8@16^B24",
+         (sword3_objc_imp)proxy_file_manager_exists_dir},
         {"contentsOfDirectoryAtPath:error:", "@32@0:8@16^@24",
          (sword3_objc_imp)proxy_file_manager_contents},
         {"removeItemAtPath:error:", "B32@0:8@16^@24",
          (sword3_objc_imp)proxy_file_manager_remove},
+        {"removeItemAtURL:error:", "B32@0:8@16^@24",
+         (sword3_objc_imp)proxy_file_manager_remove_url},
         {"createDirectoryAtPath:withIntermediateDirectories:attributes:error:",
          "B44@0:8@16B24@28^@36",
          (sword3_objc_imp)proxy_file_manager_create_directory},
+        {"createDirectoryAtURL:withIntermediateDirectories:attributes:error:",
+         "B48@0:8@16B24@28^@36",
+         (sword3_objc_imp)proxy_file_manager_create_directory_url},
+        {"attributesOfItemAtPath:error:", "@32@0:8@16^@24",
+         (sword3_objc_imp)proxy_file_manager_attributes},
+        {"contentsAtPath:", "@24@0:8@16",
+         (sword3_objc_imp)proxy_file_manager_contents_at_path},
+        {"contentsEqualAtPath:andPath:", "B32@0:8@16@24",
+         (sword3_objc_imp)proxy_file_manager_contents_equal},
+        {"URLsForDirectory:inDomains:", "@32@0:8Q16Q24",
+         (sword3_objc_imp)proxy_file_manager_urls_for_directory},
+        {"URLForUbiquityContainerIdentifier:", "@24@0:8@16",
+         (sword3_objc_imp)proxy_file_manager_ubiquity_container},
     },
 };
 
@@ -3207,6 +3679,22 @@ static const struct sword3_objc_class_ro proxy_number_metaclass_ro = {
     .name = "NSNumber",
     .base_methods =
         (const struct sword3_objc_method_list *)&proxy_number_class_methods,
+};
+
+static const struct sword3_objc_class_ro proxy_data_ro = {
+    .flags = SWORD3_OBJC_RO_ROOT,
+    .instance_size = sizeof(struct proxy_data),
+    .name = "NSData",
+    .base_methods =
+        (const struct sword3_objc_method_list *)&proxy_data_methods,
+};
+
+static const struct sword3_objc_class_ro proxy_data_metaclass_ro = {
+    .flags = SWORD3_OBJC_RO_META | SWORD3_OBJC_RO_ROOT,
+    .instance_size = sizeof(struct sword3_objc_class),
+    .name = "NSData",
+    .base_methods =
+        (const struct sword3_objc_method_list *)&proxy_data_class_methods,
 };
 
 static const struct sword3_objc_class_ro proxy_date_ro = {
@@ -3618,6 +4106,17 @@ SWORD3_EXPORT struct sword3_objc_class proxy_number_class
         .data_bits = (uintptr_t)&proxy_number_ro,
     };
 
+static struct sword3_objc_class proxy_data_metaclass = {
+    .isa = &proxy_data_metaclass,
+    .data_bits = (uintptr_t)&proxy_data_metaclass_ro,
+};
+
+SWORD3_EXPORT struct sword3_objc_class proxy_data_class
+    __asm__("OBJC_CLASS_$_NSData") = {
+        .isa = &proxy_data_metaclass,
+        .data_bits = (uintptr_t)&proxy_data_ro,
+    };
+
 static struct sword3_objc_class proxy_date_metaclass = {
     .isa = &proxy_date_metaclass,
     .data_bits = (uintptr_t)&proxy_date_metaclass_ro,
@@ -3909,6 +4408,8 @@ SWORD3_EXPORT const struct constant_string_layout *kCFRunLoopDefaultMode
     __asm__("kCFRunLoopDefaultMode") = &cf_runloop_default_mode_string;
 SWORD3_EXPORT const struct constant_string_layout *NSDefaultRunLoopMode
     __asm__("NSDefaultRunLoopMode") = &cf_runloop_default_mode_string;
+SWORD3_EXPORT const struct constant_string_layout *NSFileModificationDate
+    __asm__("NSFileModificationDate") = &nsfile_modification_date_string;
 
 static struct sword3_objc_class proxy_exception_metaclass = {
     .isa = &proxy_exception_metaclass,
@@ -3962,24 +4463,18 @@ sword3_objc_id NSSearchPathForDirectoriesInDomains(
     int expand_tilde
 )
 {
-    struct proxy_array *array;
-    const char *path = getenv("SWORD3_DATA_DIR");
-    (void)directory;
+    char path[PATH_MAX];
+    static unsigned seen;
     (void)domain_mask;
     (void)expand_tilde;
 
-    if (!path || path[0] != '/')
-        path = "/tmp/sword3";
-    array = make_proxy_array(1);
-    if (!array)
+    if (search_path_copy(path, sizeof(path), directory) != 0)
         return NULL;
-    array->items[0] = make_proxy_string(path);
-    if (!array->items[0]) {
-        free(array->items);
-        free(array);
-        return NULL;
-    }
-    return array;
+    if (seen++ < 32)
+        fprintf(stderr,
+                "sword3-ios-shim: NSSearchPath directory=%llu -> %s\n",
+                (unsigned long long)directory, path);
+    return search_path_array(directory, 0);
 }
 
 /*
@@ -4027,5 +4522,29 @@ void sword3_unsupported_symbol(const char *symbol_name)
 uint64_t sword3_unsupported_call_count(void)
 {
     return atomic_load_explicit(&unsupported_call_count, memory_order_relaxed);
+}
+
+int sword3_test_search_path(uintptr_t directory, char *out, uint32_t cap)
+{
+    char path[PATH_MAX];
+
+    if (!out || cap == 0)
+        return -1;
+    if (search_path_copy(path, sizeof(path), directory) != 0)
+        return -1;
+    if (strlen(path) >= cap)
+        return -1;
+    memcpy(out, path, strlen(path) + 1);
+    return 0;
+}
+
+int sword3_test_keep_save_path(const char *path)
+{
+    return is_persistent_save_path(path);
+}
+
+int sword3_test_remove_path(const char *path)
+{
+    return proxy_remove_cpath(path);
 }
 #endif

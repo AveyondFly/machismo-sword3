@@ -85,9 +85,11 @@ class Sword3IosShimTest(unittest.TestCase):
         self.assertNotIn("OBJC_CLASS_$_NSArray", generated)
         self.assertNotIn("OBJC_CLASS_$_NSMutableArray", generated)
         self.assertNotIn("OBJC_CLASS_$_NSNumber", generated)
+        self.assertNotIn("OBJC_CLASS_$_NSData", generated)
         self.assertNotIn("OBJC_CLASS_$_NSDate", generated)
         self.assertNotIn("OBJC_CLASS_$_NSDateFormatter", generated)
         self.assertNotIn("OBJC_CLASS_$_NSCalendar", generated)
+        self.assertNotIn("NSFileModificationDate", generated)
         self.assertNotIn("OBJC_METACLASS_$_UIWindow", generated)
         self.assertNotIn("OBJC_CLASS_$_UIView", generated)
         self.assertNotIn("OBJC_CLASS_$_NSURL", generated)
@@ -136,6 +138,7 @@ class Sword3IosShimTest(unittest.TestCase):
         self.assertIn(" OBJC_CLASS_$_NSArray\n", symbols)
         self.assertIn(" OBJC_CLASS_$_NSMutableArray\n", symbols)
         self.assertIn(" OBJC_CLASS_$_NSNumber\n", symbols)
+        self.assertIn(" OBJC_CLASS_$_NSData\n", symbols)
         self.assertIn(" OBJC_CLASS_$_NSDate\n", symbols)
         self.assertIn(" OBJC_CLASS_$_NSDateFormatter\n", symbols)
         self.assertIn(" OBJC_CLASS_$_NSCalendar\n", symbols)
@@ -154,6 +157,7 @@ class Sword3IosShimTest(unittest.TestCase):
         self.assertIn(" CFRunLoopRunInMode\n", symbols)
         self.assertIn(" kCFRunLoopDefaultMode\n", symbols)
         self.assertIn(" NSDefaultRunLoopMode\n", symbols)
+        self.assertIn(" NSFileModificationDate\n", symbols)
         self.assertIn(" sword3_ios_tick_display_links\n", symbols)
         self.assertIn(" CGRectZero\n", symbols)
         self.assertNotIn(" glActiveTexture\n", symbols)
@@ -195,6 +199,58 @@ class Sword3IosShimTest(unittest.TestCase):
             ctypes.c_uint64.in_dll(library, "OBJC_CLASS_$_NSCalendar").value,
             0,
         )
+        self.assertNotEqual(
+            ctypes.c_uint64.in_dll(library, "OBJC_CLASS_$_NSData").value,
+            0,
+        )
+        self.assertTrue(
+            ctypes.c_void_p.in_dll(library, "NSFileModificationDate").value
+        )
+
+    def test_document_and_cache_search_paths_are_split(self) -> None:
+        data_dir = Path(self.temporary_directory.name) / "saves"
+        tmpdir = Path(self.temporary_directory.name) / "tmp"
+        data_dir.mkdir()
+        tmpdir.mkdir()
+        os.environ["SWORD3_DATA_DIR"] = str(data_dir)
+        os.environ["TMPDIR"] = str(tmpdir)
+        self.addCleanup(os.environ.pop, "SWORD3_DATA_DIR", None)
+        self.addCleanup(os.environ.pop, "TMPDIR", None)
+
+        library = ctypes.CDLL(str(self.shared_object))
+        library.sword3_test_search_path.argtypes = [
+            ctypes.c_ulong,
+            ctypes.c_char_p,
+            ctypes.c_uint32,
+        ]
+        library.sword3_test_search_path.restype = ctypes.c_int
+        library.sword3_test_keep_save_path.argtypes = [ctypes.c_char_p]
+        library.sword3_test_keep_save_path.restype = ctypes.c_int
+        library.sword3_test_remove_path.argtypes = [ctypes.c_char_p]
+        library.sword3_test_remove_path.restype = ctypes.c_int
+
+        buf = ctypes.create_string_buffer(4096)
+        self.assertEqual(library.sword3_test_search_path(9, buf, 4096), 0)
+        self.assertEqual(buf.value.decode(), str(data_dir))
+        self.assertEqual(library.sword3_test_search_path(13, buf, 4096), 0)
+        cache_dir = tmpdir / "ns-search-13"
+        self.assertEqual(buf.value.decode(), str(cache_dir))
+        self.assertTrue(cache_dir.is_dir())
+
+        save = data_dir / "PAL2_001.sav"
+        junk = cache_dir / "stringdb.tmp"
+        save.write_bytes(b"PAL2")
+        junk.write_bytes(b"tmp")
+        self.assertEqual(
+            library.sword3_test_keep_save_path(str(save).encode()), 1
+        )
+        self.assertEqual(
+            library.sword3_test_keep_save_path(str(junk).encode()), 0
+        )
+        self.assertEqual(library.sword3_test_remove_path(str(save).encode()), 1)
+        self.assertEqual(library.sword3_test_remove_path(str(junk).encode()), 1)
+        self.assertTrue(save.is_file())
+        self.assertFalse(junk.exists())
 
     def test_function_wrapper_logs_and_aborts(self) -> None:
         script = (

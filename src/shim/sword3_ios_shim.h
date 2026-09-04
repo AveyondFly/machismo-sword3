@@ -37,6 +37,10 @@ SWORD3_EXPORT void sword3_ios_tick_display_links(void);
  */
 #ifdef SWORD3_SHIM_ENABLE_TEST_API
 SWORD3_EXPORT uint64_t sword3_unsupported_call_count(void);
+SWORD3_EXPORT int sword3_test_search_path(uintptr_t directory, char *out,
+                                         uint32_t cap);
+SWORD3_EXPORT int sword3_test_keep_save_path(const char *path);
+SWORD3_EXPORT int sword3_test_remove_path(const char *path);
 #endif
 
 #ifdef __cplusplus
