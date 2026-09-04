@@ -40,6 +40,7 @@ cp "$ROOT/configs/paladin2/machismo.conf" \
    "$ROOT/configs/paladin2/machismo-runtime-audit.conf" \
    "$ROOT/configs/paladin2/dylib_map.conf" \
    "$ROOT/configs/paladin2/address-hooks.conf" \
+   "$ROOT/configs/paladin2/patches.conf" \
    "$ROOT/configs/paladin2/sdl-hook-report.json" \
    "$ROOT/configs/paladin2/paladin2.gptk" \
    "$ROOT/run-rocknix.sh" \
