@@ -104,6 +104,7 @@ SWORD3_OBJC_EXPORT const char *sel_getName(sword3_objc_sel selector);
 
 SWORD3_OBJC_EXPORT sword3_objc_id objc_retain(sword3_objc_id object);
 SWORD3_OBJC_EXPORT void objc_release(sword3_objc_id object);
+SWORD3_OBJC_EXPORT sword3_objc_id objc_autorelease(sword3_objc_id object);
 SWORD3_OBJC_EXPORT sword3_objc_id objc_retainAutorelease(sword3_objc_id object);
 SWORD3_OBJC_EXPORT sword3_objc_id
 objc_retainAutoreleaseReturnValue(sword3_objc_id object);

@@ -94,12 +94,16 @@ int sword3_SDL_PeepEvents(SDL_Event *events, int numevents,
 void sword3_SDL_PumpEvents(void);
 int sword3_SDL_PollEvent(SDL_Event *event);
 int sword3_SDL_WaitEventTimeout(SDL_Event *event, int timeout);
+const Uint8 *sword3_SDL_GetKeyboardState(int *numkeys);
 SDL_AudioDeviceID sword3_SDL_OpenAudioDevice(const char *device, int iscapture,
 					     const SDL_AudioSpec *desired,
 					     SDL_AudioSpec *obtained,
 					     int allowed_changes);
 
-/* Generic 0-return stub kept for future address hooks. */
+int sword3_host_play_memory_audio(const void *data, size_t size, int loops);
+void sword3_host_stop_memory_audio(void);
+
+/* Generic 0-return stub used by Pal2 joystick address hooks. */
 int sword3_ret0(void);
 
 #ifdef __cplusplus

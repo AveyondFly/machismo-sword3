@@ -43,6 +43,8 @@ DATA_STORAGE_SIZE = 64
 DATA_STORAGE_ALIGNMENT = 16
 IMPLEMENTED_FUNCTIONS = frozenset(
     {
+        "CFRunLoopGetCurrent",
+        "CFRunLoopRunInMode",
         "CGRectGetHeight",
         "CGRectGetMaxX",
         "CGRectGetMaxY",
@@ -64,8 +66,34 @@ IMPLEMENTED_DATA = frozenset(
         "OBJC_CLASS_$_NSFileManager",
         "OBJC_CLASS_$_NSLocale",
         "OBJC_CLASS_$_NSString",
+        "OBJC_CLASS_$_NSArray",
+        "OBJC_CLASS_$_NSMutableArray",
+        "OBJC_CLASS_$_NSNumber",
+        "OBJC_CLASS_$_NSDate",
+        "OBJC_CLASS_$_NSDateFormatter",
+        "OBJC_CLASS_$_NSCalendar",
         "OBJC_CLASS_$_UIDevice",
         "OBJC_CLASS_$_UIScreen",
+        "OBJC_CLASS_$_UIColor",
+        "OBJC_CLASS_$_UIImage",
+        "OBJC_CLASS_$_UIImageView",
+        "OBJC_CLASS_$_UIResponder",
+        "OBJC_METACLASS_$_UIResponder",
+        "OBJC_CLASS_$_UIView",
+        "OBJC_METACLASS_$_UIView",
+        "OBJC_CLASS_$_UIViewController",
+        "OBJC_METACLASS_$_UIViewController",
+        "OBJC_CLASS_$_UIWindow",
+        "OBJC_METACLASS_$_UIWindow",
+        "OBJC_CLASS_$_NSURL",
+        "OBJC_CLASS_$_NSNotificationCenter",
+        "OBJC_CLASS_$_AVPlayer",
+        "OBJC_CLASS_$_AVPlayerLayer",
+        "OBJC_CLASS_$_AVAudioPlayer",
+        "OBJC_CLASS_$_CADisplayLink",
+        "OBJC_CLASS_$_NSRunLoop",
+        "kCFRunLoopDefaultMode",
+        "NSDefaultRunLoopMode",
     }
 )
 

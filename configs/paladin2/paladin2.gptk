@@ -1,0 +1,24 @@
+# Paladin 2: gptokeyb owns the pad and emits a real uinput keyboard.
+# SDL reports Xbox positions. This handheld is Nintendo-layout:
+# physical A is East (SDL B), physical B is South (SDL A).
+# SELECT+START still kills machismo via gptokeyb -k.
+back = esc
+start = space
+a = esc
+b = enter
+x = x
+y = y
+l1 = q
+r1 = e
+up = up
+down = down
+left = left
+right = right
+left_analog_up = up
+left_analog_down = down
+left_analog_left = left
+left_analog_right = right
+right_analog_up = up
+right_analog_down = down
+right_analog_left = left
+right_analog_right = right

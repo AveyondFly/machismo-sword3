@@ -1,8 +1,13 @@
+#define _GNU_SOURCE
 #define _POSIX_C_SOURCE 200809L
 #include "sword3_ios_shim.h"
 #include "sword3_objc_shim.h"
 
 #include <dirent.h>
+#include <dlfcn.h>
+#ifndef RTLD_DEFAULT
+#define RTLD_DEFAULT ((void *)0)
+#endif
 #include <errno.h>
 #include <limits.h>
 #include <pthread.h>
@@ -12,8 +17,15 @@
 #include <stdlib.h>
 #include <string.h>
 #include <sys/stat.h>
+#include <sys/time.h>
+#include <time.h>
 #include <unistd.h>
 
+extern sword3_objc_id objc_msgSend(
+    sword3_objc_id self,
+    sword3_objc_sel selector,
+    sword3_objc_id object
+) __attribute__((weak));
 
 static _Atomic uint64_t unsupported_call_count;
 
@@ -26,6 +38,7 @@ struct proxy_array {
     sword3_objc_Class isa;
     sword3_objc_id *items;
     size_t count;
+    size_t capacity;
 };
 
 struct proxy_bundle {
@@ -56,6 +69,85 @@ struct proxy_screen {
     sword3_objc_Class isa;
 };
 
+struct proxy_color {
+    sword3_objc_Class isa;
+};
+
+struct proxy_image {
+    sword3_objc_Class isa;
+};
+
+struct proxy_uikit_object {
+    sword3_objc_Class isa;
+    uintptr_t pad[16];
+};
+
+struct proxy_av_audio_player {
+    sword3_objc_Class isa;
+    sword3_objc_id delegate;
+    long loops;
+    void *copy;
+    size_t copy_len;
+    int playing;
+};
+
+struct proxy_url {
+    sword3_objc_Class isa;
+    char *path;
+};
+
+struct proxy_notification_center {
+    sword3_objc_Class isa;
+};
+
+struct proxy_display_link {
+    sword3_objc_Class isa;
+    sword3_objc_id target;
+    sword3_objc_sel callback;
+    int scheduled;
+    int paused;
+    int frame_interval;
+    int preferred_fps;
+};
+
+struct nc_observer {
+    sword3_objc_id observer;
+    sword3_objc_sel selector;
+    char *name;
+};
+
+struct proxy_number {
+    sword3_objc_Class isa;
+    long long ivalue;
+    double dvalue;
+    int is_float;
+};
+
+struct proxy_date {
+    sword3_objc_Class isa;
+    double unix_sec;
+};
+
+struct proxy_date_formatter {
+    sword3_objc_Class isa;
+    char format[80];
+};
+
+struct proxy_calendar {
+    sword3_objc_Class isa;
+};
+
+struct proxy_date_components {
+    sword3_objc_Class isa;
+    int year;
+    int month;
+    int day;
+    int hour;
+    int minute;
+    int second;
+    int weekday;
+};
+
 struct proxy_rect {
     double x;
     double y;
@@ -74,13 +166,32 @@ struct constant_string_layout {
 struct proxy_method_list {
     uint32_t entsize_and_flags;
     uint32_t count;
-    struct sword3_objc_method methods[12];
+    struct sword3_objc_method methods[20];
 };
 
 extern struct sword3_objc_class proxy_string_class
     __asm__("OBJC_CLASS_$_NSString");
 static struct sword3_objc_class proxy_string_metaclass;
-static struct sword3_objc_class proxy_array_class;
+extern struct sword3_objc_class proxy_array_class
+    __asm__("OBJC_CLASS_$_NSArray");
+static struct sword3_objc_class proxy_array_metaclass;
+extern struct sword3_objc_class proxy_mutable_array_class
+    __asm__("OBJC_CLASS_$_NSMutableArray");
+static struct sword3_objc_class proxy_mutable_array_metaclass;
+extern struct sword3_objc_class proxy_number_class
+    __asm__("OBJC_CLASS_$_NSNumber");
+static struct sword3_objc_class proxy_number_metaclass;
+extern struct sword3_objc_class proxy_date_class
+    __asm__("OBJC_CLASS_$_NSDate");
+static struct sword3_objc_class proxy_date_metaclass;
+extern struct sword3_objc_class proxy_date_formatter_class
+    __asm__("OBJC_CLASS_$_NSDateFormatter");
+static struct sword3_objc_class proxy_date_formatter_metaclass;
+extern struct sword3_objc_class proxy_calendar_class
+    __asm__("OBJC_CLASS_$_NSCalendar");
+static struct sword3_objc_class proxy_calendar_metaclass;
+static struct sword3_objc_class proxy_date_components_class;
+static struct proxy_calendar current_calendar;
 extern struct sword3_objc_class proxy_bundle_class
     __asm__("OBJC_CLASS_$_NSBundle");
 extern struct sword3_objc_class proxy_bundle_metaclass
@@ -105,11 +216,74 @@ extern struct sword3_objc_class proxy_screen_class
     __asm__("OBJC_CLASS_$_UIScreen");
 static struct sword3_objc_class proxy_screen_metaclass;
 static struct proxy_screen main_screen;
+extern struct sword3_objc_class proxy_color_class
+    __asm__("OBJC_CLASS_$_UIColor");
+static struct sword3_objc_class proxy_color_metaclass;
+static struct proxy_color clear_color;
+extern struct sword3_objc_class proxy_image_class
+    __asm__("OBJC_CLASS_$_UIImage");
+static struct sword3_objc_class proxy_image_metaclass;
+static struct proxy_image named_image;
+extern struct sword3_objc_class proxy_responder_class
+    __asm__("OBJC_CLASS_$_UIResponder");
+extern struct sword3_objc_class proxy_responder_metaclass
+    __asm__("OBJC_METACLASS_$_UIResponder");
+extern struct sword3_objc_class proxy_view_class
+    __asm__("OBJC_CLASS_$_UIView");
+extern struct sword3_objc_class proxy_view_metaclass
+    __asm__("OBJC_METACLASS_$_UIView");
+extern struct sword3_objc_class proxy_window_class
+    __asm__("OBJC_CLASS_$_UIWindow");
+extern struct sword3_objc_class proxy_window_metaclass
+    __asm__("OBJC_METACLASS_$_UIWindow");
+extern struct sword3_objc_class proxy_view_controller_class
+    __asm__("OBJC_CLASS_$_UIViewController");
+extern struct sword3_objc_class proxy_view_controller_metaclass
+    __asm__("OBJC_METACLASS_$_UIViewController");
+extern struct sword3_objc_class proxy_image_view_class
+    __asm__("OBJC_CLASS_$_UIImageView");
+static struct sword3_objc_class proxy_image_view_metaclass;
 extern struct sword3_objc_class proxy_exception_class
     __asm__("OBJC_CLASS_$_NSException");
 static struct sword3_objc_class proxy_exception_metaclass;
+extern struct sword3_objc_class proxy_url_class
+    __asm__("OBJC_CLASS_$_NSURL");
+static struct sword3_objc_class proxy_url_metaclass;
+extern struct sword3_objc_class proxy_notification_center_class
+    __asm__("OBJC_CLASS_$_NSNotificationCenter");
+static struct sword3_objc_class proxy_notification_center_metaclass;
+static struct proxy_notification_center default_notification_center;
+extern struct sword3_objc_class proxy_av_player_class
+    __asm__("OBJC_CLASS_$_AVPlayer");
+static struct sword3_objc_class proxy_av_player_metaclass;
+extern struct sword3_objc_class proxy_av_player_layer_class
+    __asm__("OBJC_CLASS_$_AVPlayerLayer");
+static struct sword3_objc_class proxy_av_player_layer_metaclass;
+extern struct sword3_objc_class proxy_av_audio_player_class
+    __asm__("OBJC_CLASS_$_AVAudioPlayer");
+static struct sword3_objc_class proxy_av_audio_player_metaclass;
+extern struct sword3_objc_class proxy_display_link_class
+    __asm__("OBJC_CLASS_$_CADisplayLink");
+static struct sword3_objc_class proxy_display_link_metaclass;
+extern struct sword3_objc_class proxy_runloop_class
+    __asm__("OBJC_CLASS_$_NSRunLoop");
+static struct sword3_objc_class proxy_runloop_metaclass;
+static struct proxy_uikit_object current_runloop;
+static struct nc_observer notification_observers[32];
+static size_t notification_observer_count;
+
+#define DISPLAY_LINK_CAP 8
+static pthread_mutex_t display_link_lock = PTHREAD_MUTEX_INITIALIZER;
+static struct proxy_display_link *display_links[DISPLAY_LINK_CAP];
+static size_t display_link_count;
+static _Atomic int display_link_reentrant;
+static unsigned char cf_runloop_token[64];
+static struct constant_string_layout cf_runloop_default_mode_string;
 
 static struct proxy_array *make_proxy_array(size_t count);
+static sword3_objc_id proxy_array_with_array(sword3_objc_id cls,
+                                             sword3_objc_sel selector,
+                                             struct proxy_array *other);
 
 static const char *object_cstring(const void *object)
 {
@@ -519,7 +693,666 @@ static struct proxy_array *make_proxy_array(size_t count)
     }
     array->isa = &proxy_array_class;
     array->count = count;
+    array->capacity = count;
     return array;
+}
+
+static struct proxy_array *make_mutable_array(size_t count)
+{
+    struct proxy_array *array = make_proxy_array(count);
+    if (array)
+        array->isa = &proxy_mutable_array_class;
+    return array;
+}
+
+static sword3_objc_id proxy_array_last(struct proxy_array *self,
+                                       sword3_objc_sel selector)
+{
+    (void)selector;
+    return self && self->count ? self->items[self->count - 1] : NULL;
+}
+
+static void proxy_array_add(struct proxy_array *self,
+                            sword3_objc_sel selector,
+                            sword3_objc_id object)
+{
+    (void)selector;
+    if (!self || !object)
+        return;
+    if (self->count >= self->capacity) {
+        size_t cap = self->capacity ? self->capacity * 2 : 4;
+        sword3_objc_id *items;
+
+        if (cap < self->count + 1)
+            cap = self->count + 1;
+        items = realloc(self->items, cap * sizeof(*items));
+        if (!items)
+            return;
+        self->items = items;
+        self->capacity = cap;
+    }
+    self->items[self->count++] = object;
+}
+
+static void proxy_array_add_from(struct proxy_array *self,
+                                 sword3_objc_sel selector,
+                                 struct proxy_array *other)
+{
+    size_t i;
+    (void)selector;
+    if (!self || !other)
+        return;
+    for (i = 0; i < other->count; i++)
+        proxy_array_add(self, selector, other->items[i]);
+}
+
+static sword3_objc_id proxy_array_copy(struct proxy_array *self,
+                                       sword3_objc_sel selector)
+{
+    return proxy_array_with_array((sword3_objc_id)&proxy_array_class,
+                                  selector, self);
+}
+
+static sword3_objc_id proxy_array_mutable_copy(struct proxy_array *self,
+                                               sword3_objc_sel selector)
+{
+    return proxy_array_with_array((sword3_objc_id)&proxy_mutable_array_class,
+                                  selector, self);
+}
+
+static int proxy_array_contains(struct proxy_array *self,
+                                sword3_objc_sel selector,
+                                sword3_objc_id object)
+{
+    size_t i;
+    (void)selector;
+    if (!self)
+        return 0;
+    for (i = 0; i < self->count; i++) {
+        if (self->items[i] == object)
+            return 1;
+    }
+    return 0;
+}
+
+static sword3_objc_id proxy_array_init_capacity(struct proxy_array *self,
+                                                sword3_objc_sel selector,
+                                                uintptr_t capacity)
+{
+    (void)selector;
+    if (!self)
+        return NULL;
+    if (capacity > self->capacity) {
+        sword3_objc_id *items = realloc(self->items, capacity * sizeof(*items));
+        if (!items)
+            return self;
+        self->items = items;
+        self->capacity = capacity;
+    }
+    return self;
+}
+
+static sword3_objc_id proxy_mutable_array_with_capacity(
+    sword3_objc_id cls,
+    sword3_objc_sel selector,
+    uintptr_t capacity
+)
+{
+    (void)cls;
+    return proxy_array_init_capacity(make_mutable_array(0), selector, capacity);
+}
+
+static void proxy_array_remove_all(struct proxy_array *self,
+                                   sword3_objc_sel selector)
+{
+    (void)selector;
+    if (self)
+        self->count = 0;
+}
+
+static void proxy_array_remove_last(struct proxy_array *self,
+                                    sword3_objc_sel selector)
+{
+    (void)selector;
+    if (self && self->count)
+        self->count--;
+}
+
+static sword3_objc_id proxy_array_init_with_array(
+    struct proxy_array *self,
+    sword3_objc_sel selector,
+    struct proxy_array *other
+)
+{
+    size_t count = other ? other->count : 0;
+    (void)selector;
+    if (!self)
+        return NULL;
+    if (!count)
+        return self;
+    if (count > self->capacity) {
+        sword3_objc_id *items = realloc(self->items, count * sizeof(*items));
+        if (!items)
+            return self;
+        self->items = items;
+        self->capacity = count;
+    }
+    memcpy(self->items, other->items, count * sizeof(*self->items));
+    self->count = count;
+    return self;
+}
+
+static sword3_objc_id proxy_array_empty(sword3_objc_id cls,
+                                        sword3_objc_sel selector)
+{
+    (void)selector;
+    if (cls == (sword3_objc_id)&proxy_mutable_array_class)
+        return make_mutable_array(0);
+    return make_proxy_array(0);
+}
+
+static sword3_objc_id proxy_array_with_array(sword3_objc_id cls,
+                                             sword3_objc_sel selector,
+                                             struct proxy_array *other)
+{
+    struct proxy_array *array;
+    size_t count = other ? other->count : 0;
+    (void)selector;
+    array = (cls == (sword3_objc_id)&proxy_mutable_array_class)
+                ? make_mutable_array(count)
+                : make_proxy_array(count);
+    if (!array || !count)
+        return array;
+    memcpy(array->items, other->items, count * sizeof(*array->items));
+    return array;
+}
+
+static sword3_objc_id proxy_array_with_objects_count(
+    sword3_objc_id cls,
+    sword3_objc_sel selector,
+    sword3_objc_id *objects,
+    uintptr_t count
+)
+{
+    struct proxy_array *array;
+    (void)selector;
+    array = (cls == (sword3_objc_id)&proxy_mutable_array_class)
+                ? make_mutable_array(count)
+                : make_proxy_array(count);
+    if (!array || !count)
+        return array;
+    if (objects)
+        memcpy(array->items, objects, count * sizeof(*array->items));
+    return array;
+}
+
+__attribute__((used, visibility("hidden")))
+sword3_objc_id sword3_array_with_objects_impl(
+    sword3_objc_id cls,
+    sword3_objc_sel selector,
+    sword3_objc_id first,
+    const uintptr_t *apple_stack
+)
+{
+    sword3_objc_id objects[64];
+    size_t count = 0;
+
+    if (first != NULL) {
+        objects[count++] = first;
+        if (apple_stack) {
+            while (count < 64) {
+                sword3_objc_id object = (sword3_objc_id)apple_stack[count - 1];
+                if (object == NULL)
+                    break;
+                objects[count++] = object;
+            }
+        }
+    }
+    return proxy_array_with_objects_count(cls, selector, objects, count);
+}
+
+#if defined(__aarch64__)
+void proxy_array_with_objects(void);
+#else
+static sword3_objc_id proxy_array_with_objects(sword3_objc_id cls,
+                                                sword3_objc_sel selector,
+                                                sword3_objc_id first)
+{
+    return sword3_array_with_objects_impl(cls, selector, first, NULL);
+}
+#endif
+
+static struct proxy_number *make_proxy_number_int(long long value)
+{
+    struct proxy_number *number = calloc(1, sizeof(*number));
+    if (!number)
+        return NULL;
+    number->isa = &proxy_number_class;
+    number->ivalue = value;
+    number->dvalue = (double)value;
+    return number;
+}
+
+static struct proxy_number *make_proxy_number_float(double value)
+{
+    struct proxy_number *number = calloc(1, sizeof(*number));
+    if (!number)
+        return NULL;
+    number->isa = &proxy_number_class;
+    number->is_float = 1;
+    number->dvalue = value;
+    number->ivalue = (long long)value;
+    return number;
+}
+
+static sword3_objc_id proxy_number_with_bool(sword3_objc_id cls,
+                                              sword3_objc_sel selector,
+                                              int value)
+{
+    (void)cls;
+    (void)selector;
+    return make_proxy_number_int(value ? 1 : 0);
+}
+
+static sword3_objc_id proxy_number_with_long(sword3_objc_id cls,
+                                              sword3_objc_sel selector,
+                                              long long value)
+{
+    (void)cls;
+    (void)selector;
+    return make_proxy_number_int(value);
+}
+
+static sword3_objc_id proxy_number_with_double(sword3_objc_id cls,
+                                                sword3_objc_sel selector,
+                                                double value)
+{
+    (void)cls;
+    (void)selector;
+    return make_proxy_number_float(value);
+}
+
+static sword3_objc_id proxy_number_with_float(sword3_objc_id cls,
+                                               sword3_objc_sel selector,
+                                               float value)
+{
+    (void)cls;
+    (void)selector;
+    return make_proxy_number_float(value);
+}
+
+static sword3_objc_id proxy_number_string_value(struct proxy_number *self,
+                                                sword3_objc_sel selector)
+{
+    char text[64];
+    (void)selector;
+    if (!self)
+        return make_proxy_string("0");
+    if (self->is_float)
+        snprintf(text, sizeof(text), "%g", self->dvalue);
+    else
+        snprintf(text, sizeof(text), "%lld", self->ivalue);
+    return make_proxy_string(text);
+}
+
+static int proxy_number_bool(struct proxy_number *self,
+                             sword3_objc_sel selector)
+{
+    (void)selector;
+    return self && self->ivalue != 0;
+}
+
+static int proxy_number_int(struct proxy_number *self,
+                            sword3_objc_sel selector)
+{
+    (void)selector;
+    return self ? (int)self->ivalue : 0;
+}
+
+static long long proxy_number_long(struct proxy_number *self,
+                                   sword3_objc_sel selector)
+{
+    (void)selector;
+    return self ? self->ivalue : 0;
+}
+
+static double proxy_number_double(struct proxy_number *self,
+                                  sword3_objc_sel selector)
+{
+    (void)selector;
+    return self ? self->dvalue : 0.0;
+}
+
+static float proxy_number_float(struct proxy_number *self,
+                                sword3_objc_sel selector)
+{
+    (void)selector;
+    return self ? (float)self->dvalue : 0.0f;
+}
+
+static double unix_now(void)
+{
+    struct timeval tv;
+
+    if (gettimeofday(&tv, NULL) != 0)
+        return (double)time(NULL);
+    return (double)tv.tv_sec + (double)tv.tv_usec / 1000000.0;
+}
+
+static void date_local_tm(double unix_sec, struct tm *out)
+{
+    time_t stamp = (time_t)unix_sec;
+
+    memset(out, 0, sizeof(*out));
+    if (!localtime_r(&stamp, out)) {
+        out->tm_year = 70;
+        out->tm_mday = 1;
+    }
+}
+
+static struct proxy_date *make_proxy_date(double unix_sec)
+{
+    struct proxy_date *stamp = calloc(1, sizeof(*stamp));
+
+    if (!stamp)
+        return NULL;
+    stamp->isa = &proxy_date_class;
+    stamp->unix_sec = unix_sec;
+    return stamp;
+}
+
+static sword3_objc_id proxy_date_now(sword3_objc_id cls,
+                                     sword3_objc_sel selector)
+{
+    static int logged;
+
+    (void)cls;
+    (void)selector;
+    if (!logged) {
+        logged = 1;
+        fprintf(stderr, "[sword3-ios-shim] NSDate date\n");
+    }
+    return make_proxy_date(unix_now());
+}
+
+static sword3_objc_id proxy_date_distant_future(sword3_objc_id cls,
+                                                sword3_objc_sel selector)
+{
+    (void)cls;
+    (void)selector;
+    return make_proxy_date(64060588800.0);
+}
+
+static sword3_objc_id proxy_date_with_unix(sword3_objc_id cls,
+                                           sword3_objc_sel selector,
+                                           double unix_sec)
+{
+    (void)cls;
+    (void)selector;
+    return make_proxy_date(unix_sec);
+}
+
+static sword3_objc_id proxy_date_with_interval_since_now(
+    sword3_objc_id cls,
+    sword3_objc_sel selector,
+    double interval
+)
+{
+    (void)cls;
+    (void)selector;
+    return make_proxy_date(unix_now() + interval);
+}
+
+static double proxy_date_unix(struct proxy_date *self,
+                              sword3_objc_sel selector)
+{
+    (void)selector;
+    return self ? self->unix_sec : 0.0;
+}
+
+static double proxy_date_since_now(struct proxy_date *self,
+                                   sword3_objc_sel selector)
+{
+    (void)selector;
+    return self ? self->unix_sec - unix_now() : 0.0;
+}
+
+static sword3_objc_id proxy_date_description(struct proxy_date *self,
+                                             sword3_objc_sel selector)
+{
+    struct tm local;
+    char text[64];
+
+    (void)selector;
+    date_local_tm(self ? self->unix_sec : 0.0, &local);
+    if (strftime(text, sizeof(text), "%Y/%m/%d %H:%M:%S", &local) == 0)
+        snprintf(text, sizeof(text), "%.0f", self ? self->unix_sec : 0.0);
+    return make_proxy_string(text);
+}
+
+static sword3_objc_id proxy_date_copy(struct proxy_date *self,
+                                      sword3_objc_sel selector,
+                                      void *zone)
+{
+    (void)selector;
+    (void)zone;
+    return make_proxy_date(self ? self->unix_sec : 0.0);
+}
+
+static void unicode_format_to_strftime(const char *src, char *dst, size_t cap)
+{
+    size_t out = 0;
+
+    if (!src || !src[0])
+        src = "yyyy/MM/dd HH:mm";
+    while (*src && out + 3 < cap) {
+        if (strncmp(src, "yyyy", 4) == 0) {
+            dst[out++] = '%';
+            dst[out++] = 'Y';
+            src += 4;
+            continue;
+        }
+        if (strncmp(src, "yy", 2) == 0) {
+            dst[out++] = '%';
+            dst[out++] = 'y';
+            src += 2;
+            continue;
+        }
+        if (strncmp(src, "MM", 2) == 0) {
+            dst[out++] = '%';
+            dst[out++] = 'm';
+            src += 2;
+            continue;
+        }
+        if (strncmp(src, "dd", 2) == 0) {
+            dst[out++] = '%';
+            dst[out++] = 'd';
+            src += 2;
+            continue;
+        }
+        if (strncmp(src, "HH", 2) == 0) {
+            dst[out++] = '%';
+            dst[out++] = 'H';
+            src += 2;
+            continue;
+        }
+        if (strncmp(src, "mm", 2) == 0) {
+            dst[out++] = '%';
+            dst[out++] = 'M';
+            src += 2;
+            continue;
+        }
+        if (strncmp(src, "ss", 2) == 0) {
+            dst[out++] = '%';
+            dst[out++] = 'S';
+            src += 2;
+            continue;
+        }
+        dst[out++] = *src++;
+    }
+    dst[out] = '\0';
+}
+
+static void proxy_formatter_set_format(
+    struct proxy_date_formatter *self,
+    sword3_objc_sel selector,
+    sword3_objc_id format
+)
+{
+    const char *text = object_cstring(format);
+
+    (void)selector;
+    if (!self)
+        return;
+    snprintf(self->format, sizeof(self->format), "%s", text ? text : "");
+}
+
+static sword3_objc_id proxy_formatter_string_from_date(
+    struct proxy_date_formatter *self,
+    sword3_objc_sel selector,
+    struct proxy_date *stamp
+)
+{
+    struct tm local;
+    char spec[96];
+    char text[64];
+
+    (void)selector;
+    date_local_tm(stamp ? stamp->unix_sec : 0.0, &local);
+    unicode_format_to_strftime(self ? self->format : NULL, spec, sizeof(spec));
+    if (strftime(text, sizeof(text), spec, &local) == 0)
+        snprintf(text, sizeof(text), "%.0f", stamp ? stamp->unix_sec : 0.0);
+    return make_proxy_string(text);
+}
+
+static sword3_objc_id proxy_calendar_current(sword3_objc_id cls,
+                                             sword3_objc_sel selector)
+{
+    (void)cls;
+    (void)selector;
+    current_calendar.isa = &proxy_calendar_class;
+    return &current_calendar;
+}
+
+static sword3_objc_id proxy_calendar_components(
+    struct proxy_calendar *self,
+    sword3_objc_sel selector,
+    uintptr_t unit_flags,
+    struct proxy_date *stamp
+)
+{
+    struct proxy_date_components *parts;
+    struct tm local;
+
+    (void)self;
+    (void)selector;
+    (void)unit_flags;
+    parts = calloc(1, sizeof(*parts));
+    if (!parts)
+        return NULL;
+    date_local_tm(stamp ? stamp->unix_sec : unix_now(), &local);
+    parts->isa = &proxy_date_components_class;
+    parts->year = local.tm_year + 1900;
+    parts->month = local.tm_mon + 1;
+    parts->day = local.tm_mday;
+    parts->hour = local.tm_hour;
+    parts->minute = local.tm_min;
+    parts->second = local.tm_sec;
+    parts->weekday = local.tm_wday + 1;
+    return parts;
+}
+
+static long long proxy_components_year(struct proxy_date_components *self,
+                                        sword3_objc_sel selector)
+{
+    (void)selector;
+    return self ? self->year : 0;
+}
+
+static long long proxy_components_month(struct proxy_date_components *self,
+                                         sword3_objc_sel selector)
+{
+    (void)selector;
+    return self ? self->month : 0;
+}
+
+static long long proxy_components_day(struct proxy_date_components *self,
+                                       sword3_objc_sel selector)
+{
+    (void)selector;
+    return self ? self->day : 0;
+}
+
+static long long proxy_components_hour(struct proxy_date_components *self,
+                                        sword3_objc_sel selector)
+{
+    (void)selector;
+    return self ? self->hour : 0;
+}
+
+static long long proxy_components_minute(struct proxy_date_components *self,
+                                          sword3_objc_sel selector)
+{
+    (void)selector;
+    return self ? self->minute : 0;
+}
+
+static long long proxy_components_second(struct proxy_date_components *self,
+                                          sword3_objc_sel selector)
+{
+    (void)selector;
+    return self ? self->second : 0;
+}
+
+static long long proxy_components_weekday(struct proxy_date_components *self,
+                                           sword3_objc_sel selector)
+{
+    (void)selector;
+    return self ? self->weekday : 0;
+}
+
+static sword3_objc_id proxy_string_append_string(
+    struct proxy_string *self,
+    sword3_objc_sel selector,
+    sword3_objc_id other
+)
+{
+    const char *left = object_cstring(self);
+    const char *right = object_cstring(other);
+    size_t left_length = strlen(left);
+    size_t right_length = strlen(right);
+    char *joined;
+    struct proxy_string *result;
+    (void)selector;
+
+    joined = malloc(left_length + right_length + 1);
+    if (!joined)
+        return NULL;
+    memcpy(joined, left, left_length);
+    memcpy(joined + left_length, right, right_length + 1);
+    result = make_proxy_string(joined);
+    free(joined);
+    return result;
+}
+
+static sword3_objc_id proxy_string_with_format(sword3_objc_id cls,
+                                                sword3_objc_sel selector,
+                                                sword3_objc_id format)
+{
+    (void)cls;
+    (void)selector;
+    return make_proxy_string(object_cstring(format));
+}
+
+static sword3_objc_id proxy_string_with_cstring(sword3_objc_id cls,
+                                                 sword3_objc_sel selector,
+                                                 const char *utf8,
+                                                 uintptr_t encoding)
+{
+    (void)cls;
+    (void)selector;
+    (void)encoding;
+    return make_proxy_string(utf8);
 }
 
 static sword3_objc_id proxy_locale_preferred_languages(
@@ -596,6 +1429,13 @@ static void proxy_noop(sword3_objc_id self, sword3_objc_sel selector)
     (void)selector;
 }
 
+static sword3_objc_id proxy_return_self(sword3_objc_id self,
+                                        sword3_objc_sel selector)
+{
+    (void)selector;
+    return self;
+}
+
 static sword3_objc_id proxy_screen_main(sword3_objc_id cls,
                                         sword3_objc_sel selector)
 {
@@ -620,6 +1460,764 @@ static double proxy_screen_scale(struct proxy_screen *self,
     (void)self;
     (void)selector;
     return 1.0;
+}
+
+static sword3_objc_id proxy_color_named(sword3_objc_id cls,
+                                        sword3_objc_sel selector)
+{
+    (void)cls;
+    (void)selector;
+    clear_color.isa = &proxy_color_class;
+    return &clear_color;
+}
+
+static sword3_objc_id proxy_color_rgba(sword3_objc_id cls,
+                                       sword3_objc_sel selector,
+                                       double red, double green, double blue,
+                                       double alpha)
+{
+    (void)red;
+    (void)green;
+    (void)blue;
+    (void)alpha;
+    return proxy_color_named(cls, selector);
+}
+
+static sword3_objc_id proxy_color_white(sword3_objc_id cls,
+                                        sword3_objc_sel selector,
+                                        double white, double alpha)
+{
+    (void)white;
+    (void)alpha;
+    return proxy_color_named(cls, selector);
+}
+
+static sword3_objc_id proxy_image_named(sword3_objc_id cls,
+                                        sword3_objc_sel selector,
+                                        sword3_objc_id name)
+{
+    (void)cls;
+    (void)selector;
+    (void)name;
+    named_image.isa = &proxy_image_class;
+    return &named_image;
+}
+
+static sword3_objc_id make_uikit_object(struct sword3_objc_class *cls)
+{
+    struct proxy_uikit_object *object = calloc(1, sizeof(*object));
+    if (object)
+        object->isa = cls;
+    return object;
+}
+
+static void ensure_cf_constants(void)
+{
+    if (cf_runloop_default_mode_string.bytes)
+        return;
+    cf_runloop_default_mode_string.isa = &proxy_string_class;
+    cf_runloop_default_mode_string.flags = 0x07c8u;
+    cf_runloop_default_mode_string.bytes = "kCFRunLoopDefaultMode";
+    cf_runloop_default_mode_string.length = 21;
+}
+
+static void register_display_link(struct proxy_display_link *link)
+{
+    pthread_mutex_lock(&display_link_lock);
+    if (display_link_count < DISPLAY_LINK_CAP)
+        display_links[display_link_count++] = link;
+    pthread_mutex_unlock(&display_link_lock);
+}
+
+static sword3_objc_id proxy_display_link_with_target(
+    sword3_objc_id cls,
+    sword3_objc_sel selector,
+    sword3_objc_id target,
+    sword3_objc_sel callback
+)
+{
+    struct proxy_display_link *link;
+    static unsigned seen;
+    (void)cls;
+    (void)selector;
+
+    link = calloc(1, sizeof(*link));
+    if (!link)
+        return NULL;
+    link->isa = &proxy_display_link_class;
+    link->target = target;
+    link->callback = callback;
+    link->frame_interval = 1;
+    link->preferred_fps = 60;
+    register_display_link(link);
+    if (seen < 8) {
+        seen++;
+        fprintf(stderr,
+            "[sword3-ios-shim] CADisplayLink target=%p selector=%s\n",
+            target, callback ? callback : "(null)");
+    }
+    return link;
+}
+
+static void proxy_display_link_add(
+    struct proxy_display_link *self,
+    sword3_objc_sel selector,
+    sword3_objc_id runloop,
+    sword3_objc_id mode
+)
+{
+    (void)selector;
+    (void)runloop;
+    (void)mode;
+    if (self)
+        self->scheduled = 1;
+}
+
+static void proxy_display_link_remove(
+    struct proxy_display_link *self,
+    sword3_objc_sel selector,
+    sword3_objc_id runloop,
+    sword3_objc_id mode
+)
+{
+    (void)selector;
+    (void)runloop;
+    (void)mode;
+    if (self)
+        self->scheduled = 0;
+}
+
+static void proxy_display_link_invalidate(
+    struct proxy_display_link *self,
+    sword3_objc_sel selector
+)
+{
+    (void)selector;
+    if (!self)
+        return;
+    self->scheduled = 0;
+    self->paused = 1;
+    self->target = NULL;
+    self->callback = NULL;
+}
+
+static void proxy_display_link_set_paused(
+    struct proxy_display_link *self,
+    sword3_objc_sel selector,
+    int paused
+)
+{
+    (void)selector;
+    if (self)
+        self->paused = paused ? 1 : 0;
+}
+
+static int proxy_display_link_is_paused(
+    struct proxy_display_link *self,
+    sword3_objc_sel selector
+)
+{
+    (void)selector;
+    return self && self->paused;
+}
+
+static void proxy_display_link_set_interval(
+    struct proxy_display_link *self,
+    sword3_objc_sel selector,
+    intptr_t interval
+)
+{
+    (void)selector;
+    if (self)
+        self->frame_interval = interval > 0 ? (int)interval : 1;
+}
+
+static void proxy_display_link_set_fps(
+    struct proxy_display_link *self,
+    sword3_objc_sel selector,
+    intptr_t fps
+)
+{
+    (void)selector;
+    if (self)
+        self->preferred_fps = fps > 0 ? (int)fps : 60;
+}
+
+static sword3_objc_id proxy_runloop_current(
+    sword3_objc_id cls,
+    sword3_objc_sel selector
+)
+{
+    (void)cls;
+    (void)selector;
+    current_runloop.isa = &proxy_runloop_class;
+    return &current_runloop;
+}
+
+static int proxy_runloop_run_mode(
+    sword3_objc_id self,
+    sword3_objc_sel selector,
+    sword3_objc_id mode,
+    sword3_objc_id limit_date
+)
+{
+    (void)self;
+    (void)selector;
+    (void)mode;
+    (void)limit_date;
+    sword3_ios_tick_display_links();
+    return 1;
+}
+
+SWORD3_EXPORT void sword3_ios_tick_display_links(void)
+{
+    struct proxy_display_link *snapshot[DISPLAY_LINK_CAP];
+    size_t n;
+    size_t i;
+    struct timespec ts;
+    static uint64_t last_ms;
+    uint64_t now;
+    static unsigned fired;
+
+    ensure_cf_constants();
+    if (atomic_exchange(&display_link_reentrant, 1))
+        return;
+    clock_gettime(CLOCK_MONOTONIC, &ts);
+    now = (uint64_t)ts.tv_sec * 1000ull + (uint64_t)ts.tv_nsec / 1000000ull;
+    if (last_ms != 0 && now - last_ms < 16ull) {
+        atomic_store(&display_link_reentrant, 0);
+        return;
+    }
+    last_ms = now;
+
+    pthread_mutex_lock(&display_link_lock);
+    n = display_link_count;
+    memcpy(snapshot, display_links, n * sizeof(*snapshot));
+    pthread_mutex_unlock(&display_link_lock);
+
+    for (i = 0; i < n; i++) {
+        struct proxy_display_link *link = snapshot[i];
+        if (!link || !link->scheduled || link->paused)
+            continue;
+        if (!link->target || !link->callback)
+            continue;
+        if (fired < 8) {
+            fired++;
+            fprintf(stderr,
+                "[sword3-ios-shim] CADisplayLink fire #%u selector=%s\n",
+                fired, link->callback);
+        }
+        {
+            static void (*msgsend)(sword3_objc_id, sword3_objc_sel, sword3_objc_id);
+            static int msgsend_resolved;
+            if (!msgsend_resolved) {
+                msgsend_resolved = 1;
+                msgsend = (void (*)(sword3_objc_id, sword3_objc_sel,
+                                    sword3_objc_id))
+                    dlsym(RTLD_DEFAULT, "objc_msgSend");
+            }
+            if (msgsend)
+                msgsend(link->target, link->callback, link);
+        }
+    }
+    atomic_store(&display_link_reentrant, 0);
+}
+
+SWORD3_EXPORT void *CFRunLoopGetCurrent(void)
+{
+    ensure_cf_constants();
+    return cf_runloop_token;
+}
+
+SWORD3_EXPORT int32_t CFRunLoopRunInMode(
+    const void *mode,
+    double seconds,
+    unsigned char return_after_source
+)
+{
+    struct timespec ts;
+    double wait = seconds;
+    (void)mode;
+    (void)return_after_source;
+
+    ensure_cf_constants();
+    sword3_ios_tick_display_links();
+    if (wait < 0.0)
+        wait = 0.0;
+    if (wait > 0.016)
+        wait = 0.016;
+    if (wait > 0.0) {
+        ts.tv_sec = 0;
+        ts.tv_nsec = (long)(wait * 1000000000.0);
+        nanosleep(&ts, NULL);
+    }
+    return 3; /* kCFRunLoopRunTimedOut */
+}
+
+static sword3_objc_id proxy_url_from_cstring(const char *path)
+{
+    struct proxy_url *url = calloc(1, sizeof(*url));
+    if (!url)
+        return NULL;
+    url->isa = &proxy_url_class;
+    url->path = strdup(path ? path : "");
+    return url;
+}
+
+static sword3_objc_id proxy_url_with_path(sword3_objc_id cls,
+                                          sword3_objc_sel selector,
+                                          sword3_objc_id path_object)
+{
+    (void)cls;
+    (void)selector;
+    return proxy_url_from_cstring(object_cstring(path_object));
+}
+
+static sword3_objc_id proxy_url_with_path_dir(sword3_objc_id cls,
+                                              sword3_objc_sel selector,
+                                              sword3_objc_id path_object,
+                                              int is_directory)
+{
+    (void)is_directory;
+    return proxy_url_with_path(cls, selector, path_object);
+}
+
+static sword3_objc_id proxy_url_init_path(struct proxy_url *self,
+                                          sword3_objc_sel selector,
+                                          sword3_objc_id path_object)
+{
+    (void)selector;
+    if (!self)
+        return NULL;
+    free(self->path);
+    self->path = strdup(object_cstring(path_object));
+    return self;
+}
+
+static sword3_objc_id proxy_url_init_path_dir(struct proxy_url *self,
+                                              sword3_objc_sel selector,
+                                              sword3_objc_id path_object,
+                                              int is_directory)
+{
+    (void)is_directory;
+    return proxy_url_init_path(self, selector, path_object);
+}
+
+static const char *url_path_text(struct proxy_url *self)
+{
+    return self && self->path ? self->path : "";
+}
+
+static sword3_objc_id proxy_url_path(struct proxy_url *self,
+                                     sword3_objc_sel selector)
+{
+    (void)selector;
+    return make_proxy_string(url_path_text(self));
+}
+
+static sword3_objc_id proxy_url_absolute_string(struct proxy_url *self,
+                                                sword3_objc_sel selector)
+{
+    char text[PATH_MAX + 8];
+    const char *path = url_path_text(self);
+    (void)selector;
+    if (!strncmp(path, "file:", 5) || !strncmp(path, "http", 4))
+        return make_proxy_string(path);
+    snprintf(text, sizeof(text), "file://%s", path);
+    return make_proxy_string(text);
+}
+
+static sword3_objc_id proxy_url_last_component(struct proxy_url *self,
+                                               sword3_objc_sel selector)
+{
+    const char *path = url_path_text(self);
+    const char *slash = strrchr(path, '/');
+    (void)selector;
+    return make_proxy_string(slash ? slash + 1 : path);
+}
+
+static sword3_objc_id proxy_url_append_component(
+    struct proxy_url *self,
+    sword3_objc_sel selector,
+    sword3_objc_id component
+)
+{
+    char text[PATH_MAX];
+    const char *path = url_path_text(self);
+    const char *piece = object_cstring(component);
+    size_t path_length = strlen(path);
+    (void)selector;
+    if (path_length && path[path_length - 1] == '/')
+        snprintf(text, sizeof(text), "%s%s", path, piece);
+    else
+        snprintf(text, sizeof(text), "%s/%s", path, piece);
+    return proxy_url_from_cstring(text);
+}
+
+static void dispatch_notification(const char *name, sword3_objc_id object)
+{
+    static void (*msgsend)(sword3_objc_id, sword3_objc_sel, sword3_objc_id);
+    static int msgsend_resolved;
+    size_t i;
+    (void)object;
+    if (!msgsend_resolved) {
+        msgsend_resolved = 1;
+        msgsend = (void (*)(sword3_objc_id, sword3_objc_sel, sword3_objc_id))
+            dlsym(RTLD_DEFAULT, "objc_msgSend");
+    }
+    for (i = 0; i < notification_observer_count; i++) {
+        struct nc_observer *entry = &notification_observers[i];
+        if (!entry->observer || !entry->selector)
+            continue;
+        if (entry->name && entry->name[0] && name && strcmp(entry->name, name) != 0)
+            continue;
+        if (msgsend)
+            msgsend(entry->observer, entry->selector, NULL);
+    }
+}
+
+static sword3_objc_id proxy_nc_default(sword3_objc_id cls,
+                                       sword3_objc_sel selector)
+{
+    (void)cls;
+    (void)selector;
+    default_notification_center.isa = &proxy_notification_center_class;
+    return &default_notification_center;
+}
+
+static void proxy_nc_add(struct proxy_notification_center *self,
+                         sword3_objc_sel selector,
+                         sword3_objc_id observer,
+                         sword3_objc_sel callback,
+                         sword3_objc_id name_object,
+                         sword3_objc_id object)
+{
+    const char *name = object_cstring(name_object);
+    (void)self;
+    (void)selector;
+    (void)object;
+    if (!observer || notification_observer_count >=
+            sizeof(notification_observers) / sizeof(notification_observers[0]))
+        return;
+    notification_observers[notification_observer_count].observer = observer;
+    notification_observers[notification_observer_count].selector = callback;
+    notification_observers[notification_observer_count].name =
+        name && name[0] ? strdup(name) : NULL;
+    notification_observer_count++;
+    /*
+     * Intro movies cannot decode here. Treat AVPlayer completion observers
+     * as already finished so startup is not blocked on a black video layer.
+     */
+    if (name && strstr(name, "AVPlayerItemDidPlayToEndTime"))
+        dispatch_notification(name, observer);
+}
+
+static void proxy_nc_remove(struct proxy_notification_center *self,
+                            sword3_objc_sel selector,
+                            sword3_objc_id observer)
+{
+    size_t i;
+    (void)self;
+    (void)selector;
+    for (i = 0; i < notification_observer_count; i++) {
+        if (notification_observers[i].observer == observer)
+            notification_observers[i].observer = NULL;
+    }
+}
+
+static void proxy_nc_post(struct proxy_notification_center *self,
+                          sword3_objc_sel selector,
+                          sword3_objc_id name_object,
+                          sword3_objc_id object)
+{
+    (void)self;
+    (void)selector;
+    dispatch_notification(object_cstring(name_object), object);
+}
+
+static sword3_objc_id proxy_av_player_with_url(sword3_objc_id cls,
+                                               sword3_objc_sel selector,
+                                               sword3_objc_id url)
+{
+    (void)cls;
+    (void)selector;
+    (void)url;
+    return make_uikit_object(&proxy_av_player_class);
+}
+
+static sword3_objc_id proxy_av_init_url(sword3_objc_id self,
+                                        sword3_objc_sel selector,
+                                        sword3_objc_id url)
+{
+    (void)selector;
+    (void)url;
+    return self;
+}
+
+static void proxy_av_play(sword3_objc_id self, sword3_objc_sel selector)
+{
+    (void)selector;
+    dispatch_notification("AVPlayerItemDidPlayToEndTimeNotification", self);
+}
+
+static int copy_nsdata_bytes(sword3_objc_id object, void **out, size_t *out_len)
+{
+    static sword3_objc_id (*msgsend)(sword3_objc_id, sword3_objc_sel, ...);
+    static sword3_objc_sel (*regsel)(const char *);
+    static int resolved;
+    const void *bytes = NULL;
+    unsigned long length = 0;
+    const uintptr_t *words;
+    void *copy;
+
+    if (!object || !out || !out_len)
+        return -1;
+    if (!resolved) {
+        resolved = 1;
+        msgsend = (sword3_objc_id (*)(sword3_objc_id, sword3_objc_sel, ...))
+            dlsym(RTLD_DEFAULT, "objc_msgSend");
+        regsel = (sword3_objc_sel (*)(const char *))
+            dlsym(RTLD_DEFAULT, "sel_registerName");
+    }
+    if (msgsend && regsel) {
+        bytes = msgsend(object, regsel("bytes"));
+        length = (unsigned long)(uintptr_t)msgsend(object, regsel("length"));
+    }
+    if ((!bytes || length == 0) && object) {
+        words = object;
+        /*
+         * Common CFData / NSCFData layout on arm64: isa, info, length, bytes.
+         * Only accept a heap-looking pointer and a bounded length.
+         */
+        if (words[2] > 0 && words[2] < 32u * 1024u * 1024u && words[3] > 0x1000) {
+            length = (unsigned long)words[2];
+            bytes = (const void *)words[3];
+        }
+    }
+    if (!bytes || length == 0)
+        return -1;
+    copy = malloc(length);
+    if (!copy)
+        return -1;
+    memcpy(copy, bytes, length);
+    *out = copy;
+    *out_len = (size_t)length;
+    return 0;
+}
+
+static int copy_url_file_bytes(sword3_objc_id url, void **out, size_t *out_len)
+{
+    const char *path = NULL;
+    const struct proxy_url *proxy = url;
+    FILE *fp;
+    long sz;
+    void *copy;
+
+    if (!url)
+        return -1;
+    if (proxy->isa == &proxy_url_class)
+        path = proxy->path;
+    else
+        path = object_cstring(url);
+    if (path && strncmp(path, "file://", 7) == 0)
+        path += 7;
+    if (!path || !path[0])
+        return -1;
+    fp = fopen(path, "rb");
+    if (!fp)
+        return -1;
+    if (fseek(fp, 0, SEEK_END) != 0) {
+        fclose(fp);
+        return -1;
+    }
+    sz = ftell(fp);
+    if (sz <= 0 || sz > 32L * 1024L * 1024L) {
+        fclose(fp);
+        return -1;
+    }
+    rewind(fp);
+    copy = malloc((size_t)sz);
+    if (!copy) {
+        fclose(fp);
+        return -1;
+    }
+    if (fread(copy, 1, (size_t)sz, fp) != (size_t)sz) {
+        free(copy);
+        fclose(fp);
+        return -1;
+    }
+    fclose(fp);
+    *out = copy;
+    *out_len = (size_t)sz;
+    return 0;
+}
+
+static int host_play_bytes(const void *data, size_t size, int loops)
+{
+    static int (*play)(const void *, size_t, int);
+    static int resolved;
+
+    if (!resolved) {
+        resolved = 1;
+        play = (int (*)(const void *, size_t, int))
+            dlsym(RTLD_DEFAULT, "sword3_host_play_memory_audio");
+    }
+    if (!play)
+        return -1;
+    return play(data, size, loops);
+}
+
+static void host_stop_bytes(void)
+{
+    static void (*stop)(void);
+    static int resolved;
+
+    if (!resolved) {
+        resolved = 1;
+        stop = (void (*)(void))dlsym(RTLD_DEFAULT, "sword3_host_stop_memory_audio");
+    }
+    if (stop)
+        stop();
+}
+
+static sword3_objc_id proxy_av_audio_init_data(sword3_objc_id self,
+                                                sword3_objc_sel selector,
+                                                sword3_objc_id data,
+                                                sword3_objc_id error)
+{
+    struct proxy_av_audio_player *player = self;
+    const char *sel_name = selector ? (const char *)selector : "?";
+
+    (void)error;
+    if (!player)
+        return NULL;
+    free(player->copy);
+    player->copy = NULL;
+    player->copy_len = 0;
+    player->playing = 0;
+    if (copy_nsdata_bytes(data, &player->copy, &player->copy_len) != 0)
+        copy_url_file_bytes(data, &player->copy, &player->copy_len);
+    fprintf(stderr,
+            "sword3-ios-shim: AVAudioPlayer %s data=%p bytes=%zu mag=%02x%02x%02x%02x -> %p\n",
+            sel_name, data, player->copy_len,
+            player->copy_len > 0 ? ((unsigned char *)player->copy)[0] : 0,
+            player->copy_len > 1 ? ((unsigned char *)player->copy)[1] : 0,
+            player->copy_len > 2 ? ((unsigned char *)player->copy)[2] : 0,
+            player->copy_len > 3 ? ((unsigned char *)player->copy)[3] : 0,
+            self);
+    return self;
+}
+
+static sword3_objc_id proxy_av_audio_init_url(sword3_objc_id self,
+                                               sword3_objc_sel selector,
+                                               sword3_objc_id url,
+                                               sword3_objc_id options,
+                                               sword3_objc_id error)
+{
+    (void)options;
+    return proxy_av_audio_init_data(self, selector, url, error);
+}
+
+static void proxy_av_audio_set_delegate(sword3_objc_id self,
+                                        sword3_objc_sel selector,
+                                        sword3_objc_id delegate)
+{
+    struct proxy_av_audio_player *player = self;
+
+    (void)selector;
+    if (player)
+        player->delegate = delegate;
+    fprintf(stderr, "sword3-ios-shim: AVAudioPlayer setDelegate: %p -> %p\n",
+            delegate, self);
+}
+
+static void proxy_av_audio_set_loops(sword3_objc_id self,
+                                     sword3_objc_sel selector,
+                                     long loops)
+{
+    struct proxy_av_audio_player *player = self;
+
+    (void)selector;
+    if (player)
+        player->loops = loops;
+}
+
+static void proxy_av_audio_set_pan(sword3_objc_id self, sword3_objc_sel selector,
+                                   float pan)
+{
+    (void)self;
+    (void)selector;
+    (void)pan;
+}
+
+static void proxy_av_audio_set_volume(sword3_objc_id self,
+                                      sword3_objc_sel selector, float volume)
+{
+    (void)self;
+    (void)selector;
+    (void)volume;
+}
+
+static void proxy_av_audio_play(sword3_objc_id self, sword3_objc_sel selector)
+{
+    struct proxy_av_audio_player *player = self;
+    int loops;
+
+    (void)selector;
+    if (!player)
+        return;
+    loops = (int)player->loops;
+    fprintf(stderr,
+            "sword3-ios-shim: AVAudioPlayer play self=%p bytes=%zu loops=%d\n",
+            self, player->copy_len, loops);
+    if (!player->copy || player->copy_len == 0)
+        return;
+    if (host_play_bytes(player->copy, player->copy_len, loops) == 0)
+        player->playing = 1;
+}
+
+static void proxy_av_audio_stop(sword3_objc_id self, sword3_objc_sel selector)
+{
+    struct proxy_av_audio_player *player = self;
+
+    (void)selector;
+    host_stop_bytes();
+    if (player)
+        player->playing = 0;
+}
+
+static double proxy_av_audio_duration(sword3_objc_id self,
+                                       sword3_objc_sel selector)
+{
+    (void)self;
+    (void)selector;
+    return 1.0;
+}
+
+static unsigned proxy_av_audio_is_playing(sword3_objc_id self,
+                                          sword3_objc_sel selector)
+{
+    struct proxy_av_audio_player *player = self;
+
+    (void)selector;
+    return player && player->playing;
+}
+
+static unsigned proxy_av_audio_prepare(sword3_objc_id self,
+                                       sword3_objc_sel selector)
+{
+    (void)selector;
+    return self != NULL;
+}
+
+static sword3_objc_id proxy_av_layer_with_player(sword3_objc_id cls,
+                                                 sword3_objc_sel selector,
+                                                 sword3_objc_id player)
+{
+    (void)cls;
+    (void)selector;
+    (void)player;
+    return make_uikit_object(&proxy_av_player_layer_class);
 }
 
 static sword3_objc_id proxy_bundle_main(sword3_objc_id cls,
@@ -1003,7 +2601,7 @@ static sword3_objc_id proxy_file_manager_contents(
 
 static const struct proxy_method_list proxy_string_methods = {
     .entsize_and_flags = sizeof(struct sword3_objc_method),
-    .count = 11,
+    .count = 12,
     .methods = {
         {"UTF8String", "*16@0:8", (sword3_objc_imp)proxy_string_utf8},
         {"fileSystemRepresentation", "*16@0:8",
@@ -1023,28 +2621,198 @@ static const struct proxy_method_list proxy_string_methods = {
          (sword3_objc_imp)proxy_string_has_prefix},
         {"componentsSeparatedByString:", "@24@0:8@16",
          (sword3_objc_imp)proxy_string_components},
+        {"stringByAppendingString:", "@24@0:8@16",
+         (sword3_objc_imp)proxy_string_append_string},
         {"intValue", "i16@0:8", (sword3_objc_imp)proxy_string_int_value},
     },
 };
 
 static const struct proxy_method_list proxy_string_class_methods = {
     .entsize_and_flags = sizeof(struct sword3_objc_method),
-    .count = 1,
+    .count = 3,
     .methods = {
         {"stringWithUTF8String:", "@24@0:8*16",
          (sword3_objc_imp)proxy_string_from_utf8},
+        {"stringWithCString:encoding:", "@32@0:8*16Q24",
+         (sword3_objc_imp)proxy_string_with_cstring},
+        {"stringWithFormat:", "@24@0:8@16",
+         (sword3_objc_imp)proxy_string_with_format},
     },
 };
 
 static const struct proxy_method_list proxy_array_methods = {
     .entsize_and_flags = sizeof(struct sword3_objc_method),
-    .count = 4,
+    .count = 10,
     .methods = {
         {"firstObject", "@16@0:8", (sword3_objc_imp)proxy_array_first},
+        {"lastObject", "@16@0:8", (sword3_objc_imp)proxy_array_last},
         {"objectAtIndex:", "@24@0:8Q16", (sword3_objc_imp)proxy_array_at},
+        {"objectAtIndexedSubscript:", "@24@0:8Q16",
+         (sword3_objc_imp)proxy_array_at},
         {"count", "Q16@0:8", (sword3_objc_imp)proxy_array_count},
+        {"containsObject:", "B24@0:8@16",
+         (sword3_objc_imp)proxy_array_contains},
+        {"copy", "@16@0:8", (sword3_objc_imp)proxy_array_copy},
+        {"mutableCopy", "@16@0:8", (sword3_objc_imp)proxy_array_mutable_copy},
         {"countByEnumeratingWithState:objects:count:", "Q40@0:8^v16^@24Q32",
          (sword3_objc_imp)proxy_array_enumerate},
+        {"initWithArray:", "@24@0:8@16",
+         (sword3_objc_imp)proxy_array_init_with_array},
+    },
+};
+
+static const struct proxy_method_list proxy_array_class_methods = {
+    .entsize_and_flags = sizeof(struct sword3_objc_method),
+    .count = 4,
+    .methods = {
+        {"array", "@16@0:8", (sword3_objc_imp)proxy_array_empty},
+        {"arrayWithArray:", "@24@0:8@16",
+         (sword3_objc_imp)proxy_array_with_array},
+        {"arrayWithObjects:", "@24@0:8@16",
+         (sword3_objc_imp)proxy_array_with_objects},
+        {"arrayWithObjects:count:", "@32@0:8^@16Q24",
+         (sword3_objc_imp)proxy_array_with_objects_count},
+    },
+};
+
+static const struct proxy_method_list proxy_mutable_array_methods = {
+    .entsize_and_flags = sizeof(struct sword3_objc_method),
+    .count = 5,
+    .methods = {
+        {"addObject:", "v24@0:8@16", (sword3_objc_imp)proxy_array_add},
+        {"addObjectsFromArray:", "v24@0:8@16",
+         (sword3_objc_imp)proxy_array_add_from},
+        {"initWithCapacity:", "@24@0:8Q16",
+         (sword3_objc_imp)proxy_array_init_capacity},
+        {"removeAllObjects", "v16@0:8",
+         (sword3_objc_imp)proxy_array_remove_all},
+        {"removeLastObject", "v16@0:8",
+         (sword3_objc_imp)proxy_array_remove_last},
+    },
+};
+
+static const struct proxy_method_list proxy_mutable_array_class_methods = {
+    .entsize_and_flags = sizeof(struct sword3_objc_method),
+    .count = 1,
+    .methods = {
+        {"arrayWithCapacity:", "@24@0:8Q16",
+         (sword3_objc_imp)proxy_mutable_array_with_capacity},
+    },
+};
+
+static const struct proxy_method_list proxy_number_methods = {
+    .entsize_and_flags = sizeof(struct sword3_objc_method),
+    .count = 8,
+    .methods = {
+        {"boolValue", "B16@0:8", (sword3_objc_imp)proxy_number_bool},
+        {"intValue", "i16@0:8", (sword3_objc_imp)proxy_number_int},
+        {"integerValue", "q16@0:8", (sword3_objc_imp)proxy_number_long},
+        {"longLongValue", "q16@0:8", (sword3_objc_imp)proxy_number_long},
+        {"unsignedLongLongValue", "Q16@0:8",
+         (sword3_objc_imp)proxy_number_long},
+        {"doubleValue", "d16@0:8", (sword3_objc_imp)proxy_number_double},
+        {"floatValue", "f16@0:8", (sword3_objc_imp)proxy_number_float},
+        {"stringValue", "@16@0:8", (sword3_objc_imp)proxy_number_string_value},
+    },
+};
+
+static const struct proxy_method_list proxy_number_class_methods = {
+    .entsize_and_flags = sizeof(struct sword3_objc_method),
+    .count = 9,
+    .methods = {
+        {"numberWithBool:", "@20@0:8B16",
+         (sword3_objc_imp)proxy_number_with_bool},
+        {"numberWithInt:", "@20@0:8i16",
+         (sword3_objc_imp)proxy_number_with_long},
+        {"numberWithInteger:", "@24@0:8q16",
+         (sword3_objc_imp)proxy_number_with_long},
+        {"numberWithUnsignedInteger:", "@24@0:8Q16",
+         (sword3_objc_imp)proxy_number_with_long},
+        {"numberWithUnsignedInt:", "@20@0:8I16",
+         (sword3_objc_imp)proxy_number_with_long},
+        {"numberWithLongLong:", "@24@0:8q16",
+         (sword3_objc_imp)proxy_number_with_long},
+        {"numberWithUnsignedLongLong:", "@24@0:8Q16",
+         (sword3_objc_imp)proxy_number_with_long},
+        {"numberWithDouble:", "@24@0:8d16",
+         (sword3_objc_imp)proxy_number_with_double},
+        {"numberWithFloat:", "@20@0:8f16",
+         (sword3_objc_imp)proxy_number_with_float},
+    },
+};
+
+static const struct proxy_method_list proxy_date_methods = {
+    .entsize_and_flags = sizeof(struct sword3_objc_method),
+    .count = 5,
+    .methods = {
+        {"timeIntervalSince1970", "d16@0:8",
+         (sword3_objc_imp)proxy_date_unix},
+        {"timeIntervalSinceNow", "d16@0:8",
+         (sword3_objc_imp)proxy_date_since_now},
+        {"description", "@16@0:8",
+         (sword3_objc_imp)proxy_date_description},
+        {"copy", "@16@0:8", (sword3_objc_imp)proxy_date_copy},
+        {"copyWithZone:", "@24@0:8^v16",
+         (sword3_objc_imp)proxy_date_copy},
+    },
+};
+
+static const struct proxy_method_list proxy_date_class_methods = {
+    .entsize_and_flags = sizeof(struct sword3_objc_method),
+    .count = 4,
+    .methods = {
+        {"date", "@16@0:8", (sword3_objc_imp)proxy_date_now},
+        {"distantFuture", "@16@0:8",
+         (sword3_objc_imp)proxy_date_distant_future},
+        {"dateWithTimeIntervalSince1970:", "@24@0:8d16",
+         (sword3_objc_imp)proxy_date_with_unix},
+        {"dateWithTimeIntervalSinceNow:", "@24@0:8d16",
+         (sword3_objc_imp)proxy_date_with_interval_since_now},
+    },
+};
+
+static const struct proxy_method_list proxy_date_formatter_methods = {
+    .entsize_and_flags = sizeof(struct sword3_objc_method),
+    .count = 4,
+    .methods = {
+        {"setDateFormat:", "v24@0:8@16",
+         (sword3_objc_imp)proxy_formatter_set_format},
+        {"stringFromDate:", "@24@0:8@16",
+         (sword3_objc_imp)proxy_formatter_string_from_date},
+        {"setTimeZone:", "v24@0:8@16", (sword3_objc_imp)proxy_noop},
+        {"setLocale:", "v24@0:8@16", (sword3_objc_imp)proxy_noop},
+    },
+};
+
+static const struct proxy_method_list proxy_calendar_class_methods = {
+    .entsize_and_flags = sizeof(struct sword3_objc_method),
+    .count = 1,
+    .methods = {
+        {"currentCalendar", "@16@0:8",
+         (sword3_objc_imp)proxy_calendar_current},
+    },
+};
+
+static const struct proxy_method_list proxy_calendar_methods = {
+    .entsize_and_flags = sizeof(struct sword3_objc_method),
+    .count = 1,
+    .methods = {
+        {"components:fromDate:", "@32@0:8Q16@24",
+         (sword3_objc_imp)proxy_calendar_components},
+    },
+};
+
+static const struct proxy_method_list proxy_date_components_methods = {
+    .entsize_and_flags = sizeof(struct sword3_objc_method),
+    .count = 7,
+    .methods = {
+        {"year", "q16@0:8", (sword3_objc_imp)proxy_components_year},
+        {"month", "q16@0:8", (sword3_objc_imp)proxy_components_month},
+        {"day", "q16@0:8", (sword3_objc_imp)proxy_components_day},
+        {"hour", "q16@0:8", (sword3_objc_imp)proxy_components_hour},
+        {"minute", "q16@0:8", (sword3_objc_imp)proxy_components_minute},
+        {"second", "q16@0:8", (sword3_objc_imp)proxy_components_second},
+        {"weekday", "q16@0:8", (sword3_objc_imp)proxy_components_weekday},
     },
 };
 
@@ -1167,6 +2935,205 @@ static const struct proxy_method_list proxy_screen_class_methods = {
     },
 };
 
+static const struct proxy_method_list proxy_color_class_methods = {
+    .entsize_and_flags = sizeof(struct sword3_objc_method),
+    .count = 11,
+    .methods = {
+        {"clearColor", "@16@0:8", (sword3_objc_imp)proxy_color_named},
+        {"whiteColor", "@16@0:8", (sword3_objc_imp)proxy_color_named},
+        {"blackColor", "@16@0:8", (sword3_objc_imp)proxy_color_named},
+        {"grayColor", "@16@0:8", (sword3_objc_imp)proxy_color_named},
+        {"darkGrayColor", "@16@0:8", (sword3_objc_imp)proxy_color_named},
+        {"lightGrayColor", "@16@0:8", (sword3_objc_imp)proxy_color_named},
+        {"redColor", "@16@0:8", (sword3_objc_imp)proxy_color_named},
+        {"greenColor", "@16@0:8", (sword3_objc_imp)proxy_color_named},
+        {"blueColor", "@16@0:8", (sword3_objc_imp)proxy_color_named},
+        {"colorWithRed:green:blue:alpha:", "@48@0:8dddd",
+         (sword3_objc_imp)proxy_color_rgba},
+        {"colorWithWhite:alpha:", "@32@0:8dd",
+         (sword3_objc_imp)proxy_color_white},
+    },
+};
+
+static const struct proxy_method_list proxy_image_class_methods = {
+    .entsize_and_flags = sizeof(struct sword3_objc_method),
+    .count = 1,
+    .methods = {
+        {"imageNamed:", "@24@0:8@16", (sword3_objc_imp)proxy_image_named},
+    },
+};
+
+static const struct proxy_method_list proxy_uikit_methods = {
+    .entsize_and_flags = sizeof(struct sword3_objc_method),
+    .count = 11,
+    .methods = {
+        {"addSubview:", "v24@0:8@16", (sword3_objc_imp)proxy_noop},
+        {"removeFromSuperview", "v16@0:8", (sword3_objc_imp)proxy_noop},
+        {"bounds", "{CGRect={CGPoint=dd}{CGSize=dd}}16@0:8",
+         (sword3_objc_imp)proxy_screen_bounds},
+        {"frame", "{CGRect={CGPoint=dd}{CGSize=dd}}16@0:8",
+         (sword3_objc_imp)proxy_screen_bounds},
+        {"setFrame:", "v48@0:8{CGRect={CGPoint=dd}{CGSize=dd}}16",
+         (sword3_objc_imp)proxy_noop},
+        {"setHidden:", "v20@0:8B16", (sword3_objc_imp)proxy_noop},
+        {"makeKeyAndVisible", "v16@0:8", (sword3_objc_imp)proxy_noop},
+        {"setRootViewController:", "v24@0:8@16", (sword3_objc_imp)proxy_noop},
+        {"setImage:", "v24@0:8@16", (sword3_objc_imp)proxy_noop},
+        {"view", "@16@0:8", (sword3_objc_imp)proxy_return_self},
+        {"initWithImage:", "@24@0:8@16", (sword3_objc_imp)proxy_return_self},
+    },
+};
+
+static const struct proxy_method_list proxy_url_methods = {
+    .entsize_and_flags = sizeof(struct sword3_objc_method),
+    .count = 6,
+    .methods = {
+        {"path", "@16@0:8", (sword3_objc_imp)proxy_url_path},
+        {"absoluteString", "@16@0:8",
+         (sword3_objc_imp)proxy_url_absolute_string},
+        {"lastPathComponent", "@16@0:8",
+         (sword3_objc_imp)proxy_url_last_component},
+        {"URLByAppendingPathComponent:", "@24@0:8@16",
+         (sword3_objc_imp)proxy_url_append_component},
+        {"initFileURLWithPath:", "@24@0:8@16",
+         (sword3_objc_imp)proxy_url_init_path},
+        {"initFileURLWithPath:isDirectory:", "@28@0:8@16B24",
+         (sword3_objc_imp)proxy_url_init_path_dir},
+    },
+};
+
+static const struct proxy_method_list proxy_url_class_methods = {
+    .entsize_and_flags = sizeof(struct sword3_objc_method),
+    .count = 3,
+    .methods = {
+        {"fileURLWithPath:", "@24@0:8@16",
+         (sword3_objc_imp)proxy_url_with_path},
+        {"fileURLWithPath:isDirectory:", "@28@0:8@16B24",
+         (sword3_objc_imp)proxy_url_with_path_dir},
+        {"URLWithString:", "@24@0:8@16",
+         (sword3_objc_imp)proxy_url_with_path},
+    },
+};
+
+static const struct proxy_method_list proxy_nc_methods = {
+    .entsize_and_flags = sizeof(struct sword3_objc_method),
+    .count = 3,
+    .methods = {
+        {"addObserver:selector:name:object:", "v48@0:8@16:24@32@40",
+         (sword3_objc_imp)proxy_nc_add},
+        {"removeObserver:", "v24@0:8@16", (sword3_objc_imp)proxy_nc_remove},
+        {"postNotificationName:object:", "v32@0:8@16@24",
+         (sword3_objc_imp)proxy_nc_post},
+    },
+};
+
+static const struct proxy_method_list proxy_nc_class_methods = {
+    .entsize_and_flags = sizeof(struct sword3_objc_method),
+    .count = 1,
+    .methods = {
+        {"defaultCenter", "@16@0:8", (sword3_objc_imp)proxy_nc_default},
+    },
+};
+
+static const struct proxy_method_list proxy_av_player_methods = {
+    .entsize_and_flags = sizeof(struct sword3_objc_method),
+    .count = 3,
+    .methods = {
+        {"play", "v16@0:8", (sword3_objc_imp)proxy_av_play},
+        {"pause", "v16@0:8", (sword3_objc_imp)proxy_noop},
+        {"initWithURL:", "@24@0:8@16", (sword3_objc_imp)proxy_av_init_url},
+    },
+};
+
+static const struct proxy_method_list proxy_av_player_class_methods = {
+    .entsize_and_flags = sizeof(struct sword3_objc_method),
+    .count = 1,
+    .methods = {
+        {"playerWithURL:", "@24@0:8@16",
+         (sword3_objc_imp)proxy_av_player_with_url},
+    },
+};
+
+static const struct proxy_method_list proxy_av_audio_player_methods = {
+    .entsize_and_flags = sizeof(struct sword3_objc_method),
+    .count = 12,
+    .methods = {
+        {"initWithContentsOfURL:options:error:", "@32@0:8@16@24^@32",
+         (sword3_objc_imp)proxy_av_audio_init_url},
+        {"initWithData:error:", "@32@0:8@16^@24",
+         (sword3_objc_imp)proxy_av_audio_init_data},
+        {"setDelegate:", "v24@0:8@16",
+         (sword3_objc_imp)proxy_av_audio_set_delegate},
+        {"setNumberOfLoops:", "v24@0:8q16",
+         (sword3_objc_imp)proxy_av_audio_set_loops},
+        {"setPan:", "v20@0:8f16", (sword3_objc_imp)proxy_av_audio_set_pan},
+        {"setVolume:", "v20@0:8f16", (sword3_objc_imp)proxy_av_audio_set_volume},
+        {"play", "v16@0:8", (sword3_objc_imp)proxy_av_audio_play},
+        {"stop", "v16@0:8", (sword3_objc_imp)proxy_av_audio_stop},
+        {"pause", "v16@0:8", (sword3_objc_imp)proxy_noop},
+        {"prepareToPlay", "B16@0:8", (sword3_objc_imp)proxy_av_audio_prepare},
+        {"isPlaying", "B16@0:8", (sword3_objc_imp)proxy_av_audio_is_playing},
+        {"duration", "d16@0:8", (sword3_objc_imp)proxy_av_audio_duration},
+    },
+};
+
+static const struct proxy_method_list proxy_av_layer_class_methods = {
+    .entsize_and_flags = sizeof(struct sword3_objc_method),
+    .count = 1,
+    .methods = {
+        {"playerLayerWithPlayer:", "@24@0:8@16",
+         (sword3_objc_imp)proxy_av_layer_with_player},
+    },
+};
+
+static const struct proxy_method_list proxy_display_link_methods = {
+    .entsize_and_flags = sizeof(struct sword3_objc_method),
+    .count = 7,
+    .methods = {
+        {"addToRunLoop:forMode:", "v32@0:8@16@24",
+         (sword3_objc_imp)proxy_display_link_add},
+        {"removeFromRunLoop:forMode:", "v32@0:8@16@24",
+         (sword3_objc_imp)proxy_display_link_remove},
+        {"invalidate", "v16@0:8",
+         (sword3_objc_imp)proxy_display_link_invalidate},
+        {"setPaused:", "v20@0:8B16",
+         (sword3_objc_imp)proxy_display_link_set_paused},
+        {"isPaused", "B16@0:8",
+         (sword3_objc_imp)proxy_display_link_is_paused},
+        {"setFrameInterval:", "v24@0:8q16",
+         (sword3_objc_imp)proxy_display_link_set_interval},
+        {"setPreferredFramesPerSecond:", "v24@0:8q16",
+         (sword3_objc_imp)proxy_display_link_set_fps},
+    },
+};
+
+static const struct proxy_method_list proxy_display_link_class_methods = {
+    .entsize_and_flags = sizeof(struct sword3_objc_method),
+    .count = 1,
+    .methods = {
+        {"displayLinkWithTarget:selector:", "@32@0:8@16:24",
+         (sword3_objc_imp)proxy_display_link_with_target},
+    },
+};
+
+static const struct proxy_method_list proxy_runloop_methods = {
+    .entsize_and_flags = sizeof(struct sword3_objc_method),
+    .count = 1,
+    .methods = {
+        {"runMode:beforeDate:", "B32@0:8@16@24",
+         (sword3_objc_imp)proxy_runloop_run_mode},
+    },
+};
+
+static const struct proxy_method_list proxy_runloop_class_methods = {
+    .entsize_and_flags = sizeof(struct sword3_objc_method),
+    .count = 2,
+    .methods = {
+        {"currentRunLoop", "@16@0:8", (sword3_objc_imp)proxy_runloop_current},
+        {"mainRunLoop", "@16@0:8", (sword3_objc_imp)proxy_runloop_current},
+    },
+};
+
 static const struct proxy_method_list proxy_exception_class_methods = {
     .entsize_and_flags = sizeof(struct sword3_objc_method),
     .count = 2,
@@ -1197,9 +3164,103 @@ static const struct sword3_objc_class_ro proxy_string_metaclass_ro = {
 static const struct sword3_objc_class_ro proxy_array_ro = {
     .flags = SWORD3_OBJC_RO_ROOT,
     .instance_size = sizeof(struct proxy_array),
-    .name = "Sword3HostArray",
+    .name = "NSArray",
     .base_methods =
         (const struct sword3_objc_method_list *)&proxy_array_methods,
+};
+
+static const struct sword3_objc_class_ro proxy_array_metaclass_ro = {
+    .flags = SWORD3_OBJC_RO_META | SWORD3_OBJC_RO_ROOT,
+    .instance_size = sizeof(struct sword3_objc_class),
+    .name = "NSArray",
+    .base_methods =
+        (const struct sword3_objc_method_list *)&proxy_array_class_methods,
+};
+
+static const struct sword3_objc_class_ro proxy_mutable_array_ro = {
+    .flags = SWORD3_OBJC_RO_ROOT,
+    .instance_size = sizeof(struct proxy_array),
+    .name = "NSMutableArray",
+    .base_methods =
+        (const struct sword3_objc_method_list *)&proxy_mutable_array_methods,
+};
+
+static const struct sword3_objc_class_ro proxy_mutable_array_metaclass_ro = {
+    .flags = SWORD3_OBJC_RO_META | SWORD3_OBJC_RO_ROOT,
+    .instance_size = sizeof(struct sword3_objc_class),
+    .name = "NSMutableArray",
+    .base_methods =
+        (const struct sword3_objc_method_list *)&proxy_mutable_array_class_methods,
+};
+
+static const struct sword3_objc_class_ro proxy_number_ro = {
+    .flags = SWORD3_OBJC_RO_ROOT,
+    .instance_size = sizeof(struct proxy_number),
+    .name = "NSNumber",
+    .base_methods =
+        (const struct sword3_objc_method_list *)&proxy_number_methods,
+};
+
+static const struct sword3_objc_class_ro proxy_number_metaclass_ro = {
+    .flags = SWORD3_OBJC_RO_META | SWORD3_OBJC_RO_ROOT,
+    .instance_size = sizeof(struct sword3_objc_class),
+    .name = "NSNumber",
+    .base_methods =
+        (const struct sword3_objc_method_list *)&proxy_number_class_methods,
+};
+
+static const struct sword3_objc_class_ro proxy_date_ro = {
+    .flags = SWORD3_OBJC_RO_ROOT,
+    .instance_size = sizeof(struct proxy_date),
+    .name = "NSDate",
+    .base_methods =
+        (const struct sword3_objc_method_list *)&proxy_date_methods,
+};
+
+static const struct sword3_objc_class_ro proxy_date_metaclass_ro = {
+    .flags = SWORD3_OBJC_RO_META | SWORD3_OBJC_RO_ROOT,
+    .instance_size = sizeof(struct sword3_objc_class),
+    .name = "NSDate",
+    .base_methods =
+        (const struct sword3_objc_method_list *)&proxy_date_class_methods,
+};
+
+static const struct sword3_objc_class_ro proxy_date_formatter_ro = {
+    .flags = SWORD3_OBJC_RO_ROOT,
+    .instance_size = sizeof(struct proxy_date_formatter),
+    .name = "NSDateFormatter",
+    .base_methods =
+        (const struct sword3_objc_method_list *)&proxy_date_formatter_methods,
+};
+
+static const struct sword3_objc_class_ro proxy_date_formatter_metaclass_ro = {
+    .flags = SWORD3_OBJC_RO_META | SWORD3_OBJC_RO_ROOT,
+    .instance_size = sizeof(struct sword3_objc_class),
+    .name = "NSDateFormatter",
+};
+
+static const struct sword3_objc_class_ro proxy_calendar_ro = {
+    .flags = SWORD3_OBJC_RO_ROOT,
+    .instance_size = sizeof(struct proxy_calendar),
+    .name = "NSCalendar",
+    .base_methods =
+        (const struct sword3_objc_method_list *)&proxy_calendar_methods,
+};
+
+static const struct sword3_objc_class_ro proxy_calendar_metaclass_ro = {
+    .flags = SWORD3_OBJC_RO_META | SWORD3_OBJC_RO_ROOT,
+    .instance_size = sizeof(struct sword3_objc_class),
+    .name = "NSCalendar",
+    .base_methods =
+        (const struct sword3_objc_method_list *)&proxy_calendar_class_methods,
+};
+
+static const struct sword3_objc_class_ro proxy_date_components_ro = {
+    .flags = SWORD3_OBJC_RO_ROOT,
+    .instance_size = sizeof(struct proxy_date_components),
+    .name = "NSDateComponents",
+    .base_methods =
+        (const struct sword3_objc_method_list *)&proxy_date_components_methods,
 };
 
 static const struct sword3_objc_class_ro proxy_bundle_ro = {
@@ -1288,6 +3349,215 @@ static const struct sword3_objc_class_ro proxy_screen_metaclass_ro = {
         (const struct sword3_objc_method_list *)&proxy_screen_class_methods,
 };
 
+static const struct sword3_objc_class_ro proxy_color_ro = {
+    .flags = SWORD3_OBJC_RO_ROOT,
+    .instance_size = sizeof(struct proxy_color),
+    .name = "UIColor",
+};
+
+static const struct sword3_objc_class_ro proxy_color_metaclass_ro = {
+    .flags = SWORD3_OBJC_RO_META | SWORD3_OBJC_RO_ROOT,
+    .instance_size = sizeof(struct sword3_objc_class),
+    .name = "UIColor",
+    .base_methods =
+        (const struct sword3_objc_method_list *)&proxy_color_class_methods,
+};
+
+static const struct sword3_objc_class_ro proxy_image_ro = {
+    .flags = SWORD3_OBJC_RO_ROOT,
+    .instance_size = sizeof(struct proxy_image),
+    .name = "UIImage",
+};
+
+static const struct sword3_objc_class_ro proxy_image_metaclass_ro = {
+    .flags = SWORD3_OBJC_RO_META | SWORD3_OBJC_RO_ROOT,
+    .instance_size = sizeof(struct sword3_objc_class),
+    .name = "UIImage",
+    .base_methods =
+        (const struct sword3_objc_method_list *)&proxy_image_class_methods,
+};
+
+static const struct sword3_objc_class_ro proxy_uikit_ro_responder = {
+    .flags = SWORD3_OBJC_RO_ROOT,
+    .instance_size = sizeof(struct proxy_uikit_object),
+    .name = "UIResponder",
+    .base_methods =
+        (const struct sword3_objc_method_list *)&proxy_uikit_methods,
+};
+
+static const struct sword3_objc_class_ro proxy_uikit_ro_view = {
+    .flags = SWORD3_OBJC_RO_ROOT,
+    .instance_size = sizeof(struct proxy_uikit_object),
+    .name = "UIView",
+    .base_methods =
+        (const struct sword3_objc_method_list *)&proxy_uikit_methods,
+};
+
+static const struct sword3_objc_class_ro proxy_uikit_ro_window = {
+    .flags = SWORD3_OBJC_RO_ROOT,
+    .instance_size = sizeof(struct proxy_uikit_object),
+    .name = "UIWindow",
+    .base_methods =
+        (const struct sword3_objc_method_list *)&proxy_uikit_methods,
+};
+
+static const struct sword3_objc_class_ro proxy_uikit_ro_controller = {
+    .flags = SWORD3_OBJC_RO_ROOT,
+    .instance_size = sizeof(struct proxy_uikit_object),
+    .name = "UIViewController",
+    .base_methods =
+        (const struct sword3_objc_method_list *)&proxy_uikit_methods,
+};
+
+static const struct sword3_objc_class_ro proxy_uikit_ro_image_view = {
+    .flags = SWORD3_OBJC_RO_ROOT,
+    .instance_size = sizeof(struct proxy_uikit_object),
+    .name = "UIImageView",
+    .base_methods =
+        (const struct sword3_objc_method_list *)&proxy_uikit_methods,
+};
+
+static const struct sword3_objc_class_ro proxy_uikit_meta_ro_responder = {
+    .flags = SWORD3_OBJC_RO_META | SWORD3_OBJC_RO_ROOT,
+    .instance_size = sizeof(struct sword3_objc_class),
+    .name = "UIResponder",
+};
+
+static const struct sword3_objc_class_ro proxy_uikit_meta_ro_view = {
+    .flags = SWORD3_OBJC_RO_META | SWORD3_OBJC_RO_ROOT,
+    .instance_size = sizeof(struct sword3_objc_class),
+    .name = "UIView",
+};
+
+static const struct sword3_objc_class_ro proxy_uikit_meta_ro_window = {
+    .flags = SWORD3_OBJC_RO_META | SWORD3_OBJC_RO_ROOT,
+    .instance_size = sizeof(struct sword3_objc_class),
+    .name = "UIWindow",
+};
+
+static const struct sword3_objc_class_ro proxy_uikit_meta_ro_controller = {
+    .flags = SWORD3_OBJC_RO_META | SWORD3_OBJC_RO_ROOT,
+    .instance_size = sizeof(struct sword3_objc_class),
+    .name = "UIViewController",
+};
+
+static const struct sword3_objc_class_ro proxy_uikit_meta_ro_image_view = {
+    .flags = SWORD3_OBJC_RO_META | SWORD3_OBJC_RO_ROOT,
+    .instance_size = sizeof(struct sword3_objc_class),
+    .name = "UIImageView",
+};
+
+static const struct sword3_objc_class_ro proxy_url_ro = {
+    .flags = SWORD3_OBJC_RO_ROOT,
+    .instance_size = sizeof(struct proxy_url),
+    .name = "NSURL",
+    .base_methods =
+        (const struct sword3_objc_method_list *)&proxy_url_methods,
+};
+
+static const struct sword3_objc_class_ro proxy_url_metaclass_ro = {
+    .flags = SWORD3_OBJC_RO_META | SWORD3_OBJC_RO_ROOT,
+    .instance_size = sizeof(struct sword3_objc_class),
+    .name = "NSURL",
+    .base_methods =
+        (const struct sword3_objc_method_list *)&proxy_url_class_methods,
+};
+
+static const struct sword3_objc_class_ro proxy_nc_ro = {
+    .flags = SWORD3_OBJC_RO_ROOT,
+    .instance_size = sizeof(struct proxy_notification_center),
+    .name = "NSNotificationCenter",
+    .base_methods =
+        (const struct sword3_objc_method_list *)&proxy_nc_methods,
+};
+
+static const struct sword3_objc_class_ro proxy_nc_metaclass_ro = {
+    .flags = SWORD3_OBJC_RO_META | SWORD3_OBJC_RO_ROOT,
+    .instance_size = sizeof(struct sword3_objc_class),
+    .name = "NSNotificationCenter",
+    .base_methods =
+        (const struct sword3_objc_method_list *)&proxy_nc_class_methods,
+};
+
+static const struct sword3_objc_class_ro proxy_av_player_ro = {
+    .flags = SWORD3_OBJC_RO_ROOT,
+    .instance_size = sizeof(struct proxy_uikit_object),
+    .name = "AVPlayer",
+    .base_methods =
+        (const struct sword3_objc_method_list *)&proxy_av_player_methods,
+};
+
+static const struct sword3_objc_class_ro proxy_av_player_metaclass_ro = {
+    .flags = SWORD3_OBJC_RO_META | SWORD3_OBJC_RO_ROOT,
+    .instance_size = sizeof(struct sword3_objc_class),
+    .name = "AVPlayer",
+    .base_methods =
+        (const struct sword3_objc_method_list *)&proxy_av_player_class_methods,
+};
+
+static const struct sword3_objc_class_ro proxy_av_audio_player_ro = {
+    .flags = SWORD3_OBJC_RO_ROOT,
+    .instance_size = sizeof(struct proxy_av_audio_player),
+    .base_methods =
+        (const struct sword3_objc_method_list *)&proxy_av_audio_player_methods,
+};
+
+static const struct sword3_objc_class_ro proxy_av_audio_player_metaclass_ro = {
+    .flags = SWORD3_OBJC_RO_META | SWORD3_OBJC_RO_ROOT,
+    .instance_size = sizeof(struct sword3_objc_class),
+    .name = "AVAudioPlayer",
+    .base_methods =
+        (const struct sword3_objc_method_list *)&proxy_uikit_methods,
+};
+
+static const struct sword3_objc_class_ro proxy_av_layer_ro = {
+    .flags = SWORD3_OBJC_RO_ROOT,
+    .instance_size = sizeof(struct proxy_uikit_object),
+    .name = "AVPlayerLayer",
+    .base_methods =
+        (const struct sword3_objc_method_list *)&proxy_uikit_methods,
+};
+
+static const struct sword3_objc_class_ro proxy_av_layer_metaclass_ro = {
+    .flags = SWORD3_OBJC_RO_META | SWORD3_OBJC_RO_ROOT,
+    .instance_size = sizeof(struct sword3_objc_class),
+    .name = "AVPlayerLayer",
+    .base_methods =
+        (const struct sword3_objc_method_list *)&proxy_av_layer_class_methods,
+};
+
+static const struct sword3_objc_class_ro proxy_display_link_ro = {
+    .flags = SWORD3_OBJC_RO_ROOT,
+    .instance_size = sizeof(struct proxy_display_link),
+    .name = "CADisplayLink",
+    .base_methods =
+        (const struct sword3_objc_method_list *)&proxy_display_link_methods,
+};
+
+static const struct sword3_objc_class_ro proxy_display_link_metaclass_ro = {
+    .flags = SWORD3_OBJC_RO_META | SWORD3_OBJC_RO_ROOT,
+    .instance_size = sizeof(struct sword3_objc_class),
+    .name = "CADisplayLink",
+    .base_methods =
+        (const struct sword3_objc_method_list *)&proxy_display_link_class_methods,
+};
+
+static const struct sword3_objc_class_ro proxy_runloop_ro = {
+    .flags = SWORD3_OBJC_RO_ROOT,
+    .instance_size = sizeof(struct proxy_uikit_object),
+    .name = "NSRunLoop",
+    .base_methods =
+        (const struct sword3_objc_method_list *)&proxy_runloop_methods,
+};
+
+static const struct sword3_objc_class_ro proxy_runloop_metaclass_ro = {
+    .flags = SWORD3_OBJC_RO_META | SWORD3_OBJC_RO_ROOT,
+    .instance_size = sizeof(struct sword3_objc_class),
+    .name = "NSRunLoop",
+    .base_methods =
+        (const struct sword3_objc_method_list *)&proxy_runloop_class_methods,
+};
+
 static const struct sword3_objc_class_ro proxy_exception_ro = {
     .flags = SWORD3_OBJC_RO_ROOT,
     .instance_size = sizeof(void *),
@@ -1313,9 +3583,77 @@ SWORD3_EXPORT struct sword3_objc_class proxy_string_class
         .data_bits = (uintptr_t)&proxy_string_ro,
     };
 
-static struct sword3_objc_class proxy_array_class = {
-    .isa = &proxy_array_class,
-    .data_bits = (uintptr_t)&proxy_array_ro,
+static struct sword3_objc_class proxy_array_metaclass = {
+    .isa = &proxy_array_metaclass,
+    .data_bits = (uintptr_t)&proxy_array_metaclass_ro,
+};
+
+SWORD3_EXPORT struct sword3_objc_class proxy_array_class
+    __asm__("OBJC_CLASS_$_NSArray") = {
+        .isa = &proxy_array_metaclass,
+        .data_bits = (uintptr_t)&proxy_array_ro,
+    };
+
+static struct sword3_objc_class proxy_mutable_array_metaclass = {
+    .isa = &proxy_mutable_array_metaclass,
+    .superclass = &proxy_array_metaclass,
+    .data_bits = (uintptr_t)&proxy_mutable_array_metaclass_ro,
+};
+
+SWORD3_EXPORT struct sword3_objc_class proxy_mutable_array_class
+    __asm__("OBJC_CLASS_$_NSMutableArray") = {
+        .isa = &proxy_mutable_array_metaclass,
+        .superclass = &proxy_array_class,
+        .data_bits = (uintptr_t)&proxy_mutable_array_ro,
+    };
+
+static struct sword3_objc_class proxy_number_metaclass = {
+    .isa = &proxy_number_metaclass,
+    .data_bits = (uintptr_t)&proxy_number_metaclass_ro,
+};
+
+SWORD3_EXPORT struct sword3_objc_class proxy_number_class
+    __asm__("OBJC_CLASS_$_NSNumber") = {
+        .isa = &proxy_number_metaclass,
+        .data_bits = (uintptr_t)&proxy_number_ro,
+    };
+
+static struct sword3_objc_class proxy_date_metaclass = {
+    .isa = &proxy_date_metaclass,
+    .data_bits = (uintptr_t)&proxy_date_metaclass_ro,
+};
+
+SWORD3_EXPORT struct sword3_objc_class proxy_date_class
+    __asm__("OBJC_CLASS_$_NSDate") = {
+        .isa = &proxy_date_metaclass,
+        .data_bits = (uintptr_t)&proxy_date_ro,
+    };
+
+static struct sword3_objc_class proxy_date_formatter_metaclass = {
+    .isa = &proxy_date_formatter_metaclass,
+    .data_bits = (uintptr_t)&proxy_date_formatter_metaclass_ro,
+};
+
+SWORD3_EXPORT struct sword3_objc_class proxy_date_formatter_class
+    __asm__("OBJC_CLASS_$_NSDateFormatter") = {
+        .isa = &proxy_date_formatter_metaclass,
+        .data_bits = (uintptr_t)&proxy_date_formatter_ro,
+    };
+
+static struct sword3_objc_class proxy_calendar_metaclass = {
+    .isa = &proxy_calendar_metaclass,
+    .data_bits = (uintptr_t)&proxy_calendar_metaclass_ro,
+};
+
+SWORD3_EXPORT struct sword3_objc_class proxy_calendar_class
+    __asm__("OBJC_CLASS_$_NSCalendar") = {
+        .isa = &proxy_calendar_metaclass,
+        .data_bits = (uintptr_t)&proxy_calendar_ro,
+    };
+
+static struct sword3_objc_class proxy_date_components_class = {
+    .isa = &proxy_date_components_class,
+    .data_bits = (uintptr_t)&proxy_date_components_ro,
 };
 
 SWORD3_EXPORT struct sword3_objc_class proxy_bundle_metaclass
@@ -1397,6 +3735,181 @@ SWORD3_EXPORT struct sword3_objc_class proxy_screen_class
         .data_bits = (uintptr_t)&proxy_screen_ro,
     };
 
+static struct sword3_objc_class proxy_color_metaclass = {
+    .isa = &proxy_color_metaclass,
+    .superclass = NULL,
+    .data_bits = (uintptr_t)&proxy_color_metaclass_ro,
+};
+
+SWORD3_EXPORT struct sword3_objc_class proxy_color_class
+    __asm__("OBJC_CLASS_$_UIColor") = {
+        .isa = &proxy_color_metaclass,
+        .superclass = NULL,
+        .data_bits = (uintptr_t)&proxy_color_ro,
+    };
+
+static struct sword3_objc_class proxy_image_metaclass = {
+    .isa = &proxy_image_metaclass,
+    .superclass = NULL,
+    .data_bits = (uintptr_t)&proxy_image_metaclass_ro,
+};
+
+SWORD3_EXPORT struct sword3_objc_class proxy_image_class
+    __asm__("OBJC_CLASS_$_UIImage") = {
+        .isa = &proxy_image_metaclass,
+        .superclass = NULL,
+        .data_bits = (uintptr_t)&proxy_image_ro,
+    };
+
+SWORD3_EXPORT struct sword3_objc_class proxy_responder_metaclass
+    __asm__("OBJC_METACLASS_$_UIResponder") = {
+        .isa = &proxy_responder_metaclass,
+        .data_bits = (uintptr_t)&proxy_uikit_meta_ro_responder,
+    };
+
+SWORD3_EXPORT struct sword3_objc_class proxy_responder_class
+    __asm__("OBJC_CLASS_$_UIResponder") = {
+        .isa = &proxy_responder_metaclass,
+        .data_bits = (uintptr_t)&proxy_uikit_ro_responder,
+    };
+
+SWORD3_EXPORT struct sword3_objc_class proxy_view_metaclass
+    __asm__("OBJC_METACLASS_$_UIView") = {
+        .isa = &proxy_view_metaclass,
+        .superclass = &proxy_responder_metaclass,
+        .data_bits = (uintptr_t)&proxy_uikit_meta_ro_view,
+    };
+
+SWORD3_EXPORT struct sword3_objc_class proxy_view_class
+    __asm__("OBJC_CLASS_$_UIView") = {
+        .isa = &proxy_view_metaclass,
+        .superclass = &proxy_responder_class,
+        .data_bits = (uintptr_t)&proxy_uikit_ro_view,
+    };
+
+SWORD3_EXPORT struct sword3_objc_class proxy_window_metaclass
+    __asm__("OBJC_METACLASS_$_UIWindow") = {
+        .isa = &proxy_window_metaclass,
+        .superclass = &proxy_view_metaclass,
+        .data_bits = (uintptr_t)&proxy_uikit_meta_ro_window,
+    };
+
+SWORD3_EXPORT struct sword3_objc_class proxy_window_class
+    __asm__("OBJC_CLASS_$_UIWindow") = {
+        .isa = &proxy_window_metaclass,
+        .superclass = &proxy_view_class,
+        .data_bits = (uintptr_t)&proxy_uikit_ro_window,
+    };
+
+SWORD3_EXPORT struct sword3_objc_class proxy_view_controller_metaclass
+    __asm__("OBJC_METACLASS_$_UIViewController") = {
+        .isa = &proxy_view_controller_metaclass,
+        .superclass = &proxy_responder_metaclass,
+        .data_bits = (uintptr_t)&proxy_uikit_meta_ro_controller,
+    };
+
+SWORD3_EXPORT struct sword3_objc_class proxy_view_controller_class
+    __asm__("OBJC_CLASS_$_UIViewController") = {
+        .isa = &proxy_view_controller_metaclass,
+        .superclass = &proxy_responder_class,
+        .data_bits = (uintptr_t)&proxy_uikit_ro_controller,
+    };
+
+static struct sword3_objc_class proxy_image_view_metaclass = {
+    .isa = &proxy_image_view_metaclass,
+    .superclass = &proxy_view_metaclass,
+    .data_bits = (uintptr_t)&proxy_uikit_meta_ro_image_view,
+};
+
+SWORD3_EXPORT struct sword3_objc_class proxy_image_view_class
+    __asm__("OBJC_CLASS_$_UIImageView") = {
+        .isa = &proxy_image_view_metaclass,
+        .superclass = &proxy_view_class,
+        .data_bits = (uintptr_t)&proxy_uikit_ro_image_view,
+    };
+
+static struct sword3_objc_class proxy_url_metaclass = {
+    .isa = &proxy_url_metaclass,
+    .data_bits = (uintptr_t)&proxy_url_metaclass_ro,
+};
+
+SWORD3_EXPORT struct sword3_objc_class proxy_url_class
+    __asm__("OBJC_CLASS_$_NSURL") = {
+        .isa = &proxy_url_metaclass,
+        .data_bits = (uintptr_t)&proxy_url_ro,
+    };
+
+static struct sword3_objc_class proxy_notification_center_metaclass = {
+    .isa = &proxy_notification_center_metaclass,
+    .data_bits = (uintptr_t)&proxy_nc_metaclass_ro,
+};
+
+SWORD3_EXPORT struct sword3_objc_class proxy_notification_center_class
+    __asm__("OBJC_CLASS_$_NSNotificationCenter") = {
+        .isa = &proxy_notification_center_metaclass,
+        .data_bits = (uintptr_t)&proxy_nc_ro,
+    };
+
+static struct sword3_objc_class proxy_av_player_metaclass = {
+    .isa = &proxy_av_player_metaclass,
+    .data_bits = (uintptr_t)&proxy_av_player_metaclass_ro,
+};
+
+SWORD3_EXPORT struct sword3_objc_class proxy_av_player_class
+    __asm__("OBJC_CLASS_$_AVPlayer") = {
+        .isa = &proxy_av_player_metaclass,
+        .data_bits = (uintptr_t)&proxy_av_player_ro,
+    };
+
+static struct sword3_objc_class proxy_av_audio_player_metaclass = {
+    .isa = &proxy_av_audio_player_metaclass,
+    .data_bits = (uintptr_t)&proxy_av_audio_player_metaclass_ro,
+};
+
+SWORD3_EXPORT struct sword3_objc_class proxy_av_audio_player_class
+    __asm__("OBJC_CLASS_$_AVAudioPlayer") = {
+        .isa = &proxy_av_audio_player_metaclass,
+        .data_bits = (uintptr_t)&proxy_av_audio_player_ro,
+    };
+
+static struct sword3_objc_class proxy_av_player_layer_metaclass = {
+    .isa = &proxy_av_player_layer_metaclass,
+    .data_bits = (uintptr_t)&proxy_av_layer_metaclass_ro,
+};
+
+SWORD3_EXPORT struct sword3_objc_class proxy_av_player_layer_class
+    __asm__("OBJC_CLASS_$_AVPlayerLayer") = {
+        .isa = &proxy_av_player_layer_metaclass,
+        .data_bits = (uintptr_t)&proxy_av_layer_ro,
+    };
+
+static struct sword3_objc_class proxy_display_link_metaclass = {
+    .isa = &proxy_display_link_metaclass,
+    .data_bits = (uintptr_t)&proxy_display_link_metaclass_ro,
+};
+
+SWORD3_EXPORT struct sword3_objc_class proxy_display_link_class
+    __asm__("OBJC_CLASS_$_CADisplayLink") = {
+        .isa = &proxy_display_link_metaclass,
+        .data_bits = (uintptr_t)&proxy_display_link_ro,
+    };
+
+static struct sword3_objc_class proxy_runloop_metaclass = {
+    .isa = &proxy_runloop_metaclass,
+    .data_bits = (uintptr_t)&proxy_runloop_metaclass_ro,
+};
+
+SWORD3_EXPORT struct sword3_objc_class proxy_runloop_class
+    __asm__("OBJC_CLASS_$_NSRunLoop") = {
+        .isa = &proxy_runloop_metaclass,
+        .data_bits = (uintptr_t)&proxy_runloop_ro,
+    };
+
+SWORD3_EXPORT const struct constant_string_layout *kCFRunLoopDefaultMode
+    __asm__("kCFRunLoopDefaultMode") = &cf_runloop_default_mode_string;
+SWORD3_EXPORT const struct constant_string_layout *NSDefaultRunLoopMode
+    __asm__("NSDefaultRunLoopMode") = &cf_runloop_default_mode_string;
+
 static struct sword3_objc_class proxy_exception_metaclass = {
     .isa = &proxy_exception_metaclass,
     .superclass = NULL,
@@ -1433,14 +3946,13 @@ SWORD3_EXPORT double CGRectGetMidY(struct proxy_rect rect)
 
 SWORD3_EXPORT void NSLog(sword3_objc_id format)
 {
-    static const char message[] = "[sword3-nslog] message suppressed\n";
-    (void)format;
+    const char *text = object_cstring(format);
     /*
-     * NSLog is variadic under Apple's stack-only vararg ABI.  Logging the
-     * format argument without consuming that foreign va_list keeps startup
-     * diagnostics safe; Machismo's own traces carry the actionable details.
+     * NSLog is variadic under Apple's stack-only vararg ABI. Print the
+     * format object as a C string and ignore extra arguments; that is
+     * enough to see Lua/engine messages during boot.
      */
-    (void)write(STDERR_FILENO, message, sizeof(message) - 1);
+    fprintf(stderr, "[sword3-nslog] %s\n", text && text[0] ? text : "(empty)");
 }
 
 SWORD3_EXPORT

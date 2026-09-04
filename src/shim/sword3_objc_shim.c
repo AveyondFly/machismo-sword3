@@ -84,21 +84,49 @@ static bool nsobject_instances_respond(sword3_objc_Class cls,
     return class_getInstanceMethod(cls, requested) != NULL;
 }
 
+static sword3_objc_id nsobject_instance_class(sword3_objc_id self,
+                                              sword3_objc_sel selector)
+{
+    (void)selector;
+    return self == NULL ? NULL : *(sword3_objc_id *)self;
+}
+
+static sword3_objc_id nsobject_self(sword3_objc_id self,
+                                    sword3_objc_sel selector)
+{
+    (void)selector;
+    return self;
+}
+
+static sword3_objc_id nsobject_alloc(sword3_objc_Class cls,
+                                     sword3_objc_sel selector)
+{
+    (void)selector;
+    return objc_alloc(cls);
+}
+
+static sword3_objc_id nsobject_new(sword3_objc_Class cls,
+                                   sword3_objc_sel selector)
+{
+    (void)selector;
+    return nsobject_init(objc_alloc(cls), selector);
+}
+
 struct nsobject_method_list {
     uint32_t entsize_and_flags;
     uint32_t count;
-    struct sword3_objc_method methods[4];
+    struct sword3_objc_method methods[7];
 };
 
 struct nsobject_class_method_list {
     uint32_t entsize_and_flags;
     uint32_t count;
-    struct sword3_objc_method methods[1];
+    struct sword3_objc_method methods[4];
 };
 
 static const struct nsobject_method_list nsobject_methods = {
     .entsize_and_flags = sizeof(struct sword3_objc_method),
-    .count = 4,
+    .count = 7,
     .methods = {
         {
             .name = "init",
@@ -111,6 +139,11 @@ static const struct nsobject_method_list nsobject_methods = {
             .imp = (sword3_objc_imp)nsobject_init_with_frame,
         },
         {
+            .name = "initWithURL:",
+            .types = "@24@0:8@16",
+            .imp = (sword3_objc_imp)nsobject_init,
+        },
+        {
             .name = "setBackgroundColor:",
             .types = "v24@0:8@16",
             .imp = (sword3_objc_imp)nsobject_set_background_color,
@@ -120,17 +153,42 @@ static const struct nsobject_method_list nsobject_methods = {
             .types = "B24@0:8:16",
             .imp = (sword3_objc_imp)nsobject_responds,
         },
+        {
+            .name = "class",
+            .types = "#16@0:8",
+            .imp = (sword3_objc_imp)nsobject_instance_class,
+        },
+        {
+            .name = "self",
+            .types = "@16@0:8",
+            .imp = (sword3_objc_imp)nsobject_self,
+        },
     },
 };
 
 static const struct nsobject_class_method_list nsobject_class_methods = {
     .entsize_and_flags = sizeof(struct sword3_objc_method),
-    .count = 1,
+    .count = 4,
     .methods = {
         {
             .name = "instancesRespondToSelector:",
             .types = "B24@0:8:16",
             .imp = (sword3_objc_imp)nsobject_instances_respond,
+        },
+        {
+            .name = "alloc",
+            .types = "@16@0:8",
+            .imp = (sword3_objc_imp)nsobject_alloc,
+        },
+        {
+            .name = "new",
+            .types = "@16@0:8",
+            .imp = (sword3_objc_imp)nsobject_new,
+        },
+        {
+            .name = "class",
+            .types = "#16@0:8",
+            .imp = (sword3_objc_imp)nsobject_self,
         },
     },
 };
@@ -221,13 +279,26 @@ void sword3_objc_unsupported_symbol(const char *symbol)
     abort();
 }
 
-static SWORD3_OBJC_NORETURN void unknown_selector(sword3_objc_sel selector)
+static sword3_objc_id nsobject_return_nil(sword3_objc_id self,
+                                          sword3_objc_sel selector)
 {
-    write_diagnostic(
-        "[sword3-objc-shim] unrecognized selector: ",
-        selector == NULL ? "(null)" : selector
-    );
-    abort();
+    (void)self;
+    (void)selector;
+    return NULL;
+}
+
+static sword3_objc_imp stub_unknown_selector(sword3_objc_sel selector)
+{
+    static unsigned seen;
+
+    if (seen < 64) {
+        seen++;
+        write_diagnostic(
+            "[sword3-objc-shim] stubbing selector: ",
+            selector == NULL ? "(null)" : selector
+        );
+    }
+    return (sword3_objc_imp)nsobject_return_nil;
 }
 
 static const struct sword3_objc_class_ro *
@@ -331,6 +402,11 @@ SWORD3_OBJC_EXPORT sword3_objc_id objc_retain(sword3_objc_id object)
 SWORD3_OBJC_EXPORT void objc_release(sword3_objc_id object)
 {
     (void)object;
+}
+
+SWORD3_OBJC_EXPORT sword3_objc_id objc_autorelease(sword3_objc_id object)
+{
+    return object;
 }
 
 SWORD3_OBJC_EXPORT sword3_objc_id
@@ -626,7 +702,7 @@ SWORD3_OBJC_HIDDEN sword3_objc_imp sword3_objc_lookup_imp(
     if (find_method_in_class(&sword3_nsobject_metaclass, selector, &decoded) &&
         decoded.imp != NULL)
         return decoded.imp;
-    unknown_selector(selector);
+    return stub_unknown_selector(selector);
 }
 
 SWORD3_OBJC_EXPORT void *object_getIndexedIvars(sword3_objc_id object)

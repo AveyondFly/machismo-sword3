@@ -99,11 +99,11 @@ add_custom_command(
     COMMAND ${Python3_EXECUTABLE}
             ${CMAKE_CURRENT_SOURCE_DIR}/tools/generate_sword3_shim.py
             --manifest
-            ${CMAKE_CURRENT_SOURCE_DIR}/configs/sword3/binary-manifest.json
+            ${CMAKE_CURRENT_SOURCE_DIR}/configs/paladin2/binary-manifest.json
             --output ${SWORD3_GENERATED_IMPORTS}
     DEPENDS
             tools/generate_sword3_shim.py
-            configs/sword3/binary-manifest.json
+            configs/paladin2/binary-manifest.json
     VERBATIM
 )
 add_library(sword3_ios_shim SHARED
@@ -127,11 +127,11 @@ add_custom_command(
     COMMAND ${Python3_EXECUTABLE}
             ${CMAKE_CURRENT_SOURCE_DIR}/tools/generate_objc_shim.py
             --manifest
-            ${CMAKE_CURRENT_SOURCE_DIR}/configs/sword3/binary-manifest.json
+            ${CMAKE_CURRENT_SOURCE_DIR}/configs/paladin2/binary-manifest.json
             --output ${SWORD3_GENERATED_OBJC_IMPORTS}
     DEPENDS
             tools/generate_objc_shim.py
-            configs/sword3/binary-manifest.json
+            configs/paladin2/binary-manifest.json
     VERBATIM
 )
 add_library(sword3_objc_shim SHARED
@@ -183,6 +183,7 @@ target_compile_options(sword3_host PRIVATE -Wall -Wextra -O2 -g)
 target_link_libraries(sword3_host PRIVATE
     PkgConfig::SWORD3_SDL
     PkgConfig::SWORD3_FFMPEG
+    dl
 )
 set_target_properties(sword3_host PROPERTIES
     OUTPUT_NAME "sword3_host"

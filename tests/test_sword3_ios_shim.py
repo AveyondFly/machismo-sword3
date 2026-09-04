@@ -76,13 +76,30 @@ class Sword3IosShimTest(unittest.TestCase):
         generated = self.generated_text
         self.assertIn('__asm__("UIApplicationMain")', generated)
         self.assertIn('__asm__("OBJC_CLASS_$_UIApplication")', generated)
-        self.assertIn('__asm__("OBJC_METACLASS_$_UIWindow")', generated)
         self.assertIn('__asm__("CGRectZero")', generated)
         self.assertIn('__asm__("AVAudioSessionCategoryAmbient")', generated)
 
         self.assertNotIn("OBJC_CLASS_$_NSException", generated)
         self.assertNotIn("OBJC_CLASS_$_NSDictionary", generated)
         self.assertNotIn("OBJC_CLASS_$_NSString", generated)
+        self.assertNotIn("OBJC_CLASS_$_NSArray", generated)
+        self.assertNotIn("OBJC_CLASS_$_NSMutableArray", generated)
+        self.assertNotIn("OBJC_CLASS_$_NSNumber", generated)
+        self.assertNotIn("OBJC_CLASS_$_NSDate", generated)
+        self.assertNotIn("OBJC_CLASS_$_NSDateFormatter", generated)
+        self.assertNotIn("OBJC_CLASS_$_NSCalendar", generated)
+        self.assertNotIn("OBJC_METACLASS_$_UIWindow", generated)
+        self.assertNotIn("OBJC_CLASS_$_UIView", generated)
+        self.assertNotIn("OBJC_CLASS_$_NSURL", generated)
+        self.assertNotIn("OBJC_CLASS_$_NSNotificationCenter", generated)
+        self.assertNotIn("OBJC_CLASS_$_AVPlayerLayer", generated)
+        self.assertNotIn("OBJC_CLASS_$_AVAudioPlayer", generated)
+        self.assertNotIn("OBJC_CLASS_$_CADisplayLink", generated)
+        self.assertNotIn("OBJC_CLASS_$_NSRunLoop", generated)
+        self.assertNotIn("kCFRunLoopDefaultMode", generated)
+        self.assertNotIn("NSDefaultRunLoopMode", generated)
+        self.assertNotIn('__asm__("CFRunLoopGetCurrent")', generated)
+        self.assertNotIn('__asm__("CFRunLoopRunInMode")', generated)
         self.assertNotIn("glActiveTexture", generated)
         self.assertNotIn("OBJC_CLASS_$_EAGLContext", generated)
         self.assertNotIn("malloc", generated)
@@ -116,8 +133,28 @@ class Sword3IosShimTest(unittest.TestCase):
         self.assertIn(" OBJC_CLASS_$_NSException\n", symbols)
         self.assertIn(" OBJC_CLASS_$_NSDictionary\n", symbols)
         self.assertIn(" OBJC_CLASS_$_NSString\n", symbols)
+        self.assertIn(" OBJC_CLASS_$_NSArray\n", symbols)
+        self.assertIn(" OBJC_CLASS_$_NSMutableArray\n", symbols)
+        self.assertIn(" OBJC_CLASS_$_NSNumber\n", symbols)
+        self.assertIn(" OBJC_CLASS_$_NSDate\n", symbols)
+        self.assertIn(" OBJC_CLASS_$_NSDateFormatter\n", symbols)
+        self.assertIn(" OBJC_CLASS_$_NSCalendar\n", symbols)
         self.assertIn(" OBJC_CLASS_$_UIApplication\n", symbols)
+        self.assertIn(" OBJC_CLASS_$_UIWindow\n", symbols)
         self.assertIn(" OBJC_METACLASS_$_UIWindow\n", symbols)
+        self.assertIn(" OBJC_CLASS_$_UIView\n", symbols)
+        self.assertIn(" OBJC_CLASS_$_NSURL\n", symbols)
+        self.assertIn(" OBJC_CLASS_$_NSNotificationCenter\n", symbols)
+        self.assertIn(" OBJC_CLASS_$_AVPlayer\n", symbols)
+        self.assertIn(" OBJC_CLASS_$_AVPlayerLayer\n", symbols)
+        self.assertIn(" OBJC_CLASS_$_AVAudioPlayer\n", symbols)
+        self.assertIn(" OBJC_CLASS_$_CADisplayLink\n", symbols)
+        self.assertIn(" OBJC_CLASS_$_NSRunLoop\n", symbols)
+        self.assertIn(" CFRunLoopGetCurrent\n", symbols)
+        self.assertIn(" CFRunLoopRunInMode\n", symbols)
+        self.assertIn(" kCFRunLoopDefaultMode\n", symbols)
+        self.assertIn(" NSDefaultRunLoopMode\n", symbols)
+        self.assertIn(" sword3_ios_tick_display_links\n", symbols)
         self.assertIn(" CGRectZero\n", symbols)
         self.assertNotIn(" glActiveTexture\n", symbols)
 
@@ -130,6 +167,34 @@ class Sword3IosShimTest(unittest.TestCase):
             0,
         )
         self.assertEqual(ctypes.c_ubyte.in_dll(library, "CGRectZero").value, 0)
+        library.CFRunLoopGetCurrent.restype = ctypes.c_void_p
+        self.assertTrue(library.CFRunLoopGetCurrent())
+        library.CFRunLoopRunInMode.restype = ctypes.c_int32
+        library.CFRunLoopRunInMode.argtypes = [
+            ctypes.c_void_p,
+            ctypes.c_double,
+            ctypes.c_ubyte,
+        ]
+        self.assertEqual(library.CFRunLoopRunInMode(None, 0.0, 0), 3)
+        self.assertTrue(
+            ctypes.c_void_p.in_dll(library, "kCFRunLoopDefaultMode").value
+        )
+        self.assertNotEqual(
+            ctypes.c_uint64.in_dll(library, "OBJC_CLASS_$_CADisplayLink").value,
+            0,
+        )
+        self.assertNotEqual(
+            ctypes.c_uint64.in_dll(library, "OBJC_CLASS_$_NSRunLoop").value,
+            0,
+        )
+        self.assertNotEqual(
+            ctypes.c_uint64.in_dll(library, "OBJC_CLASS_$_NSDate").value,
+            0,
+        )
+        self.assertNotEqual(
+            ctypes.c_uint64.in_dll(library, "OBJC_CLASS_$_NSCalendar").value,
+            0,
+        )
 
     def test_function_wrapper_logs_and_aborts(self) -> None:
         script = (

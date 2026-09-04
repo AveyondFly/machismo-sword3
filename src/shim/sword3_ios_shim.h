@@ -25,6 +25,12 @@ SWORD3_EXPORT SWORD3_NORETURN
 void sword3_unsupported_symbol(const char *symbol_name);
 
 /*
+ * Drive CADisplayLink callbacks from the host SDL event pump. iOS SDL 2.0.10
+ * presents frames from doLoop: rather than a desktop-style RenderPresent loop.
+ */
+SWORD3_EXPORT void sword3_ios_tick_display_links(void);
+
+/*
  * Deliberately opt-in: production code must not depend on shim test state.
  * Define SWORD3_SHIM_ENABLE_TEST_API while compiling sword3_ios_shim.c to
  * expose the query.

@@ -25,9 +25,9 @@ int sword3_host_prepare(void)
 	SDL_SetMainReady();
 	SDL_SetHint(SDL_HINT_VIDEO_MINIMIZE_ON_FOCUS_LOSS, "0");
 	/*
-	 * Official iOS input is SDL_FINGER*; we inject those from the pad.
-	 * Disable host synthesis so one physical action does not become both
-	 * a finger event and a mouse event (UIGamePad would handle both).
+	 * gptokeyb owns the physical pad and injects a uinput keyboard.
+	 * Disable mouse/touch synthesis so one physical action does not
+	 * become both a finger event and a mouse event.
 	 */
 	SDL_SetHint(SDL_HINT_TOUCH_MOUSE_EVENTS, "0");
 	SDL_SetHint(SDL_HINT_MOUSE_TOUCH_EVENTS, "0");

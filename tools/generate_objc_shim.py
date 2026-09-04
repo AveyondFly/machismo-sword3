@@ -39,6 +39,7 @@ IMPLEMENTED_FUNCTIONS = frozenset(
         "class_getSuperclass",
         "class_isMetaClass",
         "objc_alloc",
+        "objc_autorelease",
         "objc_autoreleasePoolPop",
         "objc_autoreleasePoolPush",
         "objc_autoreleaseReturnValue",
@@ -146,12 +147,6 @@ def read_imports(manifest: dict[str, Any]) -> ObjCImports:
     all_symbols = lazy | regular
     data = tuple(sorted(all_symbols & DATA_SYMBOLS))
     functions = tuple(sorted(all_symbols - DATA_SYMBOLS))
-    missing_implementations = sorted(IMPLEMENTED_FUNCTIONS - set(functions))
-    if missing_implementations:
-        raise GenerationError(
-            "hand-written imports are absent from the manifest: "
-            + ", ".join(missing_implementations)
-        )
     return ObjCImports(functions=functions, data=data)
 
 

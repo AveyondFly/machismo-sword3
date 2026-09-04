@@ -417,14 +417,14 @@ class ObjCShimTest(unittest.TestCase):
     def test_read_only_metadata_and_nil_operations(self) -> None:
         subprocess.run([str(self.fixture_binary)], check=True)
 
-    def test_unknown_selector_prints_name_and_aborts(self) -> None:
+    def test_unknown_selector_is_stubbed(self) -> None:
         completed = subprocess.run(
             [str(self.fixture_binary), "unknown"],
             capture_output=True,
             text=True,
         )
-        self.assertEqual(completed.returncode, -signal.SIGABRT)
-        self.assertIn("unrecognized selector: missingSelector:", completed.stderr)
+        self.assertEqual(completed.returncode, 0)
+        self.assertIn("stubbing selector: missingSelector:", completed.stderr)
 
     def test_generated_unsupported_wrapper_is_fail_fast(self) -> None:
         script = (

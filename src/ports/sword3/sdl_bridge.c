@@ -1,5 +1,10 @@
 #include "sdl_bridge.h"
+#include "audio_bridge.h"
 
+#include <dlfcn.h>
+#ifndef RTLD_DEFAULT
+#define RTLD_DEFAULT ((void *)0)
+#endif
 #include <pthread.h>
 #include <stdint.h>
 #include <stdio.h>
@@ -8,6 +13,7 @@
 #include <unistd.h>
 
 #include <SDL2/SDL_image.h>
+#include <SDL2/SDL_mixer.h>
 
 #ifndef SDL_WINDOW_METAL
 #define SDL_WINDOW_METAL 0x20000000u
@@ -88,6 +94,31 @@ static int owner_contains_locked(enum sword3_sdl_kind kind, void *pointer)
 	return 0;
 }
 
+static int owner_has(enum sword3_sdl_kind kind, void *pointer)
+{
+	int found;
+
+	if (!pointer)
+		return 0;
+	pthread_mutex_lock(&owner_lock);
+	found = owner_contains_locked(kind, pointer);
+	pthread_mutex_unlock(&owner_lock);
+	return found;
+}
+
+static void owner_skip_unknown(const char *api, enum sword3_sdl_kind kind,
+			       void *pointer)
+{
+	static unsigned skips;
+
+	if (skips < 16) {
+		skips++;
+		fprintf(stderr,
+			"sword3-sdl: %s skip unknown %s %p\n",
+			api, kind_name[kind], pointer);
+	}
+}
+
 static void owner_check(const char *api, enum sword3_sdl_kind kind, void *pointer)
 {
 	int found;
@@ -99,6 +130,16 @@ static void owner_check(const char *api, enum sword3_sdl_kind kind, void *pointe
 	pthread_mutex_unlock(&owner_lock);
 	if (!found)
 		owner_abort(api, kind, pointer);
+}
+
+static int owner_live(const char *api, enum sword3_sdl_kind kind, void *pointer)
+{
+	if (!pointer || !owner_enabled())
+		return 1;
+	if (owner_has(kind, pointer))
+		return 1;
+	owner_skip_unknown(api, kind, pointer);
+	return 0;
 }
 
 static void owner_unregister(const char *api, enum sword3_sdl_kind kind,
@@ -120,19 +161,7 @@ static void owner_unregister(const char *api, enum sword3_sdl_kind kind,
 		return;
 	}
 	pthread_mutex_unlock(&owner_lock);
-	owner_abort(api, kind, pointer);
-}
-
-static int owner_has(enum sword3_sdl_kind kind, void *pointer)
-{
-	int found;
-
-	if (!pointer)
-		return 0;
-	pthread_mutex_lock(&owner_lock);
-	found = owner_contains_locked(kind, pointer);
-	pthread_mutex_unlock(&owner_lock);
-	return found;
+	owner_skip_unknown(api, kind, pointer);
 }
 
 static void owner_drop(enum sword3_sdl_kind kind, void *pointer)
@@ -162,18 +191,17 @@ static void owner_drop(enum sword3_sdl_kind kind, void *pointer)
  * also has reserved SDL2 mouse / keyboard / joystick / controller paths.
  * Do not stub that function.
  *
- * Menu and save screens are tap UIs, not host-style lists. On those screens
- * the pad is a virtual pointer:
- *   stick / D-pad -> move an on-screen cursor (MouseXY + input mode 3)
- *   A             -> SDL_FINGERDOWN/UP at the cursor
- *   B             -> mouse right (reserved RPG path)
- *   START swallowed; SELECT -> Escape; SELECT+START exits
- * Raw controller axis/hat events are swallowed there so the guest cannot
- * switch to joystick mode 4 and ignore the pointer.
- * In the field the stick/D-pad write the virtual-cross slots instead.
+ * Pal2's original RPG is a keyboard game (scancode slots + DOS key bitmap).
+ * Native SDL controller events switch UIGamePad to mode 4, which fights
+ * the keyboard path. The handheld pad is owned by gptokeyb (uinput
+ * keyboard, real key-hold). This host must not open the joystick, must
+ * strip SDL_INIT_JOYSTICK/GAMECONTROLLER/HAPTIC, and must drop leftover
+ * joy/controller events so Pal2 never sees a pad.
+ * Mouse motion is dropped: Pal2 treats coordinates vs (320,240) as a
+ * held virtual stick. Real touch / mouse buttons still pass through.
  */
-#define STICK_DEADZONE 14000
-#define CURSOR_PX_PER_SEC 380.0f
+#define HOST_JOYSTICK_FLAGS \
+	(SDL_INIT_JOYSTICK | SDL_INIT_HAPTIC | SDL_INIT_GAMECONTROLLER)
 #define MENU_ITEMS 2
 #define MENU_GAME_X 115
 #define MENU_GAME_Y0 201
@@ -201,24 +229,26 @@ static void owner_drop(enum sword3_sdl_kind kind, void *pointer)
 #define GUEST_INPUT_MOUSE 3
 #define GUEST_TITLE_MAP 0x1e
 #define GUEST_UI_SAVE 2
+#define PAL2_SCREEN 0x10049efc0ull
+#define PAL2_COMPOSITOR 0x10021f1f0ull
+#define PAL2_TICK 0x1000052ecull
+#define PAL2_EVENT_OBJ 0x1004953b0ull
+#define PAL2_SKIP_TICK 0x10046b408ull
+#define PAL2_RUNNING 0x10028b9a4ull
+#define PAL2_MOVIE_PLAYING 0x100489658ull
+#define PAL2_MOVIE_STATUS 0x100542c50ull
 
 static SDL_Window *g_window;
 static SDL_Renderer *g_renderer;
-static SDL_GameController *g_pad;
 static int g_logical_w;
 static int g_logical_h;
 static float g_cursor_x;
 static float g_cursor_y;
 static int g_cursor_ready;
-static int g_finger_down;
-static int g_btn_back;
-static int g_btn_start;
 static int g_menu_item;
-static int g_pointer_ui = 1;
+static int g_pointer_ui;
 static int g_save_ui;
 static int g_after_continue;
-static int g_play_dir[4];
-static Uint32 g_cursor_ticks;
 
 static const char *ignore_ios_driver(const char *driver_name, const char *ios_name)
 {
@@ -279,6 +309,8 @@ static void apply_logical_size(SDL_Renderer *renderer)
 			g_logical_w, g_logical_h);
 }
 
+#define HOST_MOUSE_WHICH 0x53574d33u
+
 static void scale_pointer_event(SDL_Event *event)
 {
 	float lx;
@@ -290,11 +322,15 @@ static void scale_pointer_event(SDL_Event *event)
 		return;
 	switch (event->type) {
 	case SDL_MOUSEMOTION:
+		if (event->motion.which == HOST_MOUSE_WHICH)
+			return;
 		x = event->motion.x;
 		y = event->motion.y;
 		break;
 	case SDL_MOUSEBUTTONDOWN:
 	case SDL_MOUSEBUTTONUP:
+		if (event->button.which == HOST_MOUSE_WHICH)
+			return;
 		x = event->button.x;
 		y = event->button.y;
 		break;
@@ -309,11 +345,6 @@ static void scale_pointer_event(SDL_Event *event)
 		event->button.x = (Sint32)lx;
 		event->button.y = (Sint32)ly;
 	}
-}
-
-static Uint32 window_id(void)
-{
-	return g_window ? SDL_GetWindowID(g_window) : 0;
 }
 
 static void clamp_cursor(void)
@@ -367,12 +398,51 @@ static void ensure_cursor(void)
 	warp_menu_item(0);
 }
 
-static int guest_data_ok(uintptr_t addr)
+static void pal2_log_viewport(void)
 {
-	return addr >= 0x100294000ull && addr < 0x100380000ull;
+	static int logged;
+	uint8_t *screen = (uint8_t *)(uintptr_t)PAL2_SCREEN;
+	volatile int *origin = (volatile int *)(screen + GUEST_VIEW_ORIGIN);
+	volatile int *size = (volatile int *)(screen + GUEST_VIEW_SIZE);
+	volatile float *scale = (volatile float *)(screen + GUEST_VIEW_SCALE);
+	volatile int *finger_size = (volatile int *)(screen + GUEST_FINGER_SIZE);
+	volatile float *finger_scale = (volatile float *)(screen + GUEST_FINGER_SCALE);
+	int lw = g_logical_w > 0 ? g_logical_w : GAME_W;
+	int lh = g_logical_h > 0 ? g_logical_h : GAME_H;
+
+	if (finger_size[0] <= 0 || finger_size[1] <= 0) {
+		finger_size[0] = lw;
+		finger_size[1] = lh;
+	}
+	if (finger_scale[0] == 0.0f && finger_scale[1] == 0.0f) {
+		finger_scale[0] = 1.0f;
+		finger_scale[1] = 1.0f;
+	}
+	if (!logged) {
+		logged = 1;
+		fprintf(stderr,
+			"sword3-sdl: Pal2 view origin %d,%d size %dx%d scale %.3f,%.3f finger %dx%d\n",
+			origin[0], origin[1], size[0], size[1], scale[0],
+			scale[1], finger_size[0], finger_size[1]);
+	}
 }
 
-static void fill_key(SDL_Event *event, SDL_Scancode scancode, int down);
+static int guest_data_ok(uintptr_t addr)
+{
+	static int logged;
+
+	/*
+	 * Sword3 BSS pokes (GUEST_SCREEN / GUEST_UIGAMEPAD / ...) sit inside
+	 * Pal2's real __DATA. Writing them corrupts engine state and can
+	 * leave the compositor's present-enable flag cleared.
+	 */
+	(void)addr;
+	if (!logged) {
+		logged = 1;
+		fprintf(stderr, "sword3-sdl: Pal2 guest BSS pokes disabled\n");
+	}
+	return 0;
+}
 
 static void maybe_init_guest_viewport(uint8_t *screen)
 {
@@ -409,127 +479,13 @@ static void maybe_init_guest_viewport(uint8_t *screen)
 	}
 }
 
-static int guest_map_id(void)
-{
-	if (!guest_data_ok(GUEST_MAP_ID))
-		return -1;
-	return *(volatile int *)(uintptr_t)GUEST_MAP_ID;
-}
-
-static int guest_on_title(void)
-{
-	int map = guest_map_id();
-
-	if (map < 0)
-		return 1;
-	if (map == 0)
-		return 1;
-	if (map >= GUEST_TITLE_MAP && map < GUEST_TITLE_MAP + 3)
-		return 1;
-	return 0;
-}
-
-static int guest_save_ui(void)
-{
-	if (!guest_data_ok(GUEST_UI_FLAGS))
-		return 0;
-	return (*(volatile int *)(uintptr_t)GUEST_UI_FLAGS & GUEST_UI_SAVE) != 0;
-}
-
-static void clear_play_dirs(void)
-{
-	memset(g_play_dir, 0, sizeof(g_play_dir));
-}
-
 static void sync_ui_mode(void)
 {
-	int on_title = guest_on_title();
-	int save_ui = guest_save_ui();
-	int pointer_ui;
-
-	if (!on_title && !save_ui)
-		g_after_continue = 0;
-	pointer_ui = on_title || save_ui || g_after_continue;
-	if (pointer_ui == g_pointer_ui && save_ui == g_save_ui)
+	if (!g_pointer_ui)
 		return;
-	g_save_ui = save_ui;
-	g_pointer_ui = pointer_ui;
-	fprintf(stderr,
-		"sword3-sdl: ui pointer=%d save=%d after=%d map=%d flags=%d cursor=%.0f,%.0f\n",
-		pointer_ui, save_ui, g_after_continue, guest_map_id(),
-		guest_data_ok(GUEST_UI_FLAGS)
-			? *(volatile int *)(uintptr_t)GUEST_UI_FLAGS
-			: -1,
-		g_cursor_x, g_cursor_y);
-	if (pointer_ui)
-		clear_play_dirs();
-}
-
-static void write_dir_slot(uint8_t *pad, int dir, int held)
-{
-	uint8_t *slot;
-
-	if (dir < 1 || dir > 4)
-		return;
-	slot = pad + GUEST_DPAD_SLOT + (dir - 1) * GUEST_DPAD_STRIDE;
-	if (*(volatile int *)(slot + 0x14) == 5)
-		return;
-	slot[0] = held ? 1 : 0;
-	slot[8] = held ? 1 : 0;
-}
-
-static void emit_dir_key(int index, SDL_Scancode scancode, int held)
-{
-	SDL_Event event;
-
-	if (held == g_play_dir[index])
-		return;
-	g_play_dir[index] = held;
-	memset(&event, 0, sizeof(event));
-	fill_key(&event, scancode, held);
-	SDL_PushEvent(&event);
-}
-
-static void sync_play_dirs(void)
-{
-	uint8_t *pad;
-	int up = 0;
-	int down = 0;
-	int left = 0;
-	int right = 0;
-	Sint16 lx;
-	Sint16 ly;
-
-	if (g_pointer_ui || !g_pad)
-		return;
-	if (!guest_data_ok(GUEST_UIGAMEPAD))
-		return;
-	pad = (uint8_t *)(uintptr_t)GUEST_UIGAMEPAD;
-	up = SDL_GameControllerGetButton(g_pad, SDL_CONTROLLER_BUTTON_DPAD_UP);
-	down = SDL_GameControllerGetButton(g_pad,
-					   SDL_CONTROLLER_BUTTON_DPAD_DOWN);
-	left = SDL_GameControllerGetButton(g_pad,
-					    SDL_CONTROLLER_BUTTON_DPAD_LEFT);
-	right = SDL_GameControllerGetButton(g_pad,
-					     SDL_CONTROLLER_BUTTON_DPAD_RIGHT);
-	lx = SDL_GameControllerGetAxis(g_pad, SDL_CONTROLLER_AXIS_LEFTX);
-	ly = SDL_GameControllerGetAxis(g_pad, SDL_CONTROLLER_AXIS_LEFTY);
-	if (ly < -STICK_DEADZONE)
-		up = 1;
-	if (ly > STICK_DEADZONE)
-		down = 1;
-	if (lx < -STICK_DEADZONE)
-		left = 1;
-	if (lx > STICK_DEADZONE)
-		right = 1;
-	write_dir_slot(pad, 1, up);
-	write_dir_slot(pad, 2, down);
-	write_dir_slot(pad, 3, left);
-	write_dir_slot(pad, 4, right);
-	emit_dir_key(0, SDL_SCANCODE_UP, up);
-	emit_dir_key(1, SDL_SCANCODE_DOWN, down);
-	emit_dir_key(2, SDL_SCANCODE_LEFT, left);
-	emit_dir_key(3, SDL_SCANCODE_RIGHT, right);
+	g_pointer_ui = 0;
+	g_save_ui = 0;
+	g_after_continue = 0;
 }
 
 static void sync_game_pointer(void)
@@ -572,261 +528,199 @@ static void sync_game_pointer(void)
 	}
 }
 
-static void nudge_cursor(float dx, float dy)
+static void tick_ios_display_links(void)
 {
-	ensure_cursor();
-	g_cursor_x += dx;
-	g_cursor_y += dy;
-	clamp_cursor();
-}
+	static void (*tick)(void);
+	static int resolved;
 
-static void cursor_norm(float *x, float *y)
-{
-	float nx = 0.5f;
-	float ny = 0.5f;
-
-	ensure_cursor();
-	if (g_logical_w > 0 && g_logical_h > 0) {
-		nx = g_cursor_x / (float)g_logical_w;
-		ny = g_cursor_y / (float)g_logical_h;
+	if (!resolved) {
+		resolved = 1;
+		tick = (void (*)(void))dlsym(RTLD_DEFAULT,
+					     "sword3_ios_tick_display_links");
 	}
-	if (nx < 0.0f)
-		nx = 0.0f;
-	if (nx > 1.0f)
-		nx = 1.0f;
-	if (ny < 0.0f)
-		ny = 0.0f;
-	if (ny > 1.0f)
-		ny = 1.0f;
-	*x = nx;
-	*y = ny;
+	if (tick)
+		tick();
 }
 
-static void fill_mouse_button(SDL_Event *event, Uint8 button, int down)
+/*
+ * Pal2's desktop-style SDLThread_Loop only presents from the idle path
+ * (0x1001ef694 -> 0x10021f1f0). iOS SDL normally drives that compositor from
+ * CADisplayLink. CreateWindow is hooked, so the display-link never starts;
+ * kick the same guest compositor from the host pump instead.
+ */
+static void pal2_log_tick_state(const char *when)
 {
-	ensure_cursor();
-	event->type = down ? SDL_MOUSEBUTTONDOWN : SDL_MOUSEBUTTONUP;
-	event->button.timestamp = SDL_GetTicks();
-	event->button.windowID = window_id();
-	event->button.which = 0;
-	event->button.button = button;
-	event->button.state = down ? SDL_PRESSED : SDL_RELEASED;
-	event->button.clicks = 1;
-	event->button.x = (Sint32)g_cursor_x;
-	event->button.y = (Sint32)g_cursor_y;
+	volatile uint32_t *flags =
+		(volatile uint32_t *)(uintptr_t)PAL2_EVENT_OBJ;
+
+	fprintf(stderr,
+		"sword3-sdl: Pal2 tick %s flags=0x%x skip=%u run=%u pause=%u\n",
+		when, *flags, *(volatile uint8_t *)(uintptr_t)PAL2_SKIP_TICK,
+		*(volatile uint8_t *)(uintptr_t)PAL2_RUNNING,
+		*(volatile uint32_t *)(uintptr_t)(PAL2_EVENT_OBJ + 4));
 }
 
-static void fill_finger(SDL_Event *event, Uint32 type)
+/*
+ * Pal2's splash (SS_DOMO) sets event flag bit 5 (0x20) and a non-zero pause
+ * field, then waits for its AVAudioPlayer to finish. The AVAudioPlayer shim
+ * now immediately calls audioPlayerDidFinishPlaying:successfully: on play,
+ * which should clear the movie state naturally. Keep this as a fallback.
+ */
+static void pal2_force_advance_splash(void)
 {
-	float x;
-	float y;
+	static int attempts;
+	volatile uint8_t *flags =
+		(volatile uint8_t *)(uintptr_t)PAL2_EVENT_OBJ;
+	volatile uint32_t *pause =
+		(volatile uint32_t *)(uintptr_t)(PAL2_EVENT_OBJ + 4);
+	volatile uint8_t *movie_status =
+		(volatile uint8_t *)(uintptr_t)PAL2_MOVIE_STATUS;
 
-	cursor_norm(&x, &y);
-	event->type = type;
-	event->tfinger.timestamp = SDL_GetTicks();
-	event->tfinger.touchId = TOUCH_ID;
-	event->tfinger.fingerId = FINGER_ID;
-	event->tfinger.x = x;
-	event->tfinger.y = y;
-	event->tfinger.dx = 0.0f;
-	event->tfinger.dy = 0.0f;
-	event->tfinger.pressure = (type == SDL_FINGERUP) ? 0.0f : 1.0f;
-}
-
-static void fill_key(SDL_Event *event, SDL_Scancode scancode, int down)
-{
-	event->type = down ? SDL_KEYDOWN : SDL_KEYUP;
-	event->key.timestamp = SDL_GetTicks();
-	event->key.windowID = window_id();
-	event->key.state = down ? SDL_PRESSED : SDL_RELEASED;
-	event->key.repeat = 0;
-	event->key.keysym.scancode = scancode;
-	event->key.keysym.sym = SDL_GetKeyFromScancode(scancode);
-	event->key.keysym.mod = 0;
-}
-
-static void emit_finger_motion(void)
-{
-	SDL_Event event;
-
-	memset(&event, 0, sizeof(event));
-	fill_finger(&event, SDL_FINGERMOTION);
-	SDL_PushEvent(&event);
-}
-
-static void maybe_combo_exit(void)
-{
-	int start = g_btn_start;
-	int back = g_btn_back;
-	SDL_Joystick *joystick;
-	int nbuttons;
-
-	if (g_pad) {
-		start |= SDL_GameControllerGetButton(
-			g_pad, SDL_CONTROLLER_BUTTON_START);
-		back |= SDL_GameControllerGetButton(g_pad,
-						    SDL_CONTROLLER_BUTTON_BACK);
-		joystick = SDL_GameControllerGetJoystick(g_pad);
-		if (joystick) {
-			nbuttons = SDL_JoystickNumButtons(joystick);
-			if (nbuttons > 12)
-				back |= SDL_JoystickGetButton(joystick, 12);
-			if (nbuttons > 13)
-				start |= SDL_JoystickGetButton(joystick, 13);
-		}
-	}
-	if (start && back) {
-		fprintf(stderr, "sword3-sdl: SELECT+START -> exit\n");
-		_exit(0);
-	}
-}
-
-static void ensure_gamecontroller(void)
-{
-	int i;
-	int n;
-	char *mapping;
-
-	if (g_pad)
+	if (!g_renderer)
 		return;
-	if (SDL_InitSubSystem(SDL_INIT_JOYSTICK | SDL_INIT_GAMECONTROLLER) != 0) {
-		fprintf(stderr, "sword3-sdl: joystick init failed (%s)\n",
-			SDL_GetError());
+	attempts++;
+
+	/*
+	 * The game's splash plays a sequence of movies (events 0x61, 0x62,
+	 * ...). Each movie sets bit 5 of the event flags and a non-zero
+	 * pause, then waits for the movie to finish. Our AVPlayer/AVAudioPlayer
+	 * shims don't drive the movie state machine, so the movie status
+	 * byte at 0x100542c50 stays non-zero and the movie never completes.
+	 *
+	 * Periodically force the movie status to 0 so the movie update calls
+	 * stop_movie, clears bit 5, and lets the game advance to the next
+	 * event in the sequence. Do NOT set bit 2 or clear pause manually —
+	 * let the game's own state machine handle that.
+	 */
+	if (!(*flags & 0x20u) || *pause == 0u)
 		return;
-	}
-	SDL_JoystickEventState(SDL_ENABLE);
-	SDL_GameControllerEventState(SDL_ENABLE);
-	n = SDL_NumJoysticks();
-	fprintf(stderr, "sword3-sdl: %d joysticks\n", n);
-	for (i = 0; i < n; i++) {
-		fprintf(stderr, "sword3-sdl: js%d '%s' gc=%d\n", i,
-			SDL_JoystickNameForIndex(i) ?
-				SDL_JoystickNameForIndex(i) :
-				"?",
-			SDL_IsGameController(i));
-		if (!g_pad && SDL_IsGameController(i)) {
-			g_pad = SDL_GameControllerOpen(i);
-			if (g_pad) {
-				mapping = SDL_GameControllerMapping(g_pad);
-				fprintf(stderr, "sword3-sdl: pad opened '%s'\n",
-					SDL_GameControllerName(g_pad));
-				fprintf(stderr, "sword3-sdl: mapping %s\n",
-					mapping ? mapping : "(none)");
-				SDL_free(mapping);
-			}
-		}
-	}
+	if (*movie_status == 0u)
+		return;
+	if (attempts < 30)
+		return;
+
+	fprintf(stderr,
+		"sword3-sdl: Pal2 forcing movie stop (flags=0x%x pause=%u movie_status=%u)\n",
+		*flags, *pause, *movie_status);
+	*movie_status = 0;
+	attempts = 0;
 }
 
-static void apply_cursor_move(void)
+static void pal2_kick_tick(void)
 {
-	Sint16 lx;
-	Sint16 ly;
-	Sint16 rx;
-	Sint16 ry;
-	float dx;
-	float dy;
-	float speed;
-	float dt;
+	static int reentrant;
+	static unsigned seen;
+	static Uint32 last;
+	static SDL_Event dummy;
 	Uint32 now;
-	static unsigned move_seen;
+	void (*tick)(SDL_Event *);
 
-	if (!g_pointer_ui || !g_pad || g_logical_w <= 0 || g_logical_h <= 0)
+	if (reentrant || !g_renderer)
 		return;
 	now = SDL_GetTicks();
-	if (!g_cursor_ticks)
-		g_cursor_ticks = now;
-	dt = (float)(now - g_cursor_ticks) / 1000.0f;
-	g_cursor_ticks = now;
-	if (dt <= 0.0f)
+	if (last != 0 && now - last < 16)
 		return;
-	if (dt > 0.05f)
-		dt = 0.05f;
-	speed = CURSOR_PX_PER_SEC * (float)g_logical_w / (float)GAME_W;
-	dx = 0.0f;
-	dy = 0.0f;
-	lx = SDL_GameControllerGetAxis(g_pad, SDL_CONTROLLER_AXIS_LEFTX);
-	ly = SDL_GameControllerGetAxis(g_pad, SDL_CONTROLLER_AXIS_LEFTY);
-	rx = SDL_GameControllerGetAxis(g_pad, SDL_CONTROLLER_AXIS_RIGHTX);
-	ry = SDL_GameControllerGetAxis(g_pad, SDL_CONTROLLER_AXIS_RIGHTY);
-	if (lx > STICK_DEADZONE || lx < -STICK_DEADZONE)
-		dx += ((float)lx / 32767.0f) * speed * dt;
-	if (ly > STICK_DEADZONE || ly < -STICK_DEADZONE)
-		dy += ((float)ly / 32767.0f) * speed * dt;
-	if (rx > STICK_DEADZONE || rx < -STICK_DEADZONE)
-		dx += ((float)rx / 32767.0f) * speed * dt;
-	if (ry > STICK_DEADZONE || ry < -STICK_DEADZONE)
-		dy += ((float)ry / 32767.0f) * speed * dt;
-	if (SDL_GameControllerGetButton(g_pad, SDL_CONTROLLER_BUTTON_DPAD_LEFT))
-		dx -= speed * dt;
-	if (SDL_GameControllerGetButton(g_pad, SDL_CONTROLLER_BUTTON_DPAD_RIGHT))
-		dx += speed * dt;
-	if (SDL_GameControllerGetButton(g_pad, SDL_CONTROLLER_BUTTON_DPAD_UP))
-		dy -= speed * dt;
-	if (SDL_GameControllerGetButton(g_pad, SDL_CONTROLLER_BUTTON_DPAD_DOWN))
-		dy += speed * dt;
-	if (dx == 0.0f && dy == 0.0f)
-		return;
-	nudge_cursor(dx, dy);
-	if (g_finger_down)
-		emit_finger_motion();
-	if (move_seen < 40) {
-		move_seen++;
-		fprintf(stderr, "sword3-sdl: cursor %.0f,%.0f\n", g_cursor_x,
-			g_cursor_y);
+	last = now;
+	reentrant = 1;
+	dummy.type = 0;
+	tick = (void (*)(SDL_Event *))(uintptr_t)PAL2_TICK;
+	if (seen < 4) {
+		seen++;
+		pal2_log_tick_state("before");
+		fprintf(stderr, "sword3-sdl: Pal2 tick kick #%u\n", seen);
+		tick(&dummy);
+		pal2_log_tick_state("after");
+	} else {
+		tick(&dummy);
 	}
+	pal2_force_advance_splash();
+	reentrant = 0;
+}
+
+static void pal2_kick_present(void)
+{
+	uint8_t *screen = (uint8_t *)(uintptr_t)PAL2_SCREEN;
+	void *gfx;
+	SDL_Renderer *renderer;
+	static int reentrant;
+	static unsigned seen;
+	static Uint32 last;
+	static int logged_null;
+	static int logged_mismatch;
+	Uint32 now;
+	void (*present)(void *);
+
+	if (reentrant || !g_renderer)
+		return;
+	now = SDL_GetTicks();
+	if (last != 0 && now - last < 16)
+		return;
+	last = now;
+	gfx = *(void **)screen;
+	if (!gfx) {
+		if (!logged_null && now > 2000) {
+			logged_null = 1;
+			fprintf(stderr,
+				"sword3-sdl: Pal2 screen object gfx pointer is null\n");
+		}
+		return;
+	}
+	renderer = *(SDL_Renderer **)((uint8_t *)gfx + 8);
+	if (renderer != g_renderer) {
+		if (!logged_mismatch) {
+			logged_mismatch = 1;
+			fprintf(stderr,
+				"sword3-sdl: Pal2 compositor renderer %p != host %p\n",
+				renderer, g_renderer);
+		}
+		return;
+	}
+	if (!screen[0x160]) {
+		screen[0x160] = 1;
+		fprintf(stderr,
+			"sword3-sdl: Pal2 compositor enable flag was 0; set\n");
+	}
+	pal2_log_viewport();
+	reentrant = 1;
+	if (seen < 8) {
+		seen++;
+		fprintf(stderr, "sword3-sdl: Pal2 compositor kick #%u\n", seen);
+	}
+	present = (void (*)(void *))(uintptr_t)PAL2_COMPOSITOR;
+	present(screen);
+	reentrant = 0;
 }
 
 static void apply_pad_pointer(void)
 {
+	pal2_log_viewport();
 	sync_ui_mode();
-	ensure_cursor();
-	apply_cursor_move();
-	sync_game_pointer();
-	if (!g_pointer_ui)
-		sync_play_dirs();
+	if (g_pointer_ui) {
+		ensure_cursor();
+		sync_game_pointer();
+	}
+}
+
+static int is_guest_pad_event(Uint32 type)
+{
+	return type >= SDL_JOYAXISMOTION && type < SDL_FINGERDOWN;
 }
 
 static int rewrite_event(SDL_Event *event)
 {
-	static unsigned seen;
-	int down;
-	int button;
-
 	if (!event)
 		return 0;
 	scale_pointer_event(event);
-	if (event->type == SDL_CONTROLLERAXISMOTION ||
-	    event->type == SDL_JOYAXISMOTION ||
-	    event->type == SDL_JOYHATMOTION ||
-	    event->type == SDL_JOYBALLMOTION) {
-		if (g_pointer_ui) {
-			event->type = SDL_FIRSTEVENT;
-			return 0;
-		}
-		return 1;
-	}
-	if (event->type == SDL_JOYBUTTONDOWN ||
-	    event->type == SDL_JOYBUTTONUP) {
-		if (g_pointer_ui) {
-			event->type = SDL_FIRSTEVENT;
-			return 0;
-		}
-		return 1;
-	}
-	if (event->type == SDL_MOUSEMOTION) {
-		g_cursor_x = (float)event->motion.x;
-		g_cursor_y = (float)event->motion.y;
-		g_cursor_ready = 1;
-		clamp_cursor();
-		return 1;
-	}
+	if (is_guest_pad_event(event->type) || event->type == SDL_MOUSEMOTION)
+		return 0;
 	if (event->type == SDL_MOUSEBUTTONDOWN ||
 	    event->type == SDL_MOUSEBUTTONUP) {
-		g_cursor_x = (float)event->button.x;
-		g_cursor_y = (float)event->button.y;
-		g_cursor_ready = 1;
-		clamp_cursor();
+		if (event->button.which != HOST_MOUSE_WHICH) {
+			g_cursor_x = (float)event->button.x;
+			g_cursor_y = (float)event->button.y;
+			g_cursor_ready = 1;
+			clamp_cursor();
+		}
 		return 1;
 	}
 	if (event->type == SDL_FINGERDOWN || event->type == SDL_FINGERUP ||
@@ -839,64 +733,6 @@ static int rewrite_event(SDL_Event *event)
 		}
 		return 1;
 	}
-	if (event->type != SDL_CONTROLLERBUTTONDOWN &&
-	    event->type != SDL_CONTROLLERBUTTONUP)
-		return 1;
-
-	down = event->type == SDL_CONTROLLERBUTTONDOWN;
-	button = event->cbutton.button;
-	if (seen < 24) {
-		seen++;
-		fprintf(stderr, "sword3-sdl: pad button %d %s\n", button,
-			down ? "down" : "up");
-	}
-	if (button == SDL_CONTROLLER_BUTTON_BACK) {
-		g_btn_back = down;
-		if (down) {
-			g_after_continue = 0;
-			if (guest_on_title())
-				warp_menu_item(0);
-		}
-		maybe_combo_exit();
-		fill_key(event, SDL_SCANCODE_ESCAPE, down);
-		return 1;
-	}
-	if (button == SDL_CONTROLLER_BUTTON_START) {
-		g_btn_start = down;
-		maybe_combo_exit();
-		event->type = SDL_FIRSTEVENT;
-		return 0;
-	}
-	if (button == SDL_CONTROLLER_BUTTON_B) {
-		fill_mouse_button(event, SDL_BUTTON_RIGHT, down);
-		return 1;
-	}
-	if (button == SDL_CONTROLLER_BUTTON_A) {
-		ensure_cursor();
-		g_finger_down = down;
-		fill_finger(event, down ? SDL_FINGERDOWN : SDL_FINGERUP);
-		if (!down && g_pointer_ui && guest_on_title() &&
-		    !g_after_continue)
-			g_after_continue = 1;
-		if (seen <= 24) {
-			fprintf(stderr,
-				"sword3-sdl: finger %s at %.3f,%.3f (cursor %.0f,%.0f)\n",
-				down ? "down" : "up", event->tfinger.x,
-				event->tfinger.y, g_cursor_x, g_cursor_y);
-		}
-		return 1;
-	}
-	if (button == SDL_CONTROLLER_BUTTON_DPAD_UP ||
-	    button == SDL_CONTROLLER_BUTTON_DPAD_DOWN ||
-	    button == SDL_CONTROLLER_BUTTON_DPAD_LEFT ||
-	    button == SDL_CONTROLLER_BUTTON_DPAD_RIGHT) {
-		event->type = SDL_FIRSTEVENT;
-		return 0;
-	}
-	if (g_pointer_ui) {
-		event->type = SDL_FIRSTEVENT;
-		return 0;
-	}
 	return 1;
 }
 
@@ -907,8 +743,10 @@ static int next_translated_event(SDL_Event *event, int timeout)
 	int slice;
 	int blocking = timeout < 0;
 
-	ensure_gamecontroller();
 	for (;;) {
+		tick_ios_display_links();
+		pal2_kick_tick();
+		pal2_kick_present();
 		apply_pad_pointer();
 		if (timeout == 0)
 			slice = 0;
@@ -917,12 +755,8 @@ static int next_translated_event(SDL_Event *event, int timeout)
 		else {
 			int left = timeout - (int)(SDL_GetTicks() - start);
 
-			if (left <= 0) {
-				sync_game_pointer();
-				if (!g_pointer_ui)
-					sync_play_dirs();
+			if (left <= 0)
 				return 0;
-			}
 			slice = left > 16 ? 16 : left;
 		}
 		result = SDL_WaitEventTimeout(event, slice);
@@ -930,19 +764,12 @@ static int next_translated_event(SDL_Event *event, int timeout)
 			if (timeout == 0 ||
 			    (!blocking &&
 			     (int)(SDL_GetTicks() - start) >= timeout)) {
-				sync_game_pointer();
-				if (!g_pointer_ui)
-					sync_play_dirs();
 				return 0;
 			}
 			continue;
 		}
-		if (rewrite_event(event) && event->type != SDL_FIRSTEVENT) {
-			sync_game_pointer();
-			if (!g_pointer_ui)
-				sync_play_dirs();
+		if (rewrite_event(event))
 			return 1;
-		}
 	}
 }
 
@@ -953,12 +780,17 @@ int sword3_ret0(void)
 
 int sword3_SDL_InitSubSystem(Uint32 flags)
 {
-	int result = SDL_InitSubSystem(flags);
+	Uint32 requested = flags;
+	Uint32 host_flags = flags & ~(Uint32)HOST_JOYSTICK_FLAGS;
+	int result;
+
+	if (requested & HOST_JOYSTICK_FLAGS)
+		fprintf(stderr,
+			"sword3-sdl: dropping joystick init 0x%x (gptokeyb owns the pad)\n",
+			requested & (Uint32)HOST_JOYSTICK_FLAGS);
+	result = host_flags ? SDL_InitSubSystem(host_flags) : 0;
 	fprintf(stderr, "sword3-sdl: SDL_InitSubSystem(0x%x) -> %d (%s)\n",
-		flags, result, result == 0 ? "ok" : SDL_GetError());
-	if (result == 0 &&
-	    (flags & (SDL_INIT_JOYSTICK | SDL_INIT_GAMECONTROLLER)))
-		ensure_gamecontroller();
+		requested, result, result == 0 ? "ok" : SDL_GetError());
 	return result;
 }
 
@@ -984,8 +816,8 @@ int sword3_SDL_VideoInit(const char *driver_name)
 
 void sword3_SDL_VideoQuit(void)
 {
-	fprintf(stderr, "sword3-sdl: SDL_VideoQuit\n");
-	SDL_VideoQuit();
+	fprintf(stderr, "sword3-sdl: SDL_VideoQuit -> exit\n");
+	_exit(0);
 }
 
 int sword3_SDL_AudioInit(const char *driver_name)
@@ -1159,10 +991,9 @@ SDL_Renderer *sword3_SDL_CreateRenderer(SDL_Window *window, int index,
 
 void sword3_SDL_DestroyRenderer(SDL_Renderer *renderer)
 {
-	owner_unregister("SDL_DestroyRenderer", KIND_RENDERER, renderer);
-	if (g_renderer == renderer)
-		g_renderer = NULL;
-	SDL_DestroyRenderer(renderer);
+	(void)renderer;
+	fprintf(stderr, "sword3-sdl: DestroyRenderer -> exit\n");
+	_exit(0);
 }
 
 int sword3_SDL_RenderSetLogicalSize(SDL_Renderer *renderer, int w, int h)
@@ -1222,7 +1053,8 @@ int sword3_SDL_RenderCopy(SDL_Renderer *renderer, SDL_Texture *texture,
 			  const SDL_Rect *srcrect, const SDL_Rect *dstrect)
 {
 	owner_check("SDL_RenderCopy", KIND_RENDERER, renderer);
-	owner_check("SDL_RenderCopy", KIND_TEXTURE, texture);
+	if (!owner_live("SDL_RenderCopy", KIND_TEXTURE, texture))
+		return -1;
 	return SDL_RenderCopy(renderer, texture, srcrect, dstrect);
 }
 
@@ -1233,7 +1065,8 @@ int sword3_SDL_RenderCopyF(SDL_Renderer *renderer, SDL_Texture *texture,
 	int result;
 
 	owner_check("SDL_RenderCopyF", KIND_RENDERER, renderer);
-	owner_check("SDL_RenderCopyF", KIND_TEXTURE, texture);
+	if (!owner_live("SDL_RenderCopyF", KIND_TEXTURE, texture))
+		return -1;
 	result = SDL_RenderCopyF(renderer, texture, srcrect, dstrect);
 	if (seen < 12 || result != 0) {
 		if (seen < 12)
@@ -1256,7 +1089,8 @@ int sword3_SDL_RenderCopyEx(SDL_Renderer *renderer, SDL_Texture *texture,
 			    const SDL_RendererFlip flip)
 {
 	owner_check("SDL_RenderCopyEx", KIND_RENDERER, renderer);
-	owner_check("SDL_RenderCopyEx", KIND_TEXTURE, texture);
+	if (!owner_live("SDL_RenderCopyEx", KIND_TEXTURE, texture))
+		return -1;
 	return SDL_RenderCopyEx(renderer, texture, srcrect, dstrect, angle,
 				center, flip);
 }
@@ -1270,7 +1104,8 @@ int sword3_SDL_RenderCopyExF(SDL_Renderer *renderer, SDL_Texture *texture,
 	int result;
 
 	owner_check("SDL_RenderCopyExF", KIND_RENDERER, renderer);
-	owner_check("SDL_RenderCopyExF", KIND_TEXTURE, texture);
+	if (!owner_live("SDL_RenderCopyExF", KIND_TEXTURE, texture))
+		return -1;
 	result = SDL_RenderCopyExF(renderer, texture, srcrect, dstrect, angle,
 				   center, flip);
 	if (seen < 8 || result != 0) {
@@ -1291,23 +1126,16 @@ int sword3_SDL_RenderCopyExF(SDL_Renderer *renderer, SDL_Texture *texture,
 void sword3_SDL_RenderPresent(SDL_Renderer *renderer)
 {
 	static unsigned seen;
-	SDL_Rect arm_h;
-	SDL_Rect arm_v;
-	Uint8 r;
-	Uint8 g;
-	Uint8 b;
-	Uint8 a;
+	int x, y;
+	Uint8 r, g, b, a;
 	SDL_BlendMode blend;
-	int x;
-	int y;
+	SDL_Rect arm_h, arm_v;
 
 	owner_check("SDL_RenderPresent", KIND_RENDERER, renderer);
-	ensure_gamecontroller();
 	apply_pad_pointer();
 	seen++;
 	if (seen <= 8 || (seen % 120) == 0)
 		fprintf(stderr, "sword3-sdl: RenderPresent #%u\n", seen);
-	maybe_combo_exit();
 	if (g_pointer_ui && g_cursor_ready && g_logical_w > 0 &&
 	    SDL_GetRenderTarget(renderer) == NULL) {
 		x = (int)g_cursor_x;
@@ -1360,7 +1188,8 @@ int sword3_SDL_RenderFillRectsF(SDL_Renderer *renderer, const SDL_FRect *rects,
 int sword3_SDL_SetRenderTarget(SDL_Renderer *renderer, SDL_Texture *texture)
 {
 	owner_check("SDL_SetRenderTarget", KIND_RENDERER, renderer);
-	owner_check("SDL_SetRenderTarget", KIND_TEXTURE, texture);
+	if (!owner_live("SDL_SetRenderTarget", KIND_TEXTURE, texture))
+		return -1;
 	return SDL_SetRenderTarget(renderer, texture);
 }
 
@@ -1385,11 +1214,17 @@ SDL_Texture *sword3_SDL_CreateTexture(SDL_Renderer *renderer, Uint32 format,
 	owner_check("SDL_CreateTexture", KIND_RENDERER, renderer);
 	texture = SDL_CreateTexture(renderer, format, access, w, h);
 	owner_register(KIND_TEXTURE, texture);
+	fprintf(stderr,
+		"sword3-sdl: CreateTexture %ux%u format=0x%x access=%d -> %p%s%s\n",
+		(unsigned)w, (unsigned)h, format, access, texture,
+		texture ? "" : " ", texture ? "" : SDL_GetError());
 	return texture;
 }
 
 void sword3_SDL_DestroyTexture(SDL_Texture *texture)
 {
+	if (!owner_live("SDL_DestroyTexture", KIND_TEXTURE, texture))
+		return;
 	owner_unregister("SDL_DestroyTexture", KIND_TEXTURE, texture);
 	SDL_DestroyTexture(texture);
 }
@@ -1402,38 +1237,92 @@ SDL_Texture *sword3_SDL_CreateTextureFromSurface(SDL_Renderer *renderer,
 	owner_check("SDL_CreateTextureFromSurface", KIND_RENDERER, renderer);
 	owner_check("SDL_CreateTextureFromSurface", KIND_SURFACE, surface);
 	texture = SDL_CreateTextureFromSurface(renderer, surface);
+	owner_register(KIND_TEXTURE, texture);
 	fprintf(stderr,
 		"sword3-sdl: CreateTextureFromSurface %dx%d -> %p%s%s\n",
 		surface ? surface->w : 0, surface ? surface->h : 0, texture,
 		texture ? "" : " ", texture ? "" : SDL_GetError());
-	owner_register(KIND_TEXTURE, texture);
 	return texture;
 }
 
 int sword3_SDL_UpdateTexture(SDL_Texture *texture, const SDL_Rect *rect,
 			     const void *pixels, int pitch)
 {
-	owner_check("SDL_UpdateTexture", KIND_TEXTURE, texture);
-	return SDL_UpdateTexture(texture, rect, pixels, pitch);
+	static unsigned seen;
+	int result;
+	int tw = 0;
+	int th = 0;
+	unsigned sample = 0;
+	int i;
+
+	if (!owner_live("SDL_UpdateTexture", KIND_TEXTURE, texture))
+		return -1;
+	result = SDL_UpdateTexture(texture, rect, pixels, pitch);
+	SDL_QueryTexture(texture, NULL, NULL, &tw, &th);
+	if (pixels && pitch >= 4) {
+		const Uint8 *row = pixels;
+
+		for (i = 0; i < 16 && i * 4 < pitch; i++)
+			sample |= row[i * 4] | row[i * 4 + 1] |
+				  row[i * 4 + 2] | row[i * 4 + 3];
+	}
+	if (seen < 8 || result != 0) {
+		seen++;
+		fprintf(stderr,
+			"sword3-sdl: UpdateTexture tex=%p %ux%u %s%dx%d pitch=%d sample=0x%x -> %d%s%s\n",
+			texture, (unsigned)tw, (unsigned)th, rect ? "" : "full ",
+			rect ? rect->w : 0, rect ? rect->h : 0, pitch, sample,
+			result, result == 0 ? "" : " ",
+			result == 0 ? "" : SDL_GetError());
+	}
+	return result;
 }
 
 int sword3_SDL_SetTextureBlendMode(SDL_Texture *texture,
 				   SDL_BlendMode blendMode)
 {
-	owner_check("SDL_SetTextureBlendMode", KIND_TEXTURE, texture);
+	if (!owner_live("SDL_SetTextureBlendMode", KIND_TEXTURE, texture))
+		return -1;
 	return SDL_SetTextureBlendMode(texture, blendMode);
 }
 
 int sword3_SDL_LockTexture(SDL_Texture *texture, const SDL_Rect *rect,
 			   void **pixels, int *pitch)
 {
-	owner_check("SDL_LockTexture", KIND_TEXTURE, texture);
-	return SDL_LockTexture(texture, rect, pixels, pitch);
+	static unsigned seen;
+	int result;
+	int tw = 0;
+	int th = 0;
+
+	if (!owner_live("SDL_LockTexture", KIND_TEXTURE, texture))
+		return -1;
+	result = SDL_LockTexture(texture, rect, pixels, pitch);
+	if (seen < 8 || result != 0) {
+		seen++;
+		SDL_QueryTexture(texture, NULL, NULL, &tw, &th);
+		fprintf(stderr,
+			"sword3-sdl: LockTexture tex=%p %ux%u -> %d%s%s\n",
+			texture, (unsigned)tw, (unsigned)th, result,
+			result == 0 ? "" : " ",
+			result == 0 ? "" : SDL_GetError());
+	}
+	return result;
 }
 
 void sword3_SDL_UnlockTexture(SDL_Texture *texture)
 {
-	owner_check("SDL_UnlockTexture", KIND_TEXTURE, texture);
+	static unsigned seen;
+	int tw = 0;
+	int th = 0;
+
+	if (!owner_live("SDL_UnlockTexture", KIND_TEXTURE, texture))
+		return;
+	if (seen < 8) {
+		seen++;
+		SDL_QueryTexture(texture, NULL, NULL, &tw, &th);
+		fprintf(stderr, "sword3-sdl: UnlockTexture tex=%p %ux%u\n",
+			texture, (unsigned)tw, (unsigned)th);
+	}
 	SDL_UnlockTexture(texture);
 }
 
@@ -1657,33 +1546,70 @@ int sword3_SDL_PeepEvents(SDL_Event *events, int numevents,
 {
 	int n;
 	int i;
+	int kept;
 
-	ensure_gamecontroller();
 	if (action != SDL_ADDEVENT)
 		apply_pad_pointer();
 	n = SDL_PeepEvents(events, numevents, action, minType, maxType);
 	if (action == SDL_ADDEVENT || n <= 0 || !events)
 		return n;
-	for (i = 0; i < n; i++)
-		rewrite_event(&events[i]);
-	return n;
+	kept = 0;
+	for (i = 0; i < n; i++) {
+		if (!rewrite_event(&events[i]))
+			continue;
+		if (kept != i)
+			events[kept] = events[i];
+		kept++;
+	}
+	return kept;
 }
 
 void sword3_SDL_PumpEvents(void)
 {
-	ensure_gamecontroller();
 	SDL_PumpEvents();
+	tick_ios_display_links();
+	pal2_kick_tick();
+	pal2_kick_present();
 	apply_pad_pointer();
 }
 
 int sword3_SDL_PollEvent(SDL_Event *event)
 {
-	return next_translated_event(event, 0);
+	static unsigned seen;
+	static unsigned empty;
+	int result = next_translated_event(event, 0);
+
+	if (seen < 8) {
+		seen++;
+		fprintf(stderr, "sword3-sdl: PollEvent -> %d type=%u\n", result,
+			event && result ? event->type : 0u);
+	} else if (result == 0 && empty < 4) {
+		empty++;
+		fprintf(stderr, "sword3-sdl: PollEvent empty #%u\n", empty);
+	}
+	return result;
 }
 
 int sword3_SDL_WaitEventTimeout(SDL_Event *event, int timeout)
 {
 	return next_translated_event(event, timeout);
+}
+
+const Uint8 *sword3_SDL_GetKeyboardState(int *numkeys)
+{
+	static unsigned seen;
+	const Uint8 *state = SDL_GetKeyboardState(numkeys);
+
+	if (seen < 3) {
+		seen++;
+		fprintf(stderr,
+			"sword3-sdl: GetKeyboardState arrows U%d D%d L%d R%d\n",
+			state ? state[SDL_SCANCODE_UP] : 0,
+			state ? state[SDL_SCANCODE_DOWN] : 0,
+			state ? state[SDL_SCANCODE_LEFT] : 0,
+			state ? state[SDL_SCANCODE_RIGHT] : 0);
+	}
+	return state;
 }
 
 SDL_AudioDeviceID sword3_SDL_OpenAudioDevice(const char *device, int iscapture,
@@ -1696,4 +1622,104 @@ SDL_AudioDeviceID sword3_SDL_OpenAudioDevice(const char *device, int iscapture,
 	fprintf(stderr, "sword3-sdl: OpenAudioDevice -> %u%s%s\n", id,
 		id ? "" : " ", id ? "" : SDL_GetError());
 	return id;
+}
+
+static Sword3AudioBridge *g_av_audio_bridge;
+static Sword3AudioHandle *g_av_audio_handle;
+
+static int ensure_host_mixer(void)
+{
+	Sword3AudioConfig cfg;
+	int mix_flags = MIX_INIT_OGG | MIX_INIT_MP3 | MIX_INIT_FLAC;
+
+	if (g_av_audio_bridge)
+		return 1;
+	if (SDL_WasInit(SDL_INIT_AUDIO) == 0 &&
+	    SDL_InitSubSystem(SDL_INIT_AUDIO) != 0) {
+		fprintf(stderr, "sword3-sdl: SDL_INIT_AUDIO failed (%s)\n",
+			SDL_GetError());
+		return 0;
+	}
+	(void)Mix_Init(mix_flags);
+	if (Mix_QuerySpec(NULL, NULL, NULL)) {
+		cfg = (Sword3AudioConfig){ SWORD3_AUDIO_ATTACH, 44100,
+					   MIX_DEFAULT_FORMAT, 2, 2048,
+					   mix_flags };
+	} else {
+		cfg = (Sword3AudioConfig){ SWORD3_AUDIO_OPEN_AND_OWN, 44100,
+					   MIX_DEFAULT_FORMAT, 2, 2048,
+					   mix_flags };
+		if (Mix_OpenAudioDevice(44100, MIX_DEFAULT_FORMAT, 2, 2048, NULL,
+					SDL_AUDIO_ALLOW_FREQUENCY_CHANGE |
+					SDL_AUDIO_ALLOW_CHANNELS_CHANGE) == 0) {
+			Mix_AllocateChannels(16);
+			cfg.ownership = SWORD3_AUDIO_ATTACH;
+			fprintf(stderr,
+				"sword3-sdl: host Mix_OpenAudioDevice ok\n");
+		}
+	}
+	g_av_audio_bridge = sword3_audio_bridge_open(&cfg);
+	if (!g_av_audio_bridge) {
+		fprintf(stderr, "sword3-sdl: audio bridge open failed (%s)\n",
+			SDL_GetError());
+		return 0;
+	}
+	Mix_Volume(-1, MIX_MAX_VOLUME);
+	Mix_VolumeMusic(MIX_MAX_VOLUME);
+	return 1;
+}
+
+__attribute__((visibility("default")))
+int sword3_host_play_memory_audio(const void *data, size_t size, int loops)
+{
+	static unsigned seen;
+
+	if (!data || size == 0)
+		return -1;
+	if (!ensure_host_mixer())
+		return -1;
+	if (g_av_audio_handle) {
+		sword3_audio_stop(g_av_audio_handle);
+		sword3_audio_close(g_av_audio_handle);
+		g_av_audio_handle = NULL;
+	}
+	g_av_audio_handle = sword3_audio_open_memory(g_av_audio_bridge,
+						     SWORD3_AUDIO_MUSIC, data,
+						     size);
+	if (!g_av_audio_handle)
+		g_av_audio_handle = sword3_audio_open_memory(
+			g_av_audio_bridge, SWORD3_AUDIO_EFFECT, data, size);
+	if (!g_av_audio_handle) {
+		fprintf(stderr,
+			"sword3-sdl: load audio %zu bytes mag=%02x%02x%02x%02x failed (%s)\n",
+			size,
+			size > 0 ? ((const unsigned char *)data)[0] : 0,
+			size > 1 ? ((const unsigned char *)data)[1] : 0,
+			size > 2 ? ((const unsigned char *)data)[2] : 0,
+			size > 3 ? ((const unsigned char *)data)[3] : 0,
+			SDL_GetError());
+		return -1;
+	}
+	sword3_audio_set_volume(g_av_audio_handle, MIX_MAX_VOLUME);
+	if (seen < 12) {
+		seen++;
+		fprintf(stderr,
+			"sword3-sdl: play audio %zu bytes loops=%d mag=%02x%02x%02x%02x\n",
+			size, loops,
+			((const unsigned char *)data)[0],
+			size > 1 ? ((const unsigned char *)data)[1] : 0,
+			size > 2 ? ((const unsigned char *)data)[2] : 0,
+			size > 3 ? ((const unsigned char *)data)[3] : 0);
+	}
+	return sword3_audio_play(g_av_audio_handle, loops);
+}
+
+__attribute__((visibility("default")))
+void sword3_host_stop_memory_audio(void)
+{
+	if (!g_av_audio_handle)
+		return;
+	sword3_audio_stop(g_av_audio_handle);
+	sword3_audio_close(g_av_audio_handle);
+	g_av_audio_handle = NULL;
 }
