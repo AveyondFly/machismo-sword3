@@ -12,6 +12,7 @@ struct Sword3AudioHandle {
 		Mix_Chunk *chunk;
 		Mix_Music *music;
 	} media;
+	void *memory_owner;
 	int volume;
 	struct Sword3AudioHandle *next;
 };
@@ -204,17 +205,20 @@ Sword3AudioHandle *sword3_audio_open_memory(Sword3AudioBridge *bridge,
 		handle->media.chunk = Mix_LoadWAV_RW(rw, 1);
 	else
 		handle->media.music = Mix_LoadMUS_RW(rw, 1);
-	/*
-	 * With freesrc=1 SDL_mixer closes the RWops before returning and has
-	 * already copied everything it needs, so its backing memory ends here.
-	 */
-	free(memory_copy);
 	if ((kind == SWORD3_AUDIO_EFFECT && !handle->media.chunk) ||
 	    (kind == SWORD3_AUDIO_MUSIC && !handle->media.music)) {
 		SDL_UnlockMutex(bridge->mutex);
+		free(memory_copy);
 		free(handle);
 		return NULL;
 	}
+	/*
+	 * MP3/OGG music streams from the RWops during Mix_PlayMusic. The
+	 * RWops wrapper is owned by SDL_mixer (freesrc=1), but it still
+	 * points at this copy. Freeing it here plays silence (and the iOS
+	 * malloc shim zeros recycled pages).
+	 */
+	handle->memory_owner = memory_copy;
 	link_handle_locked(handle);
 	SDL_UnlockMutex(bridge->mutex);
 	return handle;
@@ -303,6 +307,7 @@ static void free_handle_locked(Sword3AudioHandle *handle)
 		Mix_FreeChunk(handle->media.chunk);
 	else
 		Mix_FreeMusic(handle->media.music);
+	free(handle->memory_owner);
 	free(handle);
 }
 

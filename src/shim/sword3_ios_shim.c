@@ -2013,6 +2013,19 @@ static int copy_nsdata_bytes(sword3_objc_id object, void **out, size_t *out_len)
 
     if (!object || !out || !out_len)
         return -1;
+    {
+        const struct proxy_data *data = object;
+
+        if (data->isa == &proxy_data_class && data->bytes && data->length) {
+            copy = malloc(data->length);
+            if (!copy)
+                return -1;
+            memcpy(copy, data->bytes, data->length);
+            *out = copy;
+            *out_len = data->length;
+            return 0;
+        }
+    }
     if (!resolved) {
         resolved = 1;
         msgsend = (sword3_objc_id (*)(sword3_objc_id, sword3_objc_sel, ...))
@@ -2537,7 +2550,9 @@ static const char *path_from_object(sword3_objc_id object)
         path = url->path ? url->path : "";
     else
         path = object_cstring(object);
-    if (!strncmp(path, "file://", 7))
+    if (!strncmp(path, "file://localhost", 16))
+        path += 16;
+    else if (!strncmp(path, "file://", 7))
         path += 7;
     return path;
 }
@@ -2829,6 +2844,87 @@ static int read_file_bytes(const char *path, void **out, size_t *out_len)
     *out = copy;
     *out_len = (size_t)size;
     return 0;
+}
+
+static int join_path3(char *buf, size_t cap, const char *a, const char *b,
+                      const char *c)
+{
+    int n;
+
+    if (!buf || !a || !a[0] || !b)
+        return -1;
+    if (c)
+        n = snprintf(buf, cap, "%s/%s/%s", a, b, c);
+    else
+        n = snprintf(buf, cap, "%s/%s", a, b);
+    return (n > 0 && (size_t)n < cap) ? 0 : -1;
+}
+
+static int read_file_bytes_resolved(const char *path, void **out, size_t *out_len)
+{
+    char buf[PATH_MAX];
+    const char *bundle;
+    const char *base;
+
+    if (path && path[0] && read_file_bytes(path, out, out_len) == 0)
+        return 0;
+    bundle = getenv("SWORD3_BUNDLE_DIR");
+    if (!bundle || bundle[0] != '/' || !path || !path[0])
+        return -1;
+    if (path[0] != '/' &&
+        join_path3(buf, sizeof(buf), bundle, path, NULL) == 0 &&
+        read_file_bytes(buf, out, out_len) == 0)
+        return 0;
+    base = strrchr(path, '/');
+    base = base ? base + 1 : path;
+    if (base[0] &&
+        join_path3(buf, sizeof(buf), bundle, "MusicFile", base) == 0 &&
+        read_file_bytes(buf, out, out_len) == 0)
+        return 0;
+    return -1;
+}
+
+static sword3_objc_id proxy_data_init_url(struct proxy_data *self,
+                                          sword3_objc_sel selector,
+                                          sword3_objc_id url,
+                                          uintptr_t options,
+                                          sword3_objc_id *error)
+{
+    static unsigned seen;
+    void *bytes = NULL;
+    size_t length = 0;
+    const char *path = path_from_object(url);
+    (void)selector;
+    (void)options;
+
+    if (error)
+        *error = NULL;
+    if (read_file_bytes_resolved(path, &bytes, &length) != 0) {
+        if (seen < 16) {
+            seen++;
+            fprintf(stderr,
+                    "sword3-ios-shim: NSData initWithContentsOfURL:%s failed\n",
+                    path && path[0] ? path : "(empty)");
+        }
+        return NULL;
+    }
+    if (seen < 16) {
+        seen++;
+        fprintf(stderr,
+                "sword3-ios-shim: NSData initWithContentsOfURL:%s bytes=%zu mag=%02x%02x%02x%02x\n",
+                path && path[0] ? path : "(empty)", length,
+                length > 0 ? ((unsigned char *)bytes)[0] : 0,
+                length > 1 ? ((unsigned char *)bytes)[1] : 0,
+                length > 2 ? ((unsigned char *)bytes)[2] : 0,
+                length > 3 ? ((unsigned char *)bytes)[3] : 0);
+    }
+    if (!self)
+        return make_proxy_data(bytes, length);
+    free(self->bytes);
+    self->isa = &proxy_data_class;
+    self->bytes = bytes;
+    self->length = length;
+    return self;
 }
 
 static sword3_objc_id proxy_file_manager_contents_at_path(
@@ -3174,10 +3270,12 @@ static const struct proxy_method_list proxy_number_class_methods = {
 
 static const struct proxy_method_list proxy_data_methods = {
     .entsize_and_flags = sizeof(struct sword3_objc_method),
-    .count = 2,
+    .count = 3,
     .methods = {
         {"bytes", "^v16@0:8", (sword3_objc_imp)proxy_data_bytes},
         {"length", "Q16@0:8", (sword3_objc_imp)proxy_data_length},
+        {"initWithContentsOfURL:options:error:", "@40@0:8@16Q24^@32",
+         (sword3_objc_imp)proxy_data_init_url},
     },
 };
 
@@ -4546,5 +4644,23 @@ int sword3_test_keep_save_path(const char *path)
 int sword3_test_remove_path(const char *path)
 {
     return proxy_remove_cpath(path);
+}
+
+int sword3_test_nsdata_url_bytes(const char *path, unsigned char *out,
+                                uint32_t cap)
+{
+    sword3_objc_id url;
+    struct proxy_data *data;
+
+    if (!path || !out || cap == 0)
+        return -1;
+    url = proxy_url_from_cstring(path);
+    data = proxy_data_init_url(NULL, NULL, url, 1, NULL);
+    if (!data || !data->bytes)
+        return -1;
+    if (data->length > cap)
+        return -1;
+    memcpy(out, data->bytes, data->length);
+    return (int)data->length;
 }
 #endif

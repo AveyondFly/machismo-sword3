@@ -252,6 +252,42 @@ class Sword3IosShimTest(unittest.TestCase):
         self.assertTrue(save.is_file())
         self.assertFalse(junk.exists())
 
+    def test_nsdata_loads_url_bytes_from_file_and_bundle(self) -> None:
+        bundle = Path(self.temporary_directory.name) / "bundle"
+        music = bundle / "MusicFile"
+        music.mkdir(parents=True)
+        payload = b"OggS\x00pal2-audio-test"
+        direct = Path(self.temporary_directory.name) / "direct.mp3"
+        planted = music / "Empty.mp3"
+        direct.write_bytes(payload)
+        planted.write_bytes(payload)
+        os.environ["SWORD3_BUNDLE_DIR"] = str(bundle)
+        self.addCleanup(os.environ.pop, "SWORD3_BUNDLE_DIR", None)
+
+        library = ctypes.CDLL(str(self.shared_object))
+        library.sword3_test_nsdata_url_bytes.argtypes = [
+            ctypes.c_char_p,
+            ctypes.c_char_p,
+            ctypes.c_uint32,
+        ]
+        library.sword3_test_nsdata_url_bytes.restype = ctypes.c_int
+        buf = ctypes.create_string_buffer(64)
+        self.assertEqual(
+            library.sword3_test_nsdata_url_bytes(str(direct).encode(), buf, 64),
+            len(payload),
+        )
+        self.assertEqual(buf.raw[: len(payload)], payload)
+        self.assertEqual(
+            library.sword3_test_nsdata_url_bytes(b"file://" + str(direct).encode(), buf, 64),
+            len(payload),
+        )
+        self.assertEqual(buf.raw[: len(payload)], payload)
+        self.assertEqual(
+            library.sword3_test_nsdata_url_bytes(b"Empty.mp3", buf, 64),
+            len(payload),
+        )
+        self.assertEqual(buf.raw[: len(payload)], payload)
+
     def test_function_wrapper_logs_and_aborts(self) -> None:
         script = (
             "import ctypes, resource;"

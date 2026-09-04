@@ -313,6 +313,38 @@
       "group": "audio"
     },
     {
+      "symbol": "SDL_PauseAudioDevice",
+      "nth_after": {
+        "after_symbol": "SDL_OpenAudioDevice",
+        "n": 0
+      },
+      "group": "audio"
+    },
+    {
+      "symbol": "SDL_LockAudioDevice",
+      "nth_after": {
+        "after_symbol": "SDL_OpenAudioDevice",
+        "n": 2
+      },
+      "group": "audio"
+    },
+    {
+      "symbol": "SDL_UnlockAudioDevice",
+      "nth_after": {
+        "after_symbol": "SDL_OpenAudioDevice",
+        "n": 3
+      },
+      "group": "audio"
+    },
+    {
+      "symbol": "SDL_CloseAudioDevice",
+      "nth_after": {
+        "after_symbol": "SDL_OpenAudioDevice",
+        "n": 4
+      },
+      "group": "audio"
+    },
+    {
       "symbol": "IMG_Load",
       "via": {
         "parent_string": "SS2D_LoadIconFile",

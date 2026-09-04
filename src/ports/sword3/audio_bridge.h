@@ -51,8 +51,8 @@ Sword3AudioHandle *sword3_audio_open_memory(Sword3AudioBridge *bridge,
 					   Sword3AudioKind kind,
 					   const void *data, size_t size);
 /*
- * Memory input is copied for the duration of Mix_Load*RW. SDL_mixer receives
- * freesrc=1, closes the RWops before returning, and no caller buffer is kept.
+ * Memory input is copied and kept on the handle until close. Mix_LoadMUS_RW
+ * streams MP3 from that buffer for the whole lifetime of Mix_Music.
  */
 
 /* loops follows SDL_mixer convention: zero plays once, -1 repeats forever. */

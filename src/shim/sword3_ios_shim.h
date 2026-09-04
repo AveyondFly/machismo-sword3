@@ -41,6 +41,9 @@ SWORD3_EXPORT int sword3_test_search_path(uintptr_t directory, char *out,
                                          uint32_t cap);
 SWORD3_EXPORT int sword3_test_keep_save_path(const char *path);
 SWORD3_EXPORT int sword3_test_remove_path(const char *path);
+SWORD3_EXPORT int sword3_test_nsdata_url_bytes(const char *path,
+                                              unsigned char *out,
+                                              uint32_t cap);
 #endif
 
 #ifdef __cplusplus
