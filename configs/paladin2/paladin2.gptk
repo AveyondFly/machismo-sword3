@@ -1,11 +1,13 @@
 # Paladin 2: gptokeyb owns the pad and emits a real uinput keyboard.
-# SDL reports Xbox positions. This handheld is Nintendo-layout:
-# physical A is East (SDL B), physical B is South (SDL A).
+# ROCKNIX retrogame_joypad db is Nintendo-labelled: a:b1 (east / physical A),
+# b:b0 (south / physical B). gptokeyb "a" is therefore the face button named A.
+# Pal2 binds Return to OK+Menu; that Menu bit toggles 系统/设置, so A-as-Enter
+# opens a menu then backs out of it. Space is OK only.
 # SELECT+START still kills machismo via gptokeyb -k.
 back = esc
 start = space
-a = esc
-b = enter
+a = space
+b = esc
 x = x
 y = y
 l1 = q
