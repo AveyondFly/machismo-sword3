@@ -2134,6 +2134,67 @@ static void host_stop_bytes(void)
         stop();
 }
 
+static void host_pause_bytes(void)
+{
+    static void (*fn)(void);
+    static int resolved;
+
+    if (!resolved) {
+        resolved = 1;
+        fn = (void (*)(void))dlsym(RTLD_DEFAULT, "sword3_host_pause_memory_audio");
+    }
+    if (fn)
+        fn();
+}
+
+static void host_resume_bytes(void)
+{
+    static void (*fn)(void);
+    static int resolved;
+
+    if (!resolved) {
+        resolved = 1;
+        fn = (void (*)(void))dlsym(RTLD_DEFAULT, "sword3_host_resume_memory_audio");
+    }
+    if (fn)
+        fn();
+}
+
+static int host_bytes_playing(void)
+{
+    static int (*fn)(void);
+    static int resolved;
+
+    if (!resolved) {
+        resolved = 1;
+        fn = (int (*)(void))dlsym(RTLD_DEFAULT, "sword3_host_memory_audio_playing");
+    }
+    return fn ? fn() : 0;
+}
+
+static void host_set_volume(float volume)
+{
+    static void (*fn)(int);
+    static int resolved;
+    int mix_vol;
+
+    if (!resolved) {
+        resolved = 1;
+        fn = (void (*)(int))dlsym(RTLD_DEFAULT,
+                                  "sword3_host_set_memory_audio_volume");
+    }
+    if (!fn)
+        return;
+    if (volume < 0.0f)
+        volume = 0.0f;
+    if (volume > 1.0f)
+        volume = 1.0f;
+    mix_vol = (int)(volume * 128.0f + 0.5f);
+    if (mix_vol > 128)
+        mix_vol = 128;
+    fn(mix_vol);
+}
+
 static sword3_objc_id proxy_av_audio_init_data(sword3_objc_id self,
                                                 sword3_objc_sel selector,
                                                 sword3_objc_id data,
@@ -2209,25 +2270,38 @@ static void proxy_av_audio_set_volume(sword3_objc_id self,
 {
     (void)self;
     (void)selector;
-    (void)volume;
+    host_set_volume(volume);
 }
 
-static void proxy_av_audio_play(sword3_objc_id self, sword3_objc_sel selector)
+static unsigned proxy_av_audio_play(sword3_objc_id self, sword3_objc_sel selector)
 {
     struct proxy_av_audio_player *player = self;
     int loops;
 
     (void)selector;
     if (!player)
-        return;
+        return 0;
     loops = (int)player->loops;
     fprintf(stderr,
-            "sword3-ios-shim: AVAudioPlayer play self=%p bytes=%zu loops=%d\n",
-            self, player->copy_len, loops);
+            "sword3-ios-shim: AVAudioPlayer play self=%p bytes=%zu loops=%d playing=%d\n",
+            self, player->copy_len, loops, host_bytes_playing());
     if (!player->copy || player->copy_len == 0)
-        return;
-    if (host_play_bytes(player->copy, player->copy_len, loops) == 0)
-        player->playing = 1;
+        return 0;
+    if (!host_bytes_playing()) {
+        host_resume_bytes();
+        if (host_bytes_playing()) {
+            player->playing = 1;
+            return 1;
+        }
+        if (host_play_bytes(player->copy, player->copy_len, loops) == 0) {
+            player->playing = 1;
+            return 1;
+        }
+        player->playing = 0;
+        return 0;
+    }
+    player->playing = 1;
+    return 1;
 }
 
 static void proxy_av_audio_stop(sword3_objc_id self, sword3_objc_sel selector)
@@ -2235,7 +2309,19 @@ static void proxy_av_audio_stop(sword3_objc_id self, sword3_objc_sel selector)
     struct proxy_av_audio_player *player = self;
 
     (void)selector;
+    fprintf(stderr, "sword3-ios-shim: AVAudioPlayer stop self=%p\n", self);
     host_stop_bytes();
+    if (player)
+        player->playing = 0;
+}
+
+static void proxy_av_audio_pause(sword3_objc_id self, sword3_objc_sel selector)
+{
+    struct proxy_av_audio_player *player = self;
+
+    (void)selector;
+    fprintf(stderr, "sword3-ios-shim: AVAudioPlayer pause self=%p\n", self);
+    host_pause_bytes();
     if (player)
         player->playing = 0;
 }
@@ -2254,7 +2340,10 @@ static unsigned proxy_av_audio_is_playing(sword3_objc_id self,
     struct proxy_av_audio_player *player = self;
 
     (void)selector;
-    return player && player->playing;
+    if (!player)
+        return 0;
+    player->playing = host_bytes_playing() != 0;
+    return player->playing;
 }
 
 static unsigned proxy_av_audio_prepare(sword3_objc_id self,
@@ -3638,9 +3727,9 @@ static const struct proxy_method_list proxy_av_audio_player_methods = {
          (sword3_objc_imp)proxy_av_audio_set_loops},
         {"setPan:", "v20@0:8f16", (sword3_objc_imp)proxy_av_audio_set_pan},
         {"setVolume:", "v20@0:8f16", (sword3_objc_imp)proxy_av_audio_set_volume},
-        {"play", "v16@0:8", (sword3_objc_imp)proxy_av_audio_play},
+        {"play", "B16@0:8", (sword3_objc_imp)proxy_av_audio_play},
         {"stop", "v16@0:8", (sword3_objc_imp)proxy_av_audio_stop},
-        {"pause", "v16@0:8", (sword3_objc_imp)proxy_noop},
+        {"pause", "v16@0:8", (sword3_objc_imp)proxy_av_audio_pause},
         {"prepareToPlay", "B16@0:8", (sword3_objc_imp)proxy_av_audio_prepare},
         {"isPlaying", "B16@0:8", (sword3_objc_imp)proxy_av_audio_is_playing},
         {"duration", "d16@0:8", (sword3_objc_imp)proxy_av_audio_duration},

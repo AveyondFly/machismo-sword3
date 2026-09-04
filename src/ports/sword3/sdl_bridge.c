@@ -231,11 +231,7 @@ static void owner_drop(enum sword3_sdl_kind kind, void *pointer)
 #define GUEST_UI_SAVE 2
 #define PAL2_SCREEN 0x10049efc0ull
 #define PAL2_COMPOSITOR 0x10021f1f0ull
-#define PAL2_TICK 0x1000052ecull
 #define PAL2_EVENT_OBJ 0x1004953b0ull
-#define PAL2_SKIP_TICK 0x10046b408ull
-#define PAL2_RUNNING 0x10028b9a4ull
-#define PAL2_MOVIE_PLAYING 0x100489658ull
 #define PAL2_MOVIE_STATUS 0x100542c50ull
 
 static SDL_Window *g_window;
@@ -543,22 +539,20 @@ static void tick_ios_display_links(void)
 }
 
 /*
- * Pal2's desktop-style SDLThread_Loop only presents from the idle path
- * (0x1001ef694 -> 0x10021f1f0). iOS SDL normally drives that compositor from
- * CADisplayLink. CreateWindow is hooked, so the display-link never starts;
- * kick the same guest compositor from the host pump instead.
+ * Pal2's SDLThread_Loop ticks (0x1000052ec) then presents from the idle
+ * path (0x1001ef694 -> 0x10021f1f0). iOS SDL normally also drives that
+ * compositor from CADisplayLink; CreateWindow is hooked so the link never
+ * starts.
+ *
+ * Do not call the game tick from the host pump: the loop already runs it
+ * once after draining PollEvent, and a second tick while a key is held
+ * makes save-slot UIs advance twice per tap.
+ *
+ * Do not present from the host while the idle path is running either.
+ * Present-without-tick shows the previous frame, then the loop ticks and
+ * presents the new one — that alternation is the flicker. Host-present
+ * only when event flag bit 5 (0x20) skips idle present (splash / movie).
  */
-static void pal2_log_tick_state(const char *when)
-{
-	volatile uint32_t *flags =
-		(volatile uint32_t *)(uintptr_t)PAL2_EVENT_OBJ;
-
-	fprintf(stderr,
-		"sword3-sdl: Pal2 tick %s flags=0x%x skip=%u run=%u pause=%u\n",
-		when, *flags, *(volatile uint8_t *)(uintptr_t)PAL2_SKIP_TICK,
-		*(volatile uint8_t *)(uintptr_t)PAL2_RUNNING,
-		*(volatile uint32_t *)(uintptr_t)(PAL2_EVENT_OBJ + 4));
-}
 
 /*
  * Pal2's splash (SS_DOMO) sets event flag bit 5 (0x20) and a non-zero pause
@@ -606,35 +600,12 @@ static void pal2_force_advance_splash(void)
 	attempts = 0;
 }
 
-static void pal2_kick_tick(void)
+static int pal2_idle_present_skipped(void)
 {
-	static int reentrant;
-	static unsigned seen;
-	static Uint32 last;
-	static SDL_Event dummy;
-	Uint32 now;
-	void (*tick)(SDL_Event *);
+	volatile uint8_t *flags =
+		(volatile uint8_t *)(uintptr_t)PAL2_EVENT_OBJ;
 
-	if (reentrant || !g_renderer)
-		return;
-	now = SDL_GetTicks();
-	if (last != 0 && now - last < 16)
-		return;
-	last = now;
-	reentrant = 1;
-	dummy.type = 0;
-	tick = (void (*)(SDL_Event *))(uintptr_t)PAL2_TICK;
-	if (seen < 4) {
-		seen++;
-		pal2_log_tick_state("before");
-		fprintf(stderr, "sword3-sdl: Pal2 tick kick #%u\n", seen);
-		tick(&dummy);
-		pal2_log_tick_state("after");
-	} else {
-		tick(&dummy);
-	}
-	pal2_force_advance_splash();
-	reentrant = 0;
+	return (*flags & 0x20u) != 0;
 }
 
 static void pal2_kick_present(void)
@@ -647,11 +618,26 @@ static void pal2_kick_present(void)
 	static Uint32 last;
 	static int logged_null;
 	static int logged_mismatch;
+	static int logged_idle;
 	Uint32 now;
 	void (*present)(void *);
 
 	if (reentrant || !g_renderer)
 		return;
+	if (!screen[0x160]) {
+		screen[0x160] = 1;
+		fprintf(stderr,
+			"sword3-sdl: Pal2 compositor enable flag was 0; set\n");
+	}
+	pal2_force_advance_splash();
+	if (!pal2_idle_present_skipped()) {
+		if (!logged_idle) {
+			logged_idle = 1;
+			fprintf(stderr,
+				"sword3-sdl: Pal2 idle present owns the compositor\n");
+		}
+		return;
+	}
 	now = SDL_GetTicks();
 	if (last != 0 && now - last < 16)
 		return;
@@ -674,11 +660,6 @@ static void pal2_kick_present(void)
 				renderer, g_renderer);
 		}
 		return;
-	}
-	if (!screen[0x160]) {
-		screen[0x160] = 1;
-		fprintf(stderr,
-			"sword3-sdl: Pal2 compositor enable flag was 0; set\n");
 	}
 	pal2_log_viewport();
 	reentrant = 1;
@@ -713,6 +694,10 @@ static int rewrite_event(SDL_Event *event)
 	scale_pointer_event(event);
 	if (is_guest_pad_event(event->type) || event->type == SDL_MOUSEMOTION)
 		return 0;
+	/* iOS SDL does not auto-repeat keys; Linux does. Save/list UIs
+	 * treat each KEYDOWN as one step, so drop host repeats. */
+	if (event->type == SDL_KEYDOWN && event->key.repeat)
+		return 0;
 	if (event->type == SDL_MOUSEBUTTONDOWN ||
 	    event->type == SDL_MOUSEBUTTONUP) {
 		if (event->button.which != HOST_MOUSE_WHICH) {
@@ -745,7 +730,6 @@ static int next_translated_event(SDL_Event *event, int timeout)
 
 	for (;;) {
 		tick_ios_display_links();
-		pal2_kick_tick();
 		pal2_kick_present();
 		apply_pad_pointer();
 		if (timeout == 0)
@@ -1568,7 +1552,6 @@ void sword3_SDL_PumpEvents(void)
 {
 	SDL_PumpEvents();
 	tick_ios_display_links();
-	pal2_kick_tick();
 	pal2_kick_present();
 	apply_pad_pointer();
 }
@@ -1771,10 +1754,12 @@ int sword3_host_play_memory_audio(const void *data, size_t size, int loops)
 	}
 	sword3_audio_set_volume(g_av_audio_handle, MIX_MAX_VOLUME);
 	/*
-	 * SDL_OpenAudioDevice starts paused. Guest Mix_PauseAudioDevice only
-	 * reaches the host when that symbol is hooked; unpause the first few
-	 * device ids so title BGM is not stuck silent either way.
+	 * Pal2 always calls setNumberOfLoops:0 (AVAudioPlayer: play once).
+	 * Field BGM is supposed to keep going across the system menu; Mix
+	 * treats 0 as "play once", so the save screen outlives the track.
 	 */
+	if (loops <= 0)
+		loops = -1;
 	{
 		SDL_AudioDeviceID dev;
 
@@ -1809,4 +1794,41 @@ void sword3_host_stop_memory_audio(void)
 	sword3_audio_stop(g_av_audio_handle);
 	sword3_audio_close(g_av_audio_handle);
 	g_av_audio_handle = NULL;
+}
+
+__attribute__((visibility("default")))
+void sword3_host_pause_memory_audio(void)
+{
+	Mix_PauseMusic();
+	fprintf(stderr, "sword3-sdl: pause music playing=%d paused=%d\n",
+		Mix_PlayingMusic(), Mix_PausedMusic());
+}
+
+__attribute__((visibility("default")))
+void sword3_host_resume_memory_audio(void)
+{
+	SDL_AudioDeviceID dev;
+
+	for (dev = 1; dev <= 4; dev++)
+		SDL_PauseAudioDevice(dev, 0);
+	Mix_ResumeMusic();
+	fprintf(stderr, "sword3-sdl: resume music playing=%d paused=%d\n",
+		Mix_PlayingMusic(), Mix_PausedMusic());
+}
+
+__attribute__((visibility("default")))
+int sword3_host_memory_audio_playing(void)
+{
+	return Mix_PlayingMusic() && !Mix_PausedMusic();
+}
+
+__attribute__((visibility("default")))
+void sword3_host_set_memory_audio_volume(int volume)
+{
+	if (volume < 0)
+		volume = 0;
+	if (volume > MIX_MAX_VOLUME)
+		volume = MIX_MAX_VOLUME;
+	Mix_VolumeMusic(volume);
+	Mix_Volume(-1, volume);
 }

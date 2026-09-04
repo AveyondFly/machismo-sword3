@@ -106,6 +106,10 @@ void sword3_SDL_CloseAudioDevice(SDL_AudioDeviceID dev);
 
 int sword3_host_play_memory_audio(const void *data, size_t size, int loops);
 void sword3_host_stop_memory_audio(void);
+void sword3_host_pause_memory_audio(void);
+void sword3_host_resume_memory_audio(void);
+int sword3_host_memory_audio_playing(void);
+void sword3_host_set_memory_audio_volume(int volume);
 
 /* Generic 0-return stub used by Pal2 joystick address hooks. */
 int sword3_ret0(void);
