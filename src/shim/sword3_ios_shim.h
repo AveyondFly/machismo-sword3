@@ -31,6 +31,13 @@ void sword3_unsupported_symbol(const char *symbol_name);
 SWORD3_EXPORT void sword3_ios_tick_display_links(void);
 
 /*
+ * Deliver audioPlayerDidFinishPlaying:successfully: for one proxy player.
+ * Called from the Mix audio thread (channel/music finished), matching iOS.
+ */
+SWORD3_EXPORT void sword3_ios_notify_av_audio_finished(void);
+SWORD3_EXPORT void sword3_ios_notify_av_audio_finished_player(void *player);
+
+/*
  * Deliberately opt-in: production code must not depend on shim test state.
  * Define SWORD3_SHIM_ENABLE_TEST_API while compiling sword3_ios_shim.c to
  * expose the query.

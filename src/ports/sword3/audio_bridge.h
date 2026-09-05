@@ -55,8 +55,13 @@ Sword3AudioHandle *sword3_audio_open_memory(Sword3AudioBridge *bridge,
  * streams MP3 from that buffer for the whole lifetime of Mix_Music.
  */
 
-/* loops follows SDL_mixer convention: zero plays once, -1 repeats forever. */
+/*
+ * loops follows SDL_mixer convention: zero plays once, -1 repeats forever.
+ * EFFECT returns the Mix channel (>=0) or -1; MUSIC returns 0 or -1.
+ */
 int sword3_audio_play(Sword3AudioHandle *handle, int loops);
+/* channel < 0 lets SDL_mixer pick; otherwise play on that Mix channel. */
+int sword3_audio_play_on(Sword3AudioHandle *handle, int channel, int loops);
 void sword3_audio_stop(Sword3AudioHandle *handle);
 /* Volume is clamped to 0..MIX_MAX_VOLUME. */
 int sword3_audio_set_volume(Sword3AudioHandle *handle, int volume);

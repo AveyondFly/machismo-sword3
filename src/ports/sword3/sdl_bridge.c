@@ -6,6 +6,7 @@
 #define RTLD_DEFAULT ((void *)0)
 #endif
 #include <pthread.h>
+#include <stdatomic.h>
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -524,6 +525,80 @@ static void sync_game_pointer(void)
 	}
 }
 
+static _Atomic int g_music_halt;
+
+#define HOST_AV_SLOTS 32
+#define HOST_AV_MUSIC_CH (-2)
+
+/*
+ * One Mix EFFECT channel per AVAudioPlayer (slot index == Mix channel).
+ * Mix MUSIC is fallback when a chunk cannot be opened.
+ */
+struct host_av_slot {
+	Sword3AudioHandle *handle;
+	void *token;
+	int channel; /* slot index, or HOST_AV_MUSIC_CH */
+	_Atomic int stopping;
+};
+
+static struct host_av_slot g_av_slots[HOST_AV_SLOTS];
+static pthread_mutex_t g_av_lock = PTHREAD_MUTEX_INITIALIZER;
+
+static int host_av_slot_index(const struct host_av_slot *slot)
+{
+	return (int)(slot - g_av_slots);
+}
+
+static void host_av_finish_token(void *token)
+{
+	static void (*notify_player)(void *);
+	static int resolved;
+
+	if (!resolved) {
+		resolved = 1;
+		notify_player = (void (*)(void *))dlsym(
+			RTLD_DEFAULT,
+			"sword3_ios_notify_av_audio_finished_player");
+	}
+	if (notify_player && token)
+		notify_player(token);
+}
+
+static void on_host_music_finished(void)
+{
+	struct host_av_slot *slot = NULL;
+	void *token = NULL;
+	Sword3AudioHandle *handle = NULL;
+	int i;
+
+	if (atomic_load(&g_music_halt))
+		return;
+	/*
+	 * MUSIC fallback path (when EFFECT load fails). Find the slot that
+	 * owns Mix music (channel == HOST_AV_MUSIC_CH) and DidFinish it.
+	 */
+	pthread_mutex_lock(&g_av_lock);
+	for (i = 0; i < HOST_AV_SLOTS; i++) {
+		if (g_av_slots[i].handle &&
+		    g_av_slots[i].channel == HOST_AV_MUSIC_CH) {
+			slot = &g_av_slots[i];
+			break;
+		}
+	}
+	if (slot && !atomic_load(&slot->stopping)) {
+		token = slot->token;
+		handle = slot->handle;
+		slot->handle = NULL;
+		slot->token = NULL;
+		slot->channel = host_av_slot_index(slot);
+	}
+	pthread_mutex_unlock(&g_av_lock);
+	if (handle)
+		sword3_audio_close(handle);
+	if (token)
+		host_av_finish_token(token);
+}
+
 static void tick_ios_display_links(void)
 {
 	static void (*tick)(void);
@@ -556,9 +631,8 @@ static void tick_ios_display_links(void)
 
 /*
  * Pal2's splash (SS_DOMO) sets event flag bit 5 (0x20) and a non-zero pause
- * field, then waits for its AVAudioPlayer to finish. The AVAudioPlayer shim
- * now immediately calls audioPlayerDidFinishPlaying:successfully: on play,
- * which should clear the movie state naturally. Keep this as a fallback.
+ * field, then waits for its AVAudioPlayer / AVPlayer to finish. Keep this
+ * as a fallback if a movie status byte never clears.
  */
 static void pal2_force_advance_splash(void)
 {
@@ -1651,12 +1725,41 @@ void sword3_SDL_CloseAudioDevice(SDL_AudioDeviceID dev)
 }
 
 static Sword3AudioBridge *g_av_audio_bridge;
-static Sword3AudioHandle *g_av_audio_handle;
+
+static void on_host_channel_finished(int channel)
+{
+	struct host_av_slot *slot;
+	void *token = NULL;
+	Sword3AudioHandle *handle = NULL;
+
+	if (channel < 0 || channel >= HOST_AV_SLOTS)
+		return;
+	slot = &g_av_slots[channel];
+	pthread_mutex_lock(&g_av_lock);
+	if (!slot->handle || slot->channel != channel) {
+		pthread_mutex_unlock(&g_av_lock);
+		return;
+	}
+	if (atomic_load(&slot->stopping)) {
+		pthread_mutex_unlock(&g_av_lock);
+		return;
+	}
+	token = slot->token;
+	handle = slot->handle;
+	slot->handle = NULL;
+	slot->token = NULL;
+	pthread_mutex_unlock(&g_av_lock);
+	if (handle)
+		sword3_audio_close(handle);
+	if (token)
+		host_av_finish_token(token);
+}
 
 static int ensure_host_mixer(void)
 {
 	Sword3AudioConfig cfg;
 	int mix_flags = MIX_INIT_OGG | MIX_INIT_MP3 | MIX_INIT_FLAC;
+	int i;
 
 	if (g_av_audio_bridge)
 		return 1;
@@ -1687,7 +1790,7 @@ static int ensure_host_mixer(void)
 		if (Mix_OpenAudioDevice(44100, MIX_DEFAULT_FORMAT, 2, 2048, NULL,
 					SDL_AUDIO_ALLOW_FREQUENCY_CHANGE |
 					SDL_AUDIO_ALLOW_CHANNELS_CHANGE) == 0) {
-			Mix_AllocateChannels(16);
+			Mix_AllocateChannels(HOST_AV_SLOTS);
 			cfg.ownership = SWORD3_AUDIO_ATTACH;
 			fprintf(stderr,
 				"sword3-sdl: host Mix_OpenAudioDevice ok\n");
@@ -1699,32 +1802,117 @@ static int ensure_host_mixer(void)
 			SDL_GetError());
 		return 0;
 	}
+	Mix_AllocateChannels(HOST_AV_SLOTS);
 	Mix_Volume(-1, MIX_MAX_VOLUME);
 	Mix_VolumeMusic(MIX_MAX_VOLUME);
+	Mix_ChannelFinished(on_host_channel_finished);
+	Mix_HookMusicFinished(on_host_music_finished);
+	for (i = 0; i < HOST_AV_SLOTS; i++) {
+		g_av_slots[i].channel = i;
+		g_av_slots[i].handle = NULL;
+		g_av_slots[i].token = NULL;
+		atomic_store(&g_av_slots[i].stopping, 0);
+	}
 	return 1;
 }
 
+static struct host_av_slot *host_av_find_token_locked(void *token)
+{
+	int i;
+
+	if (!token)
+		return NULL;
+	for (i = 0; i < HOST_AV_SLOTS; i++) {
+		if (g_av_slots[i].token == token && g_av_slots[i].handle)
+			return &g_av_slots[i];
+	}
+	return NULL;
+}
+
+static struct host_av_slot *host_av_alloc_locked(void)
+{
+	int i;
+
+	for (i = 0; i < HOST_AV_SLOTS; i++) {
+		if (!g_av_slots[i].handle)
+			return &g_av_slots[i];
+	}
+	return NULL;
+}
+
+static void host_av_stop_slot_locked(struct host_av_slot *slot)
+{
+	Sword3AudioHandle *handle;
+	int was_music;
+	int mix_ch;
+
+	if (!slot || !slot->handle)
+		return;
+	atomic_store(&slot->stopping, 1);
+	handle = slot->handle;
+	was_music = (slot->channel == HOST_AV_MUSIC_CH);
+	mix_ch = host_av_slot_index(slot);
+	slot->handle = NULL;
+	slot->token = NULL;
+	slot->channel = mix_ch;
+	pthread_mutex_unlock(&g_av_lock);
+	if (was_music)
+		atomic_store(&g_music_halt, 1);
+	sword3_audio_stop(handle);
+	sword3_audio_close(handle);
+	if (was_music)
+		atomic_store(&g_music_halt, 0);
+	pthread_mutex_lock(&g_av_lock);
+	atomic_store(&slot->stopping, 0);
+}
+
 __attribute__((visibility("default")))
-int sword3_host_play_memory_audio(const void *data, size_t size, int loops)
+void sword3_host_stop_memory_audio_for(void *token)
+{
+	struct host_av_slot *slot;
+
+	if (!token)
+		return;
+	pthread_mutex_lock(&g_av_lock);
+	slot = host_av_find_token_locked(token);
+	if (!slot) {
+		pthread_mutex_unlock(&g_av_lock);
+		return;
+	}
+	fprintf(stderr, "sword3-sdl: stop Mix ch=%d token=%p\n",
+		slot->channel, token);
+	host_av_stop_slot_locked(slot);
+	pthread_mutex_unlock(&g_av_lock);
+}
+
+__attribute__((visibility("default")))
+int sword3_host_play_memory_audio_for(void *token, const void *data,
+				      size_t size, int loops)
 {
 	static unsigned seen;
+	struct host_av_slot *slot;
+	struct host_av_slot *old;
+	Sword3AudioHandle *handle;
+	Sword3AudioHandle *old_handle = NULL;
+	int old_was_music = 0;
+	int channel;
+	int is_music = 0;
+	int mix_ch;
 
-	if (!data || size == 0)
+	if (!data || size == 0 || !token)
 		return -1;
 	if (!ensure_host_mixer())
 		return -1;
-	if (g_av_audio_handle) {
-		sword3_audio_stop(g_av_audio_handle);
-		sword3_audio_close(g_av_audio_handle);
-		g_av_audio_handle = NULL;
+
+	handle = sword3_audio_open_memory(g_av_audio_bridge, SWORD3_AUDIO_EFFECT,
+					  data, size);
+	if (!handle) {
+		handle = sword3_audio_open_memory(g_av_audio_bridge,
+						  SWORD3_AUDIO_MUSIC, data,
+						  size);
+		is_music = handle != NULL;
 	}
-	g_av_audio_handle = sword3_audio_open_memory(g_av_audio_bridge,
-						     SWORD3_AUDIO_MUSIC, data,
-						     size);
-	if (!g_av_audio_handle)
-		g_av_audio_handle = sword3_audio_open_memory(
-			g_av_audio_bridge, SWORD3_AUDIO_EFFECT, data, size);
-	if (!g_av_audio_handle) {
+	if (!handle) {
 		fprintf(stderr,
 			"sword3-sdl: load audio %zu bytes mag=%02x%02x%02x%02x failed (%s)\n",
 			size,
@@ -1735,73 +1923,179 @@ int sword3_host_play_memory_audio(const void *data, size_t size, int loops)
 			SDL_GetError());
 		return -1;
 	}
-	sword3_audio_set_volume(g_av_audio_handle, MIX_MAX_VOLUME);
-	/*
-	 * Pal2 always calls setNumberOfLoops:0 (AVAudioPlayer: play once).
-	 * Field BGM is supposed to keep going across the system menu; Mix
-	 * treats 0 as "play once", so the save screen outlives the track.
-	 */
-	if (loops <= 0)
+	sword3_audio_set_volume(handle, MIX_MAX_VOLUME);
+	if (loops < 0)
 		loops = -1;
-	if (seen < 12) {
-		int freq = 0, ch = 0, rc;
+
+	pthread_mutex_lock(&g_av_lock);
+	old = host_av_find_token_locked(token);
+	if (old && old->handle) {
+		atomic_store(&old->stopping, 1);
+		old_handle = old->handle;
+		old_was_music = (old->channel == HOST_AV_MUSIC_CH);
+		old->handle = NULL;
+		old->token = NULL;
+		old->channel = host_av_slot_index(old);
+	}
+	slot = host_av_alloc_locked();
+	if (!slot) {
+		pthread_mutex_unlock(&g_av_lock);
+		if (old_handle) {
+			if (old_was_music)
+				atomic_store(&g_music_halt, 1);
+			sword3_audio_stop(old_handle);
+			sword3_audio_close(old_handle);
+			if (old_was_music)
+				atomic_store(&g_music_halt, 0);
+		}
+		sword3_audio_close(handle);
+		fprintf(stderr, "sword3-sdl: no free AVAudioPlayer slot\n");
+		return -1;
+	}
+	mix_ch = host_av_slot_index(slot);
+	slot->handle = handle;
+	slot->token = token;
+	slot->channel = is_music ? HOST_AV_MUSIC_CH : mix_ch;
+	atomic_store(&slot->stopping, 0);
+	pthread_mutex_unlock(&g_av_lock);
+
+	if (old_handle) {
+		if (old_was_music)
+			atomic_store(&g_music_halt, 1);
+		sword3_audio_stop(old_handle);
+		sword3_audio_close(old_handle);
+		if (old_was_music)
+			atomic_store(&g_music_halt, 0);
+		if (old)
+			atomic_store(&old->stopping, 0);
+	}
+
+	if (is_music)
+		atomic_store(&g_music_halt, 0);
+	channel = is_music ? sword3_audio_play(handle, loops) :
+			     sword3_audio_play_on(handle, mix_ch, loops);
+	if (channel < 0) {
+		pthread_mutex_lock(&g_av_lock);
+		if (slot->handle == handle) {
+			slot->handle = NULL;
+			slot->token = NULL;
+			slot->channel = mix_ch;
+		}
+		pthread_mutex_unlock(&g_av_lock);
+		sword3_audio_close(handle);
+		return -1;
+	}
+
+	if (seen < 32) {
+		int freq = 0, ch = 0;
 		Uint16 fmt = 0;
 
 		seen++;
-		rc = sword3_audio_play(g_av_audio_handle, loops);
 		Mix_QuerySpec(&freq, &fmt, &ch);
 		fprintf(stderr,
-			"sword3-sdl: play audio %zu bytes loops=%d mag=%02x%02x%02x%02x rc=%d playing=%d spec=%dHz\n",
-			size, loops,
+			"sword3-sdl: play audio token=%p %zu bytes loops=%d Mix ch=%d%s mag=%02x%02x%02x%02x spec=%dHz\n",
+			token, size, loops,
+			is_music ? HOST_AV_MUSIC_CH : mix_ch,
+			is_music ? " music-fallback" : "",
 			((const unsigned char *)data)[0],
 			size > 1 ? ((const unsigned char *)data)[1] : 0,
 			size > 2 ? ((const unsigned char *)data)[2] : 0,
 			size > 3 ? ((const unsigned char *)data)[3] : 0,
-			rc, Mix_PlayingMusic(), freq);
-		return rc;
+			freq);
 	}
-	return sword3_audio_play(g_av_audio_handle, loops);
+	return 0;
+}
+
+__attribute__((visibility("default")))
+void sword3_host_pause_memory_audio_for(void *token)
+{
+	struct host_av_slot *slot;
+
+	pthread_mutex_lock(&g_av_lock);
+	slot = host_av_find_token_locked(token);
+	if (slot) {
+		if (slot->channel == HOST_AV_MUSIC_CH)
+			Mix_PauseMusic();
+		else if (slot->channel >= 0)
+			Mix_Pause(slot->channel);
+	}
+	pthread_mutex_unlock(&g_av_lock);
+}
+
+__attribute__((visibility("default")))
+int sword3_host_memory_audio_playing_for(void *token)
+{
+	struct host_av_slot *slot;
+	int playing = 0;
+
+	pthread_mutex_lock(&g_av_lock);
+	slot = host_av_find_token_locked(token);
+	if (slot) {
+		if (slot->channel == HOST_AV_MUSIC_CH)
+			playing = Mix_PlayingMusic() && !Mix_PausedMusic();
+		else if (slot->channel >= 0)
+			playing = Mix_Playing(slot->channel) &&
+				  !Mix_Paused(slot->channel);
+	}
+	pthread_mutex_unlock(&g_av_lock);
+	return playing;
+}
+
+__attribute__((visibility("default")))
+void sword3_host_set_memory_audio_volume_for(void *token, int volume)
+{
+	struct host_av_slot *slot;
+
+	if (volume < 0)
+		volume = 0;
+	if (volume > MIX_MAX_VOLUME)
+		volume = MIX_MAX_VOLUME;
+	pthread_mutex_lock(&g_av_lock);
+	slot = host_av_find_token_locked(token);
+	if (slot && slot->handle)
+		sword3_audio_set_volume(slot->handle, volume);
+	pthread_mutex_unlock(&g_av_lock);
+}
+
+__attribute__((visibility("default")))
+int sword3_host_play_memory_audio(const void *data, size_t size, int loops)
+{
+	/*
+	 * Legacy entry: no token. Use a stable fake token so callers that
+	 * still go through the single-stream API don't collide with real
+	 * AVAudioPlayer instances.
+	 */
+	return sword3_host_play_memory_audio_for((void *)(uintptr_t)1, data,
+						 size, loops);
 }
 
 __attribute__((visibility("default")))
 void sword3_host_stop_memory_audio(void)
 {
-	if (!g_av_audio_handle)
-		return;
-	sword3_audio_stop(g_av_audio_handle);
-	sword3_audio_close(g_av_audio_handle);
-	g_av_audio_handle = NULL;
+	sword3_host_stop_memory_audio_for((void *)(uintptr_t)1);
 }
 
 __attribute__((visibility("default")))
 void sword3_host_pause_memory_audio(void)
 {
-	Mix_PauseMusic();
-	fprintf(stderr, "sword3-sdl: pause music playing=%d paused=%d\n",
-		Mix_PlayingMusic(), Mix_PausedMusic());
+	sword3_host_pause_memory_audio_for((void *)(uintptr_t)1);
 }
 
 __attribute__((visibility("default")))
 void sword3_host_resume_memory_audio(void)
 {
+	Mix_Resume(-1);
 	Mix_ResumeMusic();
-	fprintf(stderr, "sword3-sdl: resume music playing=%d paused=%d\n",
-		Mix_PlayingMusic(), Mix_PausedMusic());
 }
 
 __attribute__((visibility("default")))
 int sword3_host_memory_audio_playing(void)
 {
-	return Mix_PlayingMusic() && !Mix_PausedMusic();
+	return sword3_host_memory_audio_playing_for((void *)(uintptr_t)1);
 }
 
 __attribute__((visibility("default")))
 void sword3_host_set_memory_audio_volume(int volume)
 {
-	if (volume < 0)
-		volume = 0;
-	if (volume > MIX_MAX_VOLUME)
-		volume = MIX_MAX_VOLUME;
-	Mix_VolumeMusic(volume);
-	Mix_Volume(-1, volume);
+	sword3_host_set_memory_audio_volume_for((void *)(uintptr_t)1, volume);
 }

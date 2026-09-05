@@ -224,7 +224,7 @@ Sword3AudioHandle *sword3_audio_open_memory(Sword3AudioBridge *bridge,
 	return handle;
 }
 
-int sword3_audio_play(Sword3AudioHandle *handle, int loops)
+int sword3_audio_play_on(Sword3AudioHandle *handle, int channel, int loops)
 {
 	Sword3AudioBridge *bridge;
 	int rc;
@@ -238,15 +238,21 @@ int sword3_audio_play(Sword3AudioHandle *handle, int loops)
 	SDL_LockMutex(bridge->mutex);
 	if (handle->kind == SWORD3_AUDIO_EFFECT) {
 		Mix_VolumeChunk(handle->media.chunk, handle->volume);
-		rc = Mix_PlayChannel(-1, handle->media.chunk, loops);
-	} else {
-		Mix_VolumeMusic(handle->volume);
-		rc = Mix_PlayMusic(handle->media.music, loops);
-		if (rc == 0)
-			bridge->current_music = handle;
+		rc = Mix_PlayChannel(channel, handle->media.chunk, loops);
+		SDL_UnlockMutex(bridge->mutex);
+		return rc;
 	}
+	Mix_VolumeMusic(handle->volume);
+	rc = Mix_PlayMusic(handle->media.music, loops);
+	if (rc == 0)
+		bridge->current_music = handle;
 	SDL_UnlockMutex(bridge->mutex);
 	return rc < 0 ? -1 : 0;
+}
+
+int sword3_audio_play(Sword3AudioHandle *handle, int loops)
+{
+	return sword3_audio_play_on(handle, -1, loops);
 }
 
 static void stop_locked(Sword3AudioHandle *handle)
