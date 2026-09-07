@@ -234,6 +234,10 @@ static void owner_drop(enum sword3_sdl_kind kind, void *pointer)
 #define PAL2_COMPOSITOR 0x10021f1f0ull
 #define PAL2_EVENT_OBJ 0x1004953b0ull
 #define PAL2_MOVIE_STATUS 0x100542c50ull
+#define PAL2_SE_HALT_CHANNEL 0x10010a4b4ull
+#define PAL2_SE_CHANNEL_COUNT 0x1004cdcd8ull
+#define PAL2_SE_CHANNELS 0x1004cdce0ull
+#define PAL2_TALK_RMLOCK 0x8000u
 
 static SDL_Window *g_window;
 static SDL_Renderer *g_renderer;
@@ -246,6 +250,7 @@ static int g_menu_item;
 static int g_pointer_ui;
 static int g_save_ui;
 static int g_after_continue;
+static int g_talk_space_se;
 static SDL_AudioDeviceID g_guest_audio_device;
 static SDL_AudioFormat g_guest_audio_format = AUDIO_S16SYS;
 
@@ -533,8 +538,8 @@ static _Atomic int g_music_halt;
 #define HOST_AV_MUSIC_CH (-2)
 
 /*
- * One Mix EFFECT channel per AVAudioPlayer (slot index == Mix channel).
- * Mix MUSIC is fallback when a chunk cannot be opened.
+ * Track each AVAudioPlayer independently. MP3 BGM prefers Mix MUSIC;
+ * non-music data falls back to one EFFECT channel per slot.
  */
 struct host_av_slot {
 	Sword3AudioHandle *handle;
@@ -763,6 +768,38 @@ static int is_guest_pad_event(Uint32 type)
 	return type >= SDL_JOYAXISMOTION && type < SDL_FINGERDOWN;
 }
 
+static int pal2_talk_waiting(void)
+{
+	volatile int32_t *talk_id =
+		(volatile int32_t *)(uintptr_t)(PAL2_EVENT_OBJ + 0x108);
+	volatile uint32_t *ulck =
+		(volatile uint32_t *)(uintptr_t)(PAL2_EVENT_OBJ + 0x168);
+	volatile int32_t *channel_count =
+		(volatile int32_t *)(uintptr_t)PAL2_SE_CHANNEL_COUNT;
+	uint8_t *channels =
+		*(uint8_t **)(uintptr_t)PAL2_SE_CHANNELS;
+	int32_t playing;
+
+	if (*talk_id == -1 || (*ulck & PAL2_TALK_RMLOCK) == 0 ||
+	    *channel_count < 1 || !channels)
+		return 0;
+	playing = *(volatile int32_t *)(channels + 8);
+	return playing > 0;
+}
+
+static void pal2_stop_waiting_se(void)
+{
+	int (*halt_channel)(int) =
+		(int (*)(int))(uintptr_t)PAL2_SE_HALT_CHANNEL;
+
+	/*
+	 * Use the guest mixer's normal completion path. Its channel-done
+	 * callback advances the RMlock wait just as a naturally ending SE
+	 * does, without modifying Talk or script state.
+	 */
+	halt_channel(0);
+}
+
 static int rewrite_event(SDL_Event *event)
 {
 	if (!event)
@@ -774,6 +811,18 @@ static int rewrite_event(SDL_Event *event)
 	 * treat each KEYDOWN as one step, so drop host repeats. */
 	if (event->type == SDL_KEYDOWN && event->key.repeat)
 		return 0;
+	if ((event->type == SDL_KEYDOWN || event->type == SDL_KEYUP) &&
+	    event->key.keysym.scancode == SDL_SCANCODE_SPACE) {
+		if (event->type == SDL_KEYDOWN && pal2_talk_waiting()) {
+			pal2_stop_waiting_se();
+			g_talk_space_se = 1;
+			return 0;
+		}
+		if (event->type == SDL_KEYUP && g_talk_space_se) {
+			g_talk_space_se = 0;
+			return 0;
+		}
+	}
 	if (event->type == SDL_MOUSEBUTTONDOWN ||
 	    event->type == SDL_MOUSEBUTTONUP) {
 		if (event->button.which != HOST_MOUSE_WHICH) {
@@ -1746,6 +1795,18 @@ void sword3_SDL_PauseAudioDevice(SDL_AudioDeviceID dev, int pause_on)
 	SDL_PauseAudioDevice(actual, pause_on);
 }
 
+void sword3_SDL_LockAudio(void)
+{
+	if (g_guest_audio_device)
+		SDL_LockAudioDevice(g_guest_audio_device);
+}
+
+void sword3_SDL_UnlockAudio(void)
+{
+	if (g_guest_audio_device)
+		SDL_UnlockAudioDevice(g_guest_audio_device);
+}
+
 void sword3_SDL_LockAudioDevice(SDL_AudioDeviceID dev)
 {
 	SDL_LockAudioDevice(guest_audio_device(dev));
@@ -1947,13 +2008,13 @@ int sword3_host_play_memory_audio_for(void *token, const void *data,
 	if (!ensure_host_mixer())
 		return -1;
 
-	handle = sword3_audio_open_memory(g_av_audio_bridge, SWORD3_AUDIO_EFFECT,
+	handle = sword3_audio_open_memory(g_av_audio_bridge, SWORD3_AUDIO_MUSIC,
 					  data, size);
+	is_music = handle != NULL;
 	if (!handle) {
 		handle = sword3_audio_open_memory(g_av_audio_bridge,
-						  SWORD3_AUDIO_MUSIC, data,
+						  SWORD3_AUDIO_EFFECT, data,
 						  size);
-		is_music = handle != NULL;
 	}
 	if (!handle) {
 		fprintf(stderr,

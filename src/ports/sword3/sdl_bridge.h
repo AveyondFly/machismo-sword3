@@ -101,14 +101,16 @@ SDL_AudioDeviceID sword3_SDL_OpenAudioDevice(const char *device, int iscapture,
 					     int allowed_changes);
 void sword3_SDL_MixAudio(Uint8 *dst, const Uint8 *src, Uint32 len, int volume);
 void sword3_SDL_PauseAudioDevice(SDL_AudioDeviceID dev, int pause_on);
+void sword3_SDL_LockAudio(void);
+void sword3_SDL_UnlockAudio(void);
 void sword3_SDL_LockAudioDevice(SDL_AudioDeviceID dev);
 void sword3_SDL_UnlockAudioDevice(SDL_AudioDeviceID dev);
 void sword3_SDL_CloseAudioDevice(SDL_AudioDeviceID dev);
 
 /*
  * Per-AVAudioPlayer host audio. token is the proxy player pointer from the
- * iOS shim; each token keeps its own Mix channel so SE and BGM can overlap
- * the way multiple AVAudioPlayer instances do on iOS.
+ * iOS shim. MP3 BGM uses Mix MUSIC, while non-music data falls back to a
+ * per-token Mix effect channel.
  */
 int sword3_host_play_memory_audio_for(void *token, const void *data,
 				      size_t size, int loops);
