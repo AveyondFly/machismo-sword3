@@ -99,6 +99,7 @@ SDL_AudioDeviceID sword3_SDL_OpenAudioDevice(const char *device, int iscapture,
 					     const SDL_AudioSpec *desired,
 					     SDL_AudioSpec *obtained,
 					     int allowed_changes);
+void sword3_SDL_MixAudio(Uint8 *dst, const Uint8 *src, Uint32 len, int volume);
 void sword3_SDL_PauseAudioDevice(SDL_AudioDeviceID dev, int pause_on);
 void sword3_SDL_LockAudioDevice(SDL_AudioDeviceID dev);
 void sword3_SDL_UnlockAudioDevice(SDL_AudioDeviceID dev);

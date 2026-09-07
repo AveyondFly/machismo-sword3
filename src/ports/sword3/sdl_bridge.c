@@ -246,6 +246,8 @@ static int g_menu_item;
 static int g_pointer_ui;
 static int g_save_ui;
 static int g_after_continue;
+static SDL_AudioDeviceID g_guest_audio_device;
+static SDL_AudioFormat g_guest_audio_format = AUDIO_S16SYS;
 
 static const char *ignore_ios_driver(const char *driver_name, const char *ios_name)
 {
@@ -898,6 +900,8 @@ int sword3_SDL_AudioInit(const char *driver_name)
 void sword3_SDL_AudioQuit(void)
 {
 	fprintf(stderr, "sword3-sdl: SDL_AudioQuit\n");
+	g_guest_audio_device = 0;
+	g_guest_audio_format = AUDIO_S16SYS;
 	SDL_AudioQuit();
 }
 
@@ -1672,6 +1676,20 @@ const Uint8 *sword3_SDL_GetKeyboardState(int *numkeys)
 static int ensure_host_mixer(void);
 
 /*
+ * Pal2 was built against iOS SDL, where its only output device is ID 1.
+ * SDL2 on Linux reserves ID 1 for the legacy SDL_OpenAudio API, so
+ * SDL_OpenAudioDevice returns 2 or higher. The guest ignores that return
+ * value and continues to pause/lock/close ID 1; translate those operations
+ * to the device opened on its behalf.
+ */
+static SDL_AudioDeviceID guest_audio_device(SDL_AudioDeviceID dev)
+{
+	if (dev == 1 && g_guest_audio_device)
+		return g_guest_audio_device;
+	return dev;
+}
+
+/*
  * Same contract as master/Sword3: the guest mixer owns a real SDL device and
  * its callback. Host Mix_PlayMusic is a second path used only for
  * AVAudioPlayer MP3s. Do not steal this open — Pal2's story/field cues go
@@ -1691,6 +1709,13 @@ SDL_AudioDeviceID sword3_SDL_OpenAudioDevice(const char *device, int iscapture,
 			desired->samples, (void *)desired->callback);
 	id = SDL_OpenAudioDevice(device, iscapture, desired, obtained,
 				 allowed_changes);
+	if (id && !iscapture) {
+		g_guest_audio_device = id;
+		if (obtained)
+			g_guest_audio_format = obtained->format;
+		else if (desired)
+			g_guest_audio_format = desired->format;
+	}
 	fprintf(stderr, "sword3-sdl: OpenAudioDevice -> %u%s%s", id,
 		id ? "" : " ", id ? "" : SDL_GetError());
 	if (id && obtained)
@@ -1701,27 +1726,45 @@ SDL_AudioDeviceID sword3_SDL_OpenAudioDevice(const char *device, int iscapture,
 	return id;
 }
 
+void sword3_SDL_MixAudio(Uint8 *dst, const Uint8 *src, Uint32 len, int volume)
+{
+	/*
+	 * Pal2's bundled SDL_MixAudio reads the format from its private audio
+	 * device. OpenAudioDevice is hosted, so that guest pointer stays NULL
+	 * and the bundled function leaves dst silent. Mix with the format
+	 * obtained by the host device instead.
+	 */
+	SDL_MixAudioFormat(dst, src, g_guest_audio_format, len, volume);
+}
+
 void sword3_SDL_PauseAudioDevice(SDL_AudioDeviceID dev, int pause_on)
 {
-	fprintf(stderr, "sword3-sdl: PauseAudioDevice %u pause=%d\n", dev,
-		pause_on);
-	SDL_PauseAudioDevice(dev, pause_on);
+	SDL_AudioDeviceID actual = guest_audio_device(dev);
+
+	fprintf(stderr, "sword3-sdl: PauseAudioDevice %u -> %u pause=%d\n",
+		dev, actual, pause_on);
+	SDL_PauseAudioDevice(actual, pause_on);
 }
 
 void sword3_SDL_LockAudioDevice(SDL_AudioDeviceID dev)
 {
-	SDL_LockAudioDevice(dev);
+	SDL_LockAudioDevice(guest_audio_device(dev));
 }
 
 void sword3_SDL_UnlockAudioDevice(SDL_AudioDeviceID dev)
 {
-	SDL_UnlockAudioDevice(dev);
+	SDL_UnlockAudioDevice(guest_audio_device(dev));
 }
 
 void sword3_SDL_CloseAudioDevice(SDL_AudioDeviceID dev)
 {
-	fprintf(stderr, "sword3-sdl: CloseAudioDevice %u\n", dev);
-	SDL_CloseAudioDevice(dev);
+	SDL_AudioDeviceID actual = guest_audio_device(dev);
+
+	fprintf(stderr, "sword3-sdl: CloseAudioDevice %u -> %u\n", dev,
+		actual);
+	SDL_CloseAudioDevice(actual);
+	if (actual == g_guest_audio_device)
+		g_guest_audio_device = 0;
 }
 
 static Sword3AudioBridge *g_av_audio_bridge;
