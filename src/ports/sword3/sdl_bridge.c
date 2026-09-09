@@ -237,6 +237,25 @@ static void owner_drop(enum sword3_sdl_kind kind, void *pointer)
 #define PAL2_SE_HALT_CHANNEL 0x10010a4b4ull
 #define PAL2_SE_CHANNEL_COUNT 0x1004cdcd8ull
 #define PAL2_SE_CHANNELS 0x1004cdce0ull
+#define PAL2_INPUT_MANAGER 0x10048ad50ull
+#define PAL2_INPUT_MOUSE_LEFT 0x2d8
+#define PAL2_INPUT_LAST_KEYDOWN 0x2494
+#define PAL2_INPUT_SLOT_STATE 0
+#define PAL2_INPUT_SLOT_FLAGS 8
+#define PAL2_LIST_PENDING 0x4d8
+#define PAL2_LIST_SELECTED 0x1280
+#define PAL2_LIST_SELECTED_INDEX 0x1288
+#define PAL2_LIST_STATE 0x24
+#define PAL2_LIST_RELEASE_STATE 0x127a
+#define PAL2_LIST_ITEM_POSITION 0x1ec
+#define PAL2_LIST_SET_TWEEN 0x1000426fcull
+#define PAL2_SELECTOR_RESULT 0x24
+#define PAL2_SELECTOR_SELECTION 0x28
+#define PAL2_SOUND_VOLUME 0x1004953fcull
+#define PAL2_SOUND_MANAGER 0x10049e850ull
+#define PAL2_PLAY_SOUND 0x100218f64ull
+#define PAL2_CURSOR_SOUND 0x34
+#define PAL2_CURSOR_SOUND_DEBOUNCE_MS 100
 #define PAL2_TALK_RMLOCK 0x8000u
 
 static SDL_Window *g_window;
@@ -251,6 +270,8 @@ static int g_pointer_ui;
 static int g_save_ui;
 static int g_after_continue;
 static int g_talk_space_se;
+static int g_space_release_pending;
+static Uint32 g_cursor_sound_ms;
 static SDL_AudioDeviceID g_guest_audio_device;
 static SDL_AudioFormat g_guest_audio_format = AUDIO_S16SYS;
 
@@ -800,6 +821,122 @@ static void pal2_stop_waiting_se(void)
 	halt_channel(0);
 }
 
+static int pal2_input_released(const uint8_t *slot)
+{
+	return slot[PAL2_INPUT_SLOT_STATE] == 2 &&
+	       (slot[PAL2_INPUT_SLOT_FLAGS] & 1) != 0;
+}
+
+static void pal2_release_keydown_latch(SDL_Scancode scancode)
+{
+	volatile int32_t *last_keydown =
+		(volatile int32_t *)(uintptr_t)
+			(PAL2_INPUT_MANAGER + PAL2_INPUT_LAST_KEYDOWN);
+
+	/*
+	 * UIGamePad records KEYDOWN here, but its KEYUP path only updates the
+	 * per-key slot. Pal2's battle list treats any non-zero value as a held
+	 * navigation key and replays cursor sound 0x34 every frame.
+	 */
+	if (*last_keydown == (int32_t)scancode)
+		*last_keydown = 0;
+}
+
+void sword3_pal2_finish_list_release(void *opaque)
+{
+	static unsigned keyboard_finishes;
+	uint8_t *list = opaque;
+	uint8_t *input = (uint8_t *)(uintptr_t)PAL2_INPUT_MANAGER;
+	uint8_t *mouse = input + PAL2_INPUT_MOUSE_LEFT;
+	uint8_t *selected;
+	int keyboard_release;
+	void (*set_tween)(void *, int, int, int) =
+		(void (*)(void *, int, int, int))(uintptr_t)PAL2_LIST_SET_TWEEN;
+
+	if (!list)
+		return;
+	keyboard_release = list[PAL2_LIST_PENDING] &&
+			   g_space_release_pending;
+	if (!pal2_input_released(mouse) && !keyboard_release)
+		return;
+
+	/*
+	 * Pal2's list activation accepts keyboard action 6, but its release
+	 * animation is hard-wired to the mouse-left slot. Preserve the original
+	 * mouse path and allow Space only while this list has a pending
+	 * activation. This is the body of guest 0x100064f04 with that one
+	 * additional release source.
+	 */
+	*(int32_t *)(list + PAL2_LIST_STATE) =
+		*(int32_t *)(list + PAL2_LIST_SELECTED_INDEX);
+	selected = *(uint8_t **)(list + PAL2_LIST_SELECTED);
+	set_tween(selected + 8, 0, 1000, 1000);
+	if (list[PAL2_LIST_PENDING]) {
+		int32_t *position =
+			(int32_t *)(selected + PAL2_LIST_ITEM_POSITION);
+
+		position[0]--;
+		position[1]--;
+		list[PAL2_LIST_PENDING] = 0;
+	}
+	*(uint16_t *)(list + PAL2_LIST_RELEASE_STATE) = 0x101;
+	if (keyboard_release) {
+		g_space_release_pending = 0;
+		if (keyboard_finishes++ < 8)
+			fprintf(stderr,
+				"sword3-sdl: Pal2 list release finished from Space\n");
+	}
+}
+
+void *sword3_pal2_play_ui_sound(int sound_id)
+{
+	int32_t configured =
+		*(volatile int32_t *)(uintptr_t)PAL2_SOUND_VOLUME;
+	int32_t shifted = (int32_t)((uint32_t)configured << 7);
+	int64_t product = (int64_t)shifted * (int32_t)0x2e8ba2e9;
+	int volume = (int)(product >> 33) +
+		     (int)((uint64_t)product >> 63);
+	void *(*play)(void *, void *, int, int, int, int, int) =
+		(void *(*)(void *, void *, int, int, int, int, int))
+			(uintptr_t)PAL2_PLAY_SOUND;
+	Uint32 now = SDL_GetTicks();
+
+	/*
+	 * Pal2's keyboard battle-list path asks for cursor sound 0x34 twice
+	 * for one focus move. Keep distinct human inputs, but collapse calls
+	 * made by the same release transition.
+	 */
+	if (sound_id == PAL2_CURSOR_SOUND && g_cursor_sound_ms &&
+	    now - g_cursor_sound_ms < PAL2_CURSOR_SOUND_DEBOUNCE_MS)
+		return NULL;
+	if (sound_id == PAL2_CURSOR_SOUND)
+		g_cursor_sound_ms = now;
+	return play((void *)(uintptr_t)PAL2_SOUND_MANAGER, NULL, sound_id,
+		    volume, 0, 1, 0);
+}
+
+void sword3_pal2_confirm_target(void *opaque, int selected, void *target)
+{
+	static unsigned confirms;
+	uint8_t *selector = opaque;
+
+	(void)target;
+	if (!selector || selected <= 0)
+		return;
+
+	/*
+	 * Pal2's target selector leaves its keyboard-confirm virtual method
+	 * empty. Its touch-hit path commits the highlighted target by writing
+	 * the node key to both the selection and result fields.
+	 */
+	*(int32_t *)(selector + PAL2_SELECTOR_SELECTION) = selected;
+	*(int32_t *)(selector + PAL2_SELECTOR_RESULT) = selected;
+	if (confirms++ < 8)
+		fprintf(stderr,
+			"sword3-sdl: Pal2 target confirmed from keyboard id=%d\n",
+			selected);
+}
+
 static int rewrite_event(SDL_Event *event)
 {
 	if (!event)
@@ -811,6 +948,10 @@ static int rewrite_event(SDL_Event *event)
 	 * treat each KEYDOWN as one step, so drop host repeats. */
 	if (event->type == SDL_KEYDOWN && event->key.repeat)
 		return 0;
+	if (event->type == SDL_KEYDOWN)
+		g_space_release_pending = 0;
+	if (event->type == SDL_KEYUP)
+		pal2_release_keydown_latch(event->key.keysym.scancode);
 	if ((event->type == SDL_KEYDOWN || event->type == SDL_KEYUP) &&
 	    event->key.keysym.scancode == SDL_SCANCODE_SPACE) {
 		if (event->type == SDL_KEYDOWN && pal2_talk_waiting()) {
@@ -821,6 +962,9 @@ static int rewrite_event(SDL_Event *event)
 		if (event->type == SDL_KEYUP && g_talk_space_se) {
 			g_talk_space_se = 0;
 			return 0;
+		}
+		if (event->type == SDL_KEYUP) {
+			g_space_release_pending = 1;
 		}
 	}
 	if (event->type == SDL_MOUSEBUTTONDOWN ||

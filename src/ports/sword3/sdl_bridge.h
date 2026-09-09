@@ -107,6 +107,11 @@ void sword3_SDL_LockAudioDevice(SDL_AudioDeviceID dev);
 void sword3_SDL_UnlockAudioDevice(SDL_AudioDeviceID dev);
 void sword3_SDL_CloseAudioDevice(SDL_AudioDeviceID dev);
 
+/* Pal2 list release completion with keyboard-confirm support. */
+void sword3_pal2_finish_list_release(void *list);
+void *sword3_pal2_play_ui_sound(int sound_id);
+void sword3_pal2_confirm_target(void *selector, int selected, void *target);
+
 /*
  * Per-AVAudioPlayer host audio. token is the proxy player pointer from the
  * iOS shim. MP3 BGM uses Mix MUSIC, while non-music data falls back to a
