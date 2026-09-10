@@ -239,6 +239,8 @@ static void owner_drop(enum sword3_sdl_kind kind, void *pointer)
 #define PAL2_SE_CHANNELS 0x1004cdce0ull
 #define PAL2_INPUT_MANAGER 0x10048ad50ull
 #define PAL2_FIGHT_INSTANCE 0x100290f80ull
+#define PAL2_FIGHT_ACTIVE 0x10046c6e8ull
+#define PAL2_INPUT_RESET 0x1001e4ff8ull
 #define PAL2_INPUT_MOUSE_LEFT 0x2d8
 #define PAL2_INPUT_LAST_KEYDOWN 0x2494
 #define PAL2_INPUT_SLOT_STATE 0
@@ -258,11 +260,12 @@ static void owner_drop(enum sword3_sdl_kind kind, void *pointer)
 #define PAL2_CURSOR_SOUND 0x34
 #define PAL2_CURSOR_SOUND_DEBOUNCE_MS 100
 #define PAL2_TALK_RMLOCK 0x8000u
-#define PAL2_TACTIC_BASE_W 800
-#define PAL2_TACTIC_BASE_H 600
-#define PAL2_TACTIC_Y 42
-#define PAL2_SIEGE_X 44
-#define PAL2_STRONG_ATTACK_X 145
+#define PAL2_FIGHT_COMMAND_UI 0xe1
+#define PAL2_FIGHT_TACTIC_PENDING 0xe8
+#define PAL2_FIGHT_TACTIC 0x124
+#define PAL2_FIGHT_TACTIC_BLOCKED 0x5dc
+#define PAL2_TACTIC_STRONG_ATTACK 2
+#define PAL2_TACTIC_SIEGE 3
 
 static SDL_Window *g_window;
 static SDL_Renderer *g_renderer;
@@ -276,7 +279,6 @@ static int g_pointer_ui;
 static int g_save_ui;
 static int g_after_continue;
 static int g_talk_space_se;
-static uint8_t g_pal2_tactic_keys;
 static int g_space_release_pending;
 static Uint32 g_cursor_sound_ms;
 static SDL_AudioDeviceID g_guest_audio_device;
@@ -944,68 +946,44 @@ void sword3_pal2_confirm_target(void *opaque, int selected, void *target)
 			selected);
 }
 
-static int pal2_rewrite_tactic_key(SDL_Event *event)
+static int pal2_handle_tactic_key(SDL_Event *event)
 {
 	static unsigned triggers;
+	uint8_t *fight;
 	SDL_Scancode scancode;
-	Uint32 timestamp;
-	Uint32 window_id;
-	uint8_t key_bit;
-	int base_x;
-	int x;
-	int y;
+	int tactic;
 
 	if (event->type != SDL_KEYDOWN && event->type != SDL_KEYUP)
 		return 0;
 	scancode = event->key.keysym.scancode;
-	if (scancode == SDL_SCANCODE_X) {
-		key_bit = 1;
-		base_x = PAL2_SIEGE_X;
-	} else if (scancode == SDL_SCANCODE_Y) {
-		key_bit = 2;
-		base_x = PAL2_STRONG_ATTACK_X;
+	if (scancode == SDL_SCANCODE_M) {
+		tactic = PAL2_TACTIC_SIEGE;
+	} else if (scancode == SDL_SCANCODE_N) {
+		tactic = PAL2_TACTIC_STRONG_ATTACK;
 	} else {
 		return 0;
 	}
 
-	if (event->type == SDL_KEYDOWN) {
-		/* The singleton exists only while the Fight.hui scene is active. */
-		if (!*(void *volatile *)(uintptr_t)PAL2_FIGHT_INSTANCE)
-			return 0;
-		g_pal2_tactic_keys |= key_bit;
-	} else {
-		/* Always deliver the release paired with a translated press. */
-		if ((g_pal2_tactic_keys & key_bit) == 0)
-			return 0;
-		g_pal2_tactic_keys &= (uint8_t)~key_bit;
-	}
+	/* Consume both halves everywhere. The singleton survives after battle,
+	 * so the real scene flag and command-UI state are both required. */
+	if (event->type != SDL_KEYDOWN ||
+	    !*(volatile uint8_t *)(uintptr_t)PAL2_FIGHT_ACTIVE)
+		return 1;
+	fight = *(uint8_t *volatile *)(uintptr_t)PAL2_FIGHT_INSTANCE;
+	if (!fight || !fight[PAL2_FIGHT_COMMAND_UI] ||
+	    fight[PAL2_FIGHT_TACTIC_PENDING] ||
+	    *(int32_t *)(fight + PAL2_FIGHT_TACTIC_BLOCKED) != 0)
+		return 1;
 
-	timestamp = event->key.timestamp;
-	window_id = event->key.windowID;
-	x = base_x;
-	y = PAL2_TACTIC_Y;
-	if (g_logical_w > 0)
-		x = base_x * g_logical_w / PAL2_TACTIC_BASE_W;
-	if (g_logical_h > 0)
-		y = PAL2_TACTIC_Y * g_logical_h / PAL2_TACTIC_BASE_H;
-	memset(event, 0, sizeof(*event));
-	event->button.type = (g_pal2_tactic_keys & key_bit) ?
-		SDL_MOUSEBUTTONDOWN : SDL_MOUSEBUTTONUP;
-	event->button.timestamp = timestamp;
-	event->button.windowID = window_id;
-	event->button.which = HOST_MOUSE_WHICH;
-	event->button.button = SDL_BUTTON_LEFT;
-	event->button.state = event->button.type == SDL_MOUSEBUTTONDOWN ?
-		SDL_PRESSED : SDL_RELEASED;
-	event->button.clicks = 1;
-	event->button.x = x;
-	event->button.y = y;
-	g_cursor_x = (float)x;
-	g_cursor_y = (float)y;
-	g_cursor_ready = 1;
-	if (event->button.type == SDL_MOUSEBUTTONDOWN && triggers++ < 8)
-		fprintf(stderr, "sword3-sdl: Pal2 battle shortcut %s\n",
-			scancode == SDL_SCANCODE_X ? "siege" : "strong attack");
+	/* This is the native post-hit branch at 0x100063f64: a touch release
+	 * stores the tactic, marks it pending, then clears the input queues. */
+	*(int32_t *)(fight + PAL2_FIGHT_TACTIC) = tactic;
+	fight[PAL2_FIGHT_TACTIC_PENDING] = 1;
+	((void (*)(void *))(uintptr_t)PAL2_INPUT_RESET)(
+		(void *)(uintptr_t)PAL2_INPUT_MANAGER);
+	if (triggers++ < 8)
+		fprintf(stderr, "sword3-sdl: Pal2 battle tactic %s submitted\n",
+			tactic == PAL2_TACTIC_SIEGE ? "siege" : "strong attack");
 	return 1;
 }
 
@@ -1024,8 +1002,8 @@ static int rewrite_event(SDL_Event *event)
 		g_space_release_pending = 0;
 	if (event->type == SDL_KEYUP)
 		pal2_release_keydown_latch(event->key.keysym.scancode);
-	if (pal2_rewrite_tactic_key(event))
-		return 1;
+	if (pal2_handle_tactic_key(event))
+		return 0;
 	if ((event->type == SDL_KEYDOWN || event->type == SDL_KEYUP) &&
 	    event->key.keysym.scancode == SDL_SCANCODE_SPACE) {
 		if (event->type == SDL_KEYDOWN && pal2_talk_waiting()) {
