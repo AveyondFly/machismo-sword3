@@ -4,6 +4,8 @@
 #include <stdint.h>
 #include <stdio.h>
 #include <string.h>
+#include <unistd.h>
+#include <sys/mman.h>
 
 #include <SDL2/SDL_ttf.h>
 
@@ -30,6 +32,9 @@
 #define PAL2_PLAYER_MP 0x124u
 #define PAL2_PLAYER_MP_MAX 0x128u
 #define PAL2_PLAYER_GOLD 0xb08u
+#define PAL2_SCRIPT_STEP 0x1000271f0ull
+#define PAL2_PENDING_FIGHT 0x10046b50cull
+#define PAL2_FIGHT_SOURCE_SCRIPT 0x10028c344ull
 
 enum cheat_item {
 	CHEAT_MONEY = 0,
@@ -59,8 +64,107 @@ static struct {
 } g_text[CHEAT_TEXT_CACHE];
 static int g_text_clock;
 static SDL_Renderer *g_text_renderer;
+static int g_hooks_attempted;
+static int (*g_script_step_orig)(void *thread);
 
 static void cheat_set_status(const char *status);
+
+static void *cheat_make_trampoline(uintptr_t function)
+{
+	uint32_t *trampoline;
+	long page_size = sysconf(_SC_PAGESIZE);
+
+	if (page_size < 4096)
+		page_size = 4096;
+	trampoline = mmap(NULL, (size_t)page_size,
+		PROT_READ | PROT_WRITE | PROT_EXEC,
+		MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+	if (trampoline == MAP_FAILED)
+		return NULL;
+	memcpy(trampoline, (const void *)function, 16);
+	trampoline[4] = 0x58000051u; /* ldr x17, #8 */
+	trampoline[5] = 0xd61f0220u; /* br x17 */
+	*(uint64_t *)(trampoline + 6) = function + 16;
+	__builtin___clear_cache((char *)trampoline, (char *)trampoline + 32);
+	return trampoline;
+}
+
+static int cheat_patch_jump(uintptr_t function, void *hook,
+			    const uint32_t expected[4])
+{
+	uint32_t stub[4];
+	uintptr_t page;
+	long page_size = sysconf(_SC_PAGESIZE);
+
+	if (memcmp((const void *)function, expected, 16) != 0) {
+		fprintf(stderr,
+			"sword3-sdl: Pal2 trainer hook mismatch at 0x%llx\n",
+			(unsigned long long)function);
+		return -1;
+	}
+	if (page_size < 4096)
+		page_size = 4096;
+	page = function & ~((uintptr_t)page_size - 1);
+	if (mprotect((void *)page, (size_t)page_size * 2,
+		     PROT_READ | PROT_WRITE | PROT_EXEC) != 0) {
+		fprintf(stderr,
+			"sword3-sdl: Pal2 trainer mprotect failed at 0x%llx\n",
+			(unsigned long long)function);
+		return -1;
+	}
+	stub[0] = 0x58000050u; /* ldr x16, #8 */
+	stub[1] = 0xd61f0200u; /* br x16 */
+	memcpy(stub + 2, &hook, sizeof(hook));
+	memcpy((void *)function, stub, sizeof(stub));
+	__builtin___clear_cache((char *)function, (char *)function + 16);
+	return 0;
+}
+
+static int cheat_is_field_enemy_script(int script)
+{
+	return (script >= 3800 && script <= 3833) ||
+		(script >= 4001 && script <= 4631);
+}
+
+static int cheat_script_step_hook(void *thread)
+{
+	int result = g_script_step_orig(thread);
+	volatile int32_t *pending =
+		(volatile int32_t *)(uintptr_t)PAL2_PENDING_FIGHT;
+	volatile int32_t *source =
+		(volatile int32_t *)(uintptr_t)PAL2_FIGHT_SOURCE_SCRIPT;
+
+	if (g_no_encounter && *pending < 0 &&
+	    cheat_is_field_enemy_script(*source)) {
+		fprintf(stderr,
+			"sword3-sdl: Pal2 trainer skipped field enemy script=%d\n",
+			*source);
+		*pending = 0;
+	}
+	return result;
+}
+
+void host_cheat_install(void)
+{
+	static const uint32_t script_step_expected[4] = {
+		0xa9ba6ffcu, 0xa90167fau, 0xa9025ff8u, 0xa90357f6u
+	};
+
+	if (g_hooks_attempted)
+		return;
+	g_hooks_attempted = 1;
+	g_script_step_orig = cheat_make_trampoline(PAL2_SCRIPT_STEP);
+	if (!g_script_step_orig) {
+		fprintf(stderr,
+			"sword3-sdl: Pal2 trainer trampoline allocation failed\n");
+		return;
+	}
+	if (cheat_patch_jump(PAL2_SCRIPT_STEP, cheat_script_step_hook,
+			     script_step_expected) != 0)
+		return;
+	fprintf(stderr,
+		"sword3-sdl: Pal2 trainer field encounter hook installed\n");
+}
 
 static int cheat_sane_stat(int value)
 {

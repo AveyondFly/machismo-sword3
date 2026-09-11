@@ -1463,6 +1463,7 @@ void sword3_SDL_RenderPresent(SDL_Renderer *renderer)
 	SDL_Rect arm_h, arm_v;
 
 	owner_check("SDL_RenderPresent", KIND_RENDERER, renderer);
+	host_cheat_install();
 	apply_pad_pointer();
 	seen++;
 	if (seen <= 8 || (seen % 120) == 0)
