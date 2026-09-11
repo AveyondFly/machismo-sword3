@@ -729,7 +729,7 @@ void host_cheat_draw(SDL_Renderer *renderer, int logical_w, int logical_h)
 	}
 	cheat_text(renderer, panel_x + cheat_sx(24, logical_w),
 		   panel_y + panel_h - cheat_sy(48, logical_h), pt, hint,
-		   "A 确定   B/SELECT 关闭   上下选择");
+		   "A 确定   Y/B/SELECT 关闭   上下选择");
 	if (g_status[0] && SDL_GetTicks() < g_status_until)
 		cheat_text(renderer, panel_x + cheat_sx(24, logical_w),
 			   panel_y + panel_h - cheat_sy(24, logical_h), pt,

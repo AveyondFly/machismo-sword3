@@ -3,7 +3,7 @@
 
 #include <SDL2/SDL.h>
 
-/* Paladin 2 host-side trainer overlay. Select opens it. */
+/* Paladin 2 host-side trainer overlay. Y opens it. */
 void host_cheat_install(void);
 int host_cheat_active(void);
 int host_cheat_key(SDL_Scancode scancode, int down, int repeat);

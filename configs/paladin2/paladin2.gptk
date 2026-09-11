@@ -4,17 +4,17 @@
 # Pal2 binds Return to OK+Menu; that Menu bit toggles 系统/设置, so A-as-Enter
 # opens a menu then backs out of it. Space is OK only.
 # SELECT+START still kills machismo via gptokeyb -k.
-# Select is dedicated to the host trainer; B remains the guest Back key.
-back = tab
+# Y opens the host trainer. Select and B are both the guest Back key.
+back = esc
 start = space
 a = space
 b = esc
-# Battle-only host shortcuts: X = 围攻, Y = 强攻. M/N keep the physical
-# buttons away from Pal2's X/Y field bindings before host filtering.
-x = m
-y = n
+# Battle-only host shortcuts: R1 = 围攻, R2 = 强攻. M/N are consumed by
+# the host outside battle, so they cannot trigger Pal2's field movement.
+y = tab
 l1 = q
-r1 = e
+r1 = m
+r2 = n
 up = up
 down = down
 left = left
