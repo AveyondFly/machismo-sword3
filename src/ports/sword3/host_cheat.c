@@ -35,6 +35,16 @@
 #define PAL2_SCRIPT_STEP 0x1000271f0ull
 #define PAL2_PENDING_FIGHT 0x10046b50cull
 #define PAL2_FIGHT_SOURCE_SCRIPT 0x10028c344ull
+#define PAL2_FIGHT_HIT 0x100016260ull
+#define PAL2_FIGHT_GET_PROPERTY 0x100040784ull
+#define PAL2_FIGHT_SET_HP 0x10001a0c0ull
+#define PAL2_STR_FIGHT_SOURCE_ID 0x10022775eull
+#define PAL2_FIGHT_ACTOR_TREE 0x608u
+#define PAL2_FIGHT_ACTOR_TYPE 0x554u
+#define PAL2_FIGHT_ACTOR_RECORD 0x5c0u
+#define PAL2_FIGHT_ACTOR_PLAYER 0
+#define PAL2_FIGHT_ACTOR_ENEMY 2
+#define PAL2_FIGHT_SNAPSHOT_MAX 32
 
 enum cheat_item {
 	CHEAT_MONEY = 0,
@@ -66,6 +76,13 @@ static int g_text_clock;
 static SDL_Renderer *g_text_renderer;
 static int g_hooks_attempted;
 static int (*g_script_step_orig)(void *thread);
+static void *(*g_fight_hit_orig)(void *fight, int phase);
+
+struct cheat_fight_snapshot {
+	int id;
+	void *actor;
+	int hp;
+};
 
 static void cheat_set_status(const char *status);
 
@@ -144,10 +161,125 @@ static int cheat_script_step_hook(void *thread)
 	return result;
 }
 
+static void *cheat_fight_actor(void *fight, int id)
+{
+	uint8_t *end = (uint8_t *)fight + PAL2_FIGHT_ACTOR_TREE;
+	uint8_t *node = *(uint8_t **)end;
+	uint8_t *candidate = end;
+
+	/* The fight actors are stored in a std::map<int, Actor *>. */
+	while (node) {
+		int key = *(int *)(node + 0x20);
+
+		if (key < id) {
+			node = *(uint8_t **)(node + 8);
+		} else {
+			candidate = node;
+			node = *(uint8_t **)node;
+		}
+	}
+	if (candidate == end || *(int *)(candidate + 0x20) != id)
+		return NULL;
+	return *(void **)(candidate + 0x28);
+}
+
+static int cheat_fight_snapshot_enemies(void *fight,
+					struct cheat_fight_snapshot *out)
+{
+	uint8_t *stack[PAL2_FIGHT_SNAPSHOT_MAX];
+	uint8_t *root = *(uint8_t **)((uint8_t *)fight +
+		PAL2_FIGHT_ACTOR_TREE);
+	int stack_count = 0;
+	int count = 0;
+
+	if (root)
+		stack[stack_count++] = root;
+	while (stack_count && count < PAL2_FIGHT_SNAPSHOT_MAX) {
+		uint8_t *node = stack[--stack_count];
+		uint8_t *left = *(uint8_t **)node;
+		uint8_t *right = *(uint8_t **)(node + 8);
+		uint8_t *actor = *(uint8_t **)(node + 0x28);
+
+		if (left && stack_count < PAL2_FIGHT_SNAPSHOT_MAX)
+			stack[stack_count++] = left;
+		if (right && stack_count < PAL2_FIGHT_SNAPSHOT_MAX)
+			stack[stack_count++] = right;
+		if (actor && *(int *)(actor + PAL2_FIGHT_ACTOR_TYPE) ==
+		    PAL2_FIGHT_ACTOR_ENEMY) {
+			uint8_t *record = *(uint8_t **)(actor +
+				PAL2_FIGHT_ACTOR_RECORD);
+
+			if (record) {
+				out[count].id = *(int *)(node + 0x20);
+				out[count].actor = actor;
+				out[count].hp = *(volatile int *)(record +
+					PAL2_PLAYER_HP);
+				count++;
+			}
+		}
+	}
+	return count;
+}
+
+static void *cheat_fight_hit_hook(void *fight, int phase)
+{
+	struct cheat_fight_snapshot enemies[PAL2_FIGHT_SNAPSHOT_MAX];
+	int *source_id;
+	void *source;
+	void *result;
+	int enemy_count = 0;
+	int player_attack = 0;
+	int i;
+
+	if (g_one_hit) {
+		source_id = ((int *(*)(void *, const void *, void *))
+			(uintptr_t)PAL2_FIGHT_GET_PROPERTY)(
+			fight, (const void *)(uintptr_t)PAL2_STR_FIGHT_SOURCE_ID,
+			NULL);
+		if (source_id) {
+			source = cheat_fight_actor(fight, *source_id);
+			player_attack = source &&
+				*(int *)((uint8_t *)source +
+					PAL2_FIGHT_ACTOR_TYPE) ==
+				PAL2_FIGHT_ACTOR_PLAYER;
+		}
+		if (player_attack)
+			enemy_count = cheat_fight_snapshot_enemies(fight,
+				enemies);
+	}
+
+	result = g_fight_hit_orig(fight, phase);
+	for (i = 0; i < enemy_count; i++) {
+		uint8_t *actor = enemies[i].actor;
+		uint8_t *record;
+		int hp;
+
+		if (*(int *)(actor + PAL2_FIGHT_ACTOR_TYPE) !=
+		    PAL2_FIGHT_ACTOR_ENEMY)
+			continue;
+		record = *(uint8_t **)(actor + PAL2_FIGHT_ACTOR_RECORD);
+		if (!record)
+			continue;
+		hp = *(volatile int *)(record + PAL2_PLAYER_HP);
+		if (enemies[i].hp > 0 && hp > 0 && hp < enemies[i].hp) {
+			((int (*)(void *, int, int))
+				(uintptr_t)PAL2_FIGHT_SET_HP)(
+				fight, enemies[i].id, 0);
+			fprintf(stderr,
+				"sword3-sdl: Pal2 trainer one-hit enemy=%d hp=%d->0\n",
+				enemies[i].id, hp);
+		}
+	}
+	return result;
+}
+
 void host_cheat_install(void)
 {
 	static const uint32_t script_step_expected[4] = {
 		0xa9ba6ffcu, 0xa90167fau, 0xa9025ff8u, 0xa90357f6u
+	};
+	static const uint32_t fight_hit_expected[4] = {
+		0x6db923e9u, 0xa9016ffcu, 0xa90267fau, 0xa9035ff8u
 	};
 
 	if (g_hooks_attempted)
@@ -162,8 +294,17 @@ void host_cheat_install(void)
 	if (cheat_patch_jump(PAL2_SCRIPT_STEP, cheat_script_step_hook,
 			     script_step_expected) != 0)
 		return;
+	g_fight_hit_orig = cheat_make_trampoline(PAL2_FIGHT_HIT);
+	if (!g_fight_hit_orig) {
+		fprintf(stderr,
+			"sword3-sdl: Pal2 trainer fight trampoline allocation failed\n");
+		return;
+	}
+	if (cheat_patch_jump(PAL2_FIGHT_HIT, cheat_fight_hit_hook,
+			     fight_hit_expected) != 0)
+		return;
 	fprintf(stderr,
-		"sword3-sdl: Pal2 trainer field encounter hook installed\n");
+		"sword3-sdl: Pal2 trainer battle hooks installed\n");
 }
 
 static int cheat_sane_stat(int value)
