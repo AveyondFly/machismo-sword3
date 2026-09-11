@@ -281,6 +281,17 @@ static void owner_drop(enum sword3_sdl_kind kind, void *pointer)
 #define PAL2_PLAY_SOUND 0x100218f64ull
 #define PAL2_CURSOR_SOUND 0x34
 #define PAL2_CURSOR_SOUND_DEBOUNCE_MS 100
+#define PAL2_ITEM_CURSOR_SOUND 0x37
+#define PAL2_ITEM_CURSOR_RETURN 0x100054564ull
+#define PAL2_ITEM_SCROLL 0x1004b44a0ull
+#define PAL2_ITEM_COUNT 0x1004b4be4ull
+#define PAL2_ITEM_SELECTED 0x1004b4becull
+#define PAL2_ITEM_SCROLL_VISIBLE 20
+#define PAL2_ITEM_SCROLL_ROW_HEIGHT 28
+#define PAL2_ITEM_SCROLL_ROW 32
+#define PAL2_ITEM_SCROLL_TOP 40
+#define PAL2_ITEM_SCROLL_VISIBLE_ROW 44
+#define PAL2_ITEM_SCROLL_OFFSET 56
 #define PAL2_TALK_RMLOCK 0x8000u
 #define PAL2_FIGHT_COMMAND_UI 0xe1
 #define PAL2_FIGHT_TACTIC_PENDING 0xe8
@@ -1112,6 +1123,55 @@ void sword3_pal2_finish_list_release(void *opaque)
 	}
 }
 
+static void pal2_keep_item_selection_visible(void *return_address)
+{
+	uint8_t *scroll = (uint8_t *)(uintptr_t)PAL2_ITEM_SCROLL;
+	int count;
+	int selected;
+	int rows;
+	int visible;
+	int row_height;
+	int row;
+	int top;
+	int max_top;
+
+	/*
+	 * CMyItem::Update changes its keyboard selection but never advances the
+	 * touch scroll view.  Its cursor-sound call is reached only after that
+	 * selection changed, so use this call site to keep the selected row in
+	 * the same six-row viewport used by touch scrolling.
+	 */
+	if ((uintptr_t)return_address != PAL2_ITEM_CURSOR_RETURN)
+		return;
+	count = *(volatile int32_t *)(uintptr_t)PAL2_ITEM_COUNT;
+	selected = *(volatile int32_t *)(uintptr_t)PAL2_ITEM_SELECTED;
+	visible = *(int32_t *)(scroll + PAL2_ITEM_SCROLL_VISIBLE);
+	row_height = *(int32_t *)(scroll + PAL2_ITEM_SCROLL_ROW_HEIGHT);
+	if (count <= 0 || selected < 0 || selected >= count ||
+	    visible <= 0 || row_height <= 0)
+		return;
+
+	rows = (count + 2) / 3;
+	row = selected / 3;
+	max_top = rows > visible ? rows - visible : 0;
+	top = *(int32_t *)(scroll + PAL2_ITEM_SCROLL_TOP);
+	if (top < 0)
+		top = 0;
+	if (top > max_top)
+		top = max_top;
+	if (row < top)
+		top = row;
+	else if (row >= top + visible)
+		top = row - visible + 1;
+	if (top > max_top)
+		top = max_top;
+
+	*(int32_t *)(scroll + PAL2_ITEM_SCROLL_ROW) = row;
+	*(int32_t *)(scroll + PAL2_ITEM_SCROLL_TOP) = top;
+	*(int32_t *)(scroll + PAL2_ITEM_SCROLL_VISIBLE_ROW) = row - top;
+	*(int32_t *)(scroll + PAL2_ITEM_SCROLL_OFFSET) = -top * row_height;
+}
+
 void *sword3_pal2_play_ui_sound(int sound_id)
 {
 	int32_t configured =
@@ -1124,6 +1184,10 @@ void *sword3_pal2_play_ui_sound(int sound_id)
 		(void *(*)(void *, void *, int, int, int, int, int))
 			(uintptr_t)PAL2_PLAY_SOUND;
 	Uint32 now = SDL_GetTicks();
+	void *return_address = __builtin_return_address(0);
+
+	if (sound_id == PAL2_ITEM_CURSOR_SOUND)
+		pal2_keep_item_selection_visible(return_address);
 
 	/*
 	 * Pal2's keyboard battle-list path asks for cursor sound 0x34 twice
