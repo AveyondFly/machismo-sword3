@@ -263,6 +263,9 @@ extern struct sword3_objc_class proxy_notification_center_class
     __asm__("OBJC_CLASS_$_NSNotificationCenter");
 static struct sword3_objc_class proxy_notification_center_metaclass;
 static struct proxy_notification_center default_notification_center;
+extern struct sword3_objc_class proxy_av_player_view_controller_class
+    __asm__("OBJC_CLASS_$_AVPlayerViewController");
+static struct sword3_objc_class proxy_av_player_view_controller_metaclass;
 extern struct sword3_objc_class proxy_av_player_class
     __asm__("OBJC_CLASS_$_AVPlayer");
 static struct sword3_objc_class proxy_av_player_metaclass;
@@ -1901,7 +1904,6 @@ static void dispatch_notification(const char *name, sword3_objc_id object)
     static void (*msgsend)(sword3_objc_id, sword3_objc_sel, sword3_objc_id);
     static int msgsend_resolved;
     size_t i;
-    (void)object;
     if (!msgsend_resolved) {
         msgsend_resolved = 1;
         msgsend = (void (*)(sword3_objc_id, sword3_objc_sel, sword3_objc_id))
@@ -1914,7 +1916,7 @@ static void dispatch_notification(const char *name, sword3_objc_id object)
         if (entry->name && entry->name[0] && name && strcmp(entry->name, name) != 0)
             continue;
         if (msgsend)
-            msgsend(entry->observer, entry->selector, NULL);
+            msgsend(entry->observer, entry->selector, object);
     }
 }
 
@@ -1935,23 +1937,30 @@ static void proxy_nc_add(struct proxy_notification_center *self,
                          sword3_objc_id object)
 {
     const char *name = object_cstring(name_object);
+    struct nc_observer *entry = NULL;
+    size_t i;
     (void)self;
     (void)selector;
     (void)object;
-    if (!observer || notification_observer_count >=
-            sizeof(notification_observers) / sizeof(notification_observers[0]))
+    if (!observer)
         return;
-    notification_observers[notification_observer_count].observer = observer;
-    notification_observers[notification_observer_count].selector = callback;
-    notification_observers[notification_observer_count].name =
-        name && name[0] ? strdup(name) : NULL;
-    notification_observer_count++;
-    /*
-     * Intro movies cannot decode here. Treat AVPlayer completion observers
-     * as already finished so startup is not blocked on a black video layer.
-     */
-    if (name && strstr(name, "AVPlayerItemDidPlayToEndTime"))
-        dispatch_notification(name, observer);
+    for (i = 0; i < notification_observer_count; i++) {
+        if (!notification_observers[i].observer) {
+            entry = &notification_observers[i];
+            break;
+        }
+    }
+    if (!entry) {
+        if (notification_observer_count >=
+                sizeof(notification_observers) /
+                    sizeof(notification_observers[0]))
+            return;
+        entry = &notification_observers[notification_observer_count++];
+    }
+    free(entry->name);
+    entry->observer = observer;
+    entry->selector = callback;
+    entry->name = name && name[0] ? strdup(name) : NULL;
 }
 
 static void proxy_nc_remove(struct proxy_notification_center *self,
@@ -1962,8 +1971,12 @@ static void proxy_nc_remove(struct proxy_notification_center *self,
     (void)self;
     (void)selector;
     for (i = 0; i < notification_observer_count; i++) {
-        if (notification_observers[i].observer == observer)
+        if (notification_observers[i].observer == observer) {
             notification_observers[i].observer = NULL;
+            notification_observers[i].selector = NULL;
+            free(notification_observers[i].name);
+            notification_observers[i].name = NULL;
+        }
     }
 }
 
@@ -1981,25 +1994,88 @@ static sword3_objc_id proxy_av_player_with_url(sword3_objc_id cls,
                                                sword3_objc_sel selector,
                                                sword3_objc_id url)
 {
+    struct proxy_uikit_object *player;
     (void)cls;
     (void)selector;
-    (void)url;
-    return make_uikit_object(&proxy_av_player_class);
+    player = make_uikit_object(&proxy_av_player_class);
+    if (player)
+        player->pad[0] = (uintptr_t)strdup(
+            url_path_text((struct proxy_url *)url));
+    return player;
+}
+
+static void proxy_av_controller_set_player(struct proxy_uikit_object *self,
+                                           sword3_objc_sel selector,
+                                           sword3_objc_id player)
+{
+    (void)selector;
+    if (self)
+        self->pad[0] = (uintptr_t)player;
+}
+
+static sword3_objc_id proxy_av_controller_player(
+    struct proxy_uikit_object *self,
+    sword3_objc_sel selector)
+{
+    (void)selector;
+    return self ? (sword3_objc_id)self->pad[0] : NULL;
 }
 
 static sword3_objc_id proxy_av_init_url(sword3_objc_id self,
                                         sword3_objc_sel selector,
                                         sword3_objc_id url)
 {
+    struct proxy_uikit_object *player = self;
     (void)selector;
-    (void)url;
+    if (!player)
+        return NULL;
+    free((void *)player->pad[0]);
+    player->pad[0] = (uintptr_t)strdup(
+        url_path_text((struct proxy_url *)url));
     return self;
+}
+
+static void proxy_av_video_finished(void)
+{
+    dispatch_notification("AVPlayerItemDidPlayToEndTimeNotification", NULL);
 }
 
 static void proxy_av_play(sword3_objc_id self, sword3_objc_sel selector)
 {
+    typedef int (*host_play_video_fn)(const char *, void (*)(void));
+    static host_play_video_fn host_play_video;
+    static int resolved;
+    struct proxy_uikit_object *player = self;
+    const char *path = player ? (const char *)player->pad[0] : NULL;
+
     (void)selector;
-    dispatch_notification("AVPlayerItemDidPlayToEndTimeNotification", self);
+    if (!resolved) {
+        resolved = 1;
+        host_play_video = (host_play_video_fn)dlsym(
+            RTLD_DEFAULT, "sword3_host_play_video_file");
+    }
+    fprintf(stderr, "sword3-ios-shim: AVPlayer play %s\n",
+            path && path[0] ? path : "(no path)");
+    if (!host_play_video || !path || !path[0] ||
+            host_play_video(path, proxy_av_video_finished) != 0)
+        proxy_av_video_finished();
+}
+
+static void proxy_av_pause(sword3_objc_id self, sword3_objc_sel selector)
+{
+    typedef void (*host_stop_video_fn)(void);
+    static host_stop_video_fn host_stop_video;
+    static int resolved;
+
+    (void)self;
+    (void)selector;
+    if (!resolved) {
+        resolved = 1;
+        host_stop_video = (host_stop_video_fn)dlsym(
+            RTLD_DEFAULT, "sword3_host_stop_video");
+    }
+    if (host_stop_video)
+        host_stop_video();
 }
 
 static int copy_nsdata_bytes(sword3_objc_id object, void **out, size_t *out_len)
@@ -3733,8 +3809,19 @@ static const struct proxy_method_list proxy_av_player_methods = {
     .count = 3,
     .methods = {
         {"play", "v16@0:8", (sword3_objc_imp)proxy_av_play},
-        {"pause", "v16@0:8", (sword3_objc_imp)proxy_noop},
+        {"pause", "v16@0:8", (sword3_objc_imp)proxy_av_pause},
         {"initWithURL:", "@24@0:8@16", (sword3_objc_imp)proxy_av_init_url},
+    },
+};
+
+static const struct proxy_method_list proxy_av_player_controller_methods = {
+    .entsize_and_flags = sizeof(struct sword3_objc_method),
+    .count = 2,
+    .methods = {
+        {"setPlayer:", "v24@0:8@16",
+         (sword3_objc_imp)proxy_av_controller_set_player},
+        {"player", "@16@0:8",
+         (sword3_objc_imp)proxy_av_controller_player},
     },
 };
 
@@ -4196,6 +4283,22 @@ static const struct sword3_objc_class_ro proxy_av_player_ro = {
         (const struct sword3_objc_method_list *)&proxy_av_player_methods,
 };
 
+static const struct sword3_objc_class_ro proxy_av_player_controller_ro = {
+    .flags = SWORD3_OBJC_RO_ROOT,
+    .instance_size = sizeof(struct proxy_uikit_object),
+    .name = "AVPlayerViewController",
+    .base_methods =
+        (const struct sword3_objc_method_list *)
+            &proxy_av_player_controller_methods,
+};
+
+static const struct sword3_objc_class_ro
+proxy_av_player_controller_metaclass_ro = {
+    .flags = SWORD3_OBJC_RO_META | SWORD3_OBJC_RO_ROOT,
+    .instance_size = sizeof(struct sword3_objc_class),
+    .name = "AVPlayerViewController",
+};
+
 static const struct sword3_objc_class_ro proxy_av_player_metaclass_ro = {
     .flags = SWORD3_OBJC_RO_META | SWORD3_OBJC_RO_ROOT,
     .instance_size = sizeof(struct sword3_objc_class),
@@ -4574,6 +4677,19 @@ static struct sword3_objc_class proxy_av_player_metaclass = {
     .isa = &proxy_av_player_metaclass,
     .data_bits = (uintptr_t)&proxy_av_player_metaclass_ro,
 };
+
+static struct sword3_objc_class proxy_av_player_view_controller_metaclass = {
+    .isa = &proxy_av_player_view_controller_metaclass,
+    .superclass = &proxy_view_controller_metaclass,
+    .data_bits = (uintptr_t)&proxy_av_player_controller_metaclass_ro,
+};
+
+SWORD3_EXPORT struct sword3_objc_class proxy_av_player_view_controller_class
+    __asm__("OBJC_CLASS_$_AVPlayerViewController") = {
+        .isa = &proxy_av_player_view_controller_metaclass,
+        .superclass = &proxy_view_controller_class,
+        .data_bits = (uintptr_t)&proxy_av_player_controller_ro,
+    };
 
 SWORD3_EXPORT struct sword3_objc_class proxy_av_player_class
     __asm__("OBJC_CLASS_$_AVPlayer") = {

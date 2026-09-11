@@ -171,6 +171,24 @@ pkg_check_modules(SWORD3_SDL REQUIRED IMPORTED_TARGET
     sdl2 SDL2_mixer SDL2_image SDL2_ttf)
 pkg_check_modules(SWORD3_FFMPEG REQUIRED IMPORTED_TARGET
     libavformat libavcodec libavutil libswscale)
+
+# Some ROCKNIX dependency .pc files already embed the absolute sysroot in
+# their prefix (notably freetype2.pc).  pkg-config prepends
+# PKG_CONFIG_SYSROOT_DIR again, producing a non-existent path.  Normalize
+# that duplicate without changing the SDK's generated metadata in place.
+if(CMAKE_CROSSCOMPILING AND CMAKE_SYSROOT)
+    foreach(_sword3_pkg_target PkgConfig::SWORD3_SDL PkgConfig::SWORD3_FFMPEG)
+        get_target_property(_sword3_pkg_includes ${_sword3_pkg_target}
+            INTERFACE_INCLUDE_DIRECTORIES)
+        if(_sword3_pkg_includes)
+            string(REPLACE "${CMAKE_SYSROOT}${CMAKE_SYSROOT}"
+                "${CMAKE_SYSROOT}" _sword3_pkg_includes
+                "${_sword3_pkg_includes}")
+            set_target_properties(${_sword3_pkg_target} PROPERTIES
+                INTERFACE_INCLUDE_DIRECTORIES "${_sword3_pkg_includes}")
+        endif()
+    endforeach()
+endif()
 add_library(sword3_host SHARED
     src/ports/sword3/host_prepare.c
     src/ports/sword3/sdl_bridge.c

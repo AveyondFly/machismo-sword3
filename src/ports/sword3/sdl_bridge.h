@@ -132,6 +132,11 @@ void sword3_host_resume_memory_audio(void);
 int sword3_host_memory_audio_playing(void);
 void sword3_host_set_memory_audio_volume(int volume);
 
+/* Host AVPlayer replacement backed by FFmpeg and the existing SDL renderer. */
+int sword3_host_play_video_file(const char *path, void (*done)(void));
+void sword3_host_stop_video(void);
+int sword3_host_video_playing(void);
+
 /* Generic 0-return stub used by Pal2 joystick address hooks. */
 int sword3_ret0(void);
 

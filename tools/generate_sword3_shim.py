@@ -91,6 +91,7 @@ IMPLEMENTED_DATA = frozenset(
         "OBJC_CLASS_$_NSNotificationCenter",
         "OBJC_CLASS_$_AVPlayer",
         "OBJC_CLASS_$_AVPlayerLayer",
+        "OBJC_CLASS_$_AVPlayerViewController",
         "OBJC_CLASS_$_AVAudioPlayer",
         "OBJC_CLASS_$_CADisplayLink",
         "OBJC_CLASS_$_NSRunLoop",

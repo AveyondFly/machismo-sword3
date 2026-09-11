@@ -1,6 +1,7 @@
 #include "sdl_bridge.h"
 #include "audio_bridge.h"
 #include "host_cheat.h"
+#include "video_bridge.h"
 
 #include <dlfcn.h>
 #ifndef RTLD_DEFAULT
@@ -16,6 +17,11 @@
 
 #include <SDL2/SDL_image.h>
 #include <SDL2/SDL_mixer.h>
+
+#include <libavcodec/avcodec.h>
+#include <libavformat/avformat.h>
+#include <libavutil/channel_layout.h>
+#include <libavutil/samplefmt.h>
 
 #ifndef SDL_WINDOW_METAL
 #define SDL_WINDOW_METAL 0x20000000u
@@ -281,6 +287,7 @@ static int g_save_ui;
 static int g_after_continue;
 static int g_talk_space_se;
 static int g_space_release_pending;
+static SDL_Scancode g_movie_swallow_keyup;
 static Uint32 g_cursor_sound_ms;
 static SDL_AudioDeviceID g_guest_audio_device;
 static SDL_AudioFormat g_guest_audio_format = AUDIO_S16SYS;
@@ -994,6 +1001,11 @@ static int rewrite_event(SDL_Event *event)
 
 	if (!event)
 		return 0;
+	if (event->type == SDL_KEYUP && g_movie_swallow_keyup != SDL_SCANCODE_UNKNOWN &&
+	    event->key.keysym.scancode == g_movie_swallow_keyup) {
+		g_movie_swallow_keyup = SDL_SCANCODE_UNKNOWN;
+		return 0;
+	}
 	scale_pointer_event(event);
 	if (is_guest_pad_event(event->type) || event->type == SDL_MOUSEMOTION)
 		return 0;
@@ -2427,4 +2439,485 @@ __attribute__((visibility("default")))
 void sword3_host_set_memory_audio_volume(int volume)
 {
 	sword3_host_set_memory_audio_volume_for((void *)(uintptr_t)1, volume);
+}
+
+struct movie_audio {
+	AVFormatContext *format;
+	AVCodecContext *codec;
+	AVFrame *frame;
+	AVPacket *packet;
+	SDL_AudioDeviceID device;
+	SDL_AudioStream *stream;
+	void *packed;
+	size_t packed_size;
+	void *pcm;
+	size_t pcm_size;
+	int stream_index;
+	int eof;
+	int packet_pending;
+};
+
+static struct {
+	Sword3Video *video;
+	Sword3VideoFrame frame;
+	SDL_Texture *texture;
+	struct movie_audio audio;
+	void (*done)(void);
+	Uint32 start_ms;
+	Uint32 last_present_ms;
+	unsigned frames;
+	int have_frame;
+	int active;
+	int closing;
+	int tex_w;
+	int tex_h;
+} g_movie;
+
+static void movie_audio_close(void)
+{
+	struct movie_audio *audio = &g_movie.audio;
+
+	if (audio->device) {
+		SDL_PauseAudioDevice(audio->device, 1);
+		SDL_ClearQueuedAudio(audio->device);
+		SDL_CloseAudioDevice(audio->device);
+	}
+	if (audio->stream)
+		SDL_FreeAudioStream(audio->stream);
+	av_packet_free(&audio->packet);
+	av_frame_free(&audio->frame);
+	avcodec_free_context(&audio->codec);
+	avformat_close_input(&audio->format);
+	free(audio->packed);
+	free(audio->pcm);
+	memset(audio, 0, sizeof(*audio));
+}
+
+static int movie_audio_open(const char *path)
+{
+	struct movie_audio *audio = &g_movie.audio;
+	const AVCodec *decoder = NULL;
+	SDL_AudioSpec want;
+	SDL_AudioSpec have;
+	int stream_index;
+	int rc;
+
+	memset(audio, 0, sizeof(*audio));
+	audio->stream_index = -1;
+	rc = avformat_open_input(&audio->format, path, NULL, NULL);
+	if (rc < 0)
+		return -1;
+	rc = avformat_find_stream_info(audio->format, NULL);
+	if (rc < 0)
+		goto fail;
+	stream_index = av_find_best_stream(audio->format, AVMEDIA_TYPE_AUDIO,
+					   -1, -1, &decoder, 0);
+	if (stream_index < 0 || !decoder)
+		goto fail;
+	audio->stream_index = stream_index;
+	audio->codec = avcodec_alloc_context3(decoder);
+	if (!audio->codec)
+		goto fail;
+	rc = avcodec_parameters_to_context(
+		audio->codec, audio->format->streams[stream_index]->codecpar);
+	if (rc < 0)
+		goto fail;
+	rc = avcodec_open2(audio->codec, decoder, NULL);
+	if (rc < 0)
+		goto fail;
+	audio->frame = av_frame_alloc();
+	audio->packet = av_packet_alloc();
+	if (!audio->frame || !audio->packet)
+		goto fail;
+	SDL_zero(want);
+	want.freq = 44100;
+	want.format = AUDIO_S16SYS;
+	want.channels = 2;
+	want.samples = 2048;
+	audio->device = SDL_OpenAudioDevice(NULL, 0, &want, &have, 0);
+	if (!audio->device) {
+		fprintf(stderr, "sword3-sdl: movie audio device failed: %s\n",
+			SDL_GetError());
+		goto fail;
+	}
+	SDL_PauseAudioDevice(audio->device, 0);
+	return 0;
+
+fail:
+	movie_audio_close();
+	return -1;
+}
+
+static int movie_audio_ensure_stream(const AVFrame *frame)
+{
+	struct movie_audio *audio = &g_movie.audio;
+	enum AVSampleFormat packed;
+	SDL_AudioFormat sdl_fmt;
+	int channels;
+	int sample_rate;
+
+	if (audio->stream)
+		return 0;
+	channels = frame->ch_layout.nb_channels;
+	if (channels <= 0)
+		channels = audio->codec->ch_layout.nb_channels;
+	if (channels <= 0)
+		return -1;
+	packed = av_get_packed_sample_fmt((enum AVSampleFormat)frame->format);
+	if (packed == AV_SAMPLE_FMT_FLT)
+		sdl_fmt = AUDIO_F32SYS;
+	else if (packed == AV_SAMPLE_FMT_S16)
+		sdl_fmt = AUDIO_S16SYS;
+	else
+		return -1;
+	sample_rate = frame->sample_rate > 0 ? frame->sample_rate :
+		audio->codec->sample_rate;
+	audio->stream = SDL_NewAudioStream(sdl_fmt, channels, sample_rate,
+					   AUDIO_S16SYS, 2, 44100);
+	if (!audio->stream) {
+		fprintf(stderr, "sword3-sdl: movie audio stream failed: %s\n",
+			SDL_GetError());
+		return -1;
+	}
+	return 0;
+}
+
+static int movie_audio_put_frame(AVFrame *frame)
+{
+	struct movie_audio *audio = &g_movie.audio;
+	enum AVSampleFormat packed;
+	int planar;
+	int channels;
+	int samples;
+	int sample_bytes;
+	size_t bytes;
+	int available;
+	int got;
+
+	if (movie_audio_ensure_stream(frame) != 0)
+		return -1;
+	channels = frame->ch_layout.nb_channels;
+	if (channels <= 0)
+		channels = audio->codec->ch_layout.nb_channels;
+	samples = frame->nb_samples;
+	if (channels <= 0 || samples <= 0)
+		return 0;
+	packed = av_get_packed_sample_fmt((enum AVSampleFormat)frame->format);
+	planar = av_sample_fmt_is_planar((enum AVSampleFormat)frame->format);
+	sample_bytes = av_get_bytes_per_sample(packed);
+	if (sample_bytes <= 0)
+		return -1;
+	bytes = (size_t)samples * (size_t)channels * (size_t)sample_bytes;
+	if (bytes > audio->packed_size) {
+		void *grown = realloc(audio->packed, bytes);
+
+		if (!grown)
+			return -1;
+		audio->packed = grown;
+		audio->packed_size = bytes;
+	}
+	if (planar) {
+		int sample;
+		int channel;
+		unsigned char *out = audio->packed;
+
+		for (sample = 0; sample < samples; ++sample) {
+			for (channel = 0; channel < channels; ++channel) {
+				memcpy(out,
+				       frame->extended_data[channel] +
+					       sample * sample_bytes,
+				       (size_t)sample_bytes);
+				out += sample_bytes;
+			}
+		}
+	} else {
+		memcpy(audio->packed, frame->extended_data[0], bytes);
+	}
+	if (SDL_AudioStreamPut(audio->stream, audio->packed, (int)bytes) != 0)
+		return -1;
+	available = SDL_AudioStreamAvailable(audio->stream);
+	if (available <= 0)
+		return 0;
+	if ((size_t)available > audio->pcm_size) {
+		void *grown = realloc(audio->pcm, (size_t)available);
+
+		if (!grown)
+			return -1;
+		audio->pcm = grown;
+		audio->pcm_size = (size_t)available;
+	}
+	got = SDL_AudioStreamGet(audio->stream, audio->pcm, available);
+	if (got > 0)
+		SDL_QueueAudio(audio->device, audio->pcm, (Uint32)got);
+	return 0;
+}
+
+static void movie_audio_pump(void)
+{
+	struct movie_audio *audio = &g_movie.audio;
+	int attempts;
+	int rc;
+
+	if (!audio->device || audio->eof)
+		return;
+	for (attempts = 0; attempts < 24; ++attempts) {
+		if (SDL_GetQueuedAudioSize(audio->device) >= 44100u * 4u / 2u)
+			return;
+		rc = avcodec_receive_frame(audio->codec, audio->frame);
+		if (rc == 0) {
+			if (movie_audio_put_frame(audio->frame) != 0) {
+				fprintf(stderr,
+					"sword3-sdl: movie audio convert failed\n");
+				audio->eof = 1;
+				return;
+			}
+			av_frame_unref(audio->frame);
+			continue;
+		}
+		if (rc == AVERROR_EOF) {
+			audio->eof = 1;
+			return;
+		}
+		if (rc != AVERROR(EAGAIN)) {
+			fprintf(stderr,
+				"sword3-sdl: movie audio decode failed\n");
+			audio->eof = 1;
+			return;
+		}
+		if (audio->packet_pending) {
+			rc = avcodec_send_packet(audio->codec, audio->packet);
+			if (rc == 0) {
+				audio->packet_pending = 0;
+				av_packet_unref(audio->packet);
+				continue;
+			}
+			if (rc != AVERROR(EAGAIN)) {
+				audio->eof = 1;
+				return;
+			}
+		}
+		rc = av_read_frame(audio->format, audio->packet);
+		if (rc == AVERROR_EOF) {
+			avcodec_send_packet(audio->codec, NULL);
+			continue;
+		}
+		if (rc < 0) {
+			audio->eof = 1;
+			return;
+		}
+		if (audio->packet->stream_index != audio->stream_index) {
+			av_packet_unref(audio->packet);
+			continue;
+		}
+		audio->packet_pending = 1;
+	}
+}
+
+static void movie_close(int notify)
+{
+	void (*done)(void) = g_movie.done;
+
+	if (g_movie.closing || (!g_movie.active && !g_movie.video))
+		return;
+	g_movie.closing = 1;
+	g_movie.active = 0;
+	g_movie.done = NULL;
+	g_movie.have_frame = 0;
+	g_movie.frames = 0;
+	movie_audio_close();
+	if (g_movie.texture) {
+		owner_unregister("movie", KIND_TEXTURE, g_movie.texture);
+		SDL_DestroyTexture(g_movie.texture);
+		g_movie.texture = NULL;
+	}
+	sword3_video_close(g_movie.video);
+	g_movie.video = NULL;
+	g_movie.tex_w = 0;
+	g_movie.tex_h = 0;
+	if (notify && done)
+		done();
+	g_movie.closing = 0;
+}
+
+static int movie_ensure_texture(int width, int height)
+{
+	if (g_movie.texture && g_movie.tex_w == width &&
+	    g_movie.tex_h == height)
+		return 0;
+	if (g_movie.texture) {
+		owner_unregister("movie", KIND_TEXTURE, g_movie.texture);
+		SDL_DestroyTexture(g_movie.texture);
+		g_movie.texture = NULL;
+	}
+	g_movie.texture = SDL_CreateTexture(g_renderer, SDL_PIXELFORMAT_RGBA32,
+					    SDL_TEXTUREACCESS_STREAMING,
+					    width, height);
+	if (!g_movie.texture) {
+		fprintf(stderr, "sword3-sdl: movie texture failed: %s\n",
+			SDL_GetError());
+		return -1;
+	}
+	owner_register(KIND_TEXTURE, g_movie.texture);
+	g_movie.tex_w = width;
+	g_movie.tex_h = height;
+#if SDL_VERSION_ATLEAST(2, 0, 12)
+	SDL_SetTextureScaleMode(g_movie.texture, SDL_ScaleModeLinear);
+#endif
+	return 0;
+}
+
+static void movie_present(void)
+{
+	double elapsed;
+	double hold;
+	int decoded;
+
+	if (!g_movie.active || !g_movie.video)
+		return;
+	elapsed = (double)(SDL_GetTicks() - g_movie.start_ms) / 1000.0;
+	movie_audio_pump();
+	for (;;) {
+		hold = g_movie.frame.duration_seconds;
+		if (hold <= 0.0)
+			hold = 1.0 / 30.0;
+		if (g_movie.have_frame &&
+		    g_movie.frame.pts_seconds + hold > elapsed)
+			break;
+		decoded = sword3_video_next_frame(g_movie.video, &g_movie.frame);
+		if (decoded <= 0) {
+			fprintf(stderr, "sword3-sdl: movie finished (%s)\n",
+				decoded < 0 ? sword3_video_error(g_movie.video) :
+					      "eof");
+			movie_close(1);
+			return;
+		}
+		g_movie.have_frame = 1;
+		if (movie_ensure_texture(g_movie.frame.width,
+					 g_movie.frame.height) != 0) {
+			movie_close(1);
+			return;
+		}
+		if (SDL_UpdateTexture(g_movie.texture, NULL, g_movie.frame.rgba,
+				      g_movie.frame.stride) != 0) {
+			fprintf(stderr, "sword3-sdl: movie UpdateTexture: %s\n",
+				SDL_GetError());
+			movie_close(1);
+			return;
+		}
+		g_movie.frames++;
+		if (g_movie.frames == 1)
+			fprintf(stderr,
+				"sword3-sdl: movie first frame %dx%d\n",
+				g_movie.frame.width, g_movie.frame.height);
+		else if ((g_movie.frames % 30) == 0)
+			fprintf(stderr, "sword3-sdl: movie frame %u t=%.2f\n",
+				g_movie.frames, g_movie.frame.pts_seconds);
+	}
+	if (g_movie.texture)
+		SDL_RenderCopy(g_renderer, g_movie.texture, NULL, NULL);
+}
+
+static void movie_skip(SDL_Scancode scancode)
+{
+	if (!g_movie.active)
+		return;
+	fprintf(stderr, "sword3-sdl: skipping movie\n");
+	g_movie_swallow_keyup = scancode;
+	movie_close(1);
+}
+
+static void movie_pump_events(void)
+{
+	SDL_Event event;
+
+	SDL_PumpEvents();
+	while (SDL_PeepEvents(&event, 1, SDL_GETEVENT, SDL_FIRSTEVENT,
+			      SDL_LASTEVENT) > 0) {
+		if (event.type == SDL_QUIT) {
+			movie_close(1);
+			return;
+		}
+		if (event.type == SDL_KEYDOWN && !event.key.repeat &&
+		    (event.key.keysym.scancode == SDL_SCANCODE_SPACE ||
+		     event.key.keysym.scancode == SDL_SCANCODE_RETURN ||
+		     event.key.keysym.scancode == SDL_SCANCODE_ESCAPE)) {
+			movie_skip(event.key.keysym.scancode);
+			return;
+		}
+		if (event.type == SDL_FINGERDOWN ||
+		    event.type == SDL_MOUSEBUTTONDOWN) {
+			movie_skip(SDL_SCANCODE_SPACE);
+			return;
+		}
+	}
+}
+
+static void movie_host_tick(void)
+{
+	Uint32 now;
+
+	if (!g_movie.active || !g_renderer)
+		return;
+	now = SDL_GetTicks();
+	if (g_movie.last_present_ms && now - g_movie.last_present_ms < 16)
+		return;
+	SDL_SetRenderTarget(g_renderer, NULL);
+	SDL_SetRenderDrawColor(g_renderer, 0, 0, 0, 255);
+	SDL_RenderClear(g_renderer);
+	movie_present();
+	if (!g_movie.active)
+		return;
+	SDL_RenderPresent(g_renderer);
+	g_movie.last_present_ms = now;
+}
+
+static void movie_run_until_done(void)
+{
+	fprintf(stderr, "sword3-sdl: movie blocking present loop\n");
+	while (g_movie.active) {
+		movie_pump_events();
+		if (!g_movie.active)
+			break;
+		movie_host_tick();
+		SDL_Delay(8);
+	}
+}
+
+__attribute__((visibility("default")))
+int sword3_host_video_playing(void)
+{
+	return g_movie.active;
+}
+
+__attribute__((visibility("default")))
+int sword3_host_play_video_file(const char *path, void (*done)(void))
+{
+	if (!path || !path[0] || !g_renderer)
+		return -1;
+	movie_close(0);
+	g_movie.video = sword3_video_open(path);
+	if (!g_movie.video) {
+		fprintf(stderr, "sword3-sdl: video open failed: %s\n", path);
+		return -1;
+	}
+	if (movie_audio_open(path) != 0)
+		fprintf(stderr, "sword3-sdl: movie audio unavailable for %s\n",
+			path);
+	g_movie.done = done;
+	g_movie.start_ms = SDL_GetTicks();
+	g_movie.last_present_ms = 0;
+	g_movie.have_frame = 0;
+	g_movie.active = 1;
+	fprintf(stderr, "sword3-sdl: playing video %s\n", path);
+	movie_run_until_done();
+	return 0;
+}
+
+__attribute__((visibility("default")))
+void sword3_host_stop_video(void)
+{
+	if (!g_movie.active)
+		return;
+	fprintf(stderr, "sword3-sdl: stopping video\n");
+	movie_close(1);
 }
