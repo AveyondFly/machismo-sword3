@@ -1,6 +1,7 @@
 #include "host_cheat.h"
 #include "host_font.h"
 
+#include <stdint.h>
 #include <stdio.h>
 #include <string.h>
 
@@ -12,6 +13,23 @@
 #define CHEAT_PANEL_H 272
 #define CHEAT_ROW_H 28
 #define CHEAT_TEXT_CACHE 32
+#define CHEAT_MONEY_MAX 99999999
+
+/* Paladin 2's SaveData bridge and its four persistent player records. */
+#define PAL2_LUA_DATA 0x100490e18ull
+#define PAL2_LUA_SET_I32 0x1001eb054ull
+#define PAL2_STR_PLAYER_DATA 0x1002285fbull
+#define PAL2_STR_GOLDS 0x100228606ull
+#define PAL2_PLAYER_DATA 0x10046ee30ull
+#define PAL2_PLAYER_COUNT 4
+#define PAL2_PLAYER_STRIDE 0x28cu
+#define PAL2_PLAYER_FIRST 4u
+#define PAL2_PLAYER_ID 0u
+#define PAL2_PLAYER_HP 0x118u
+#define PAL2_PLAYER_HP_MAX 0x11cu
+#define PAL2_PLAYER_MP 0x124u
+#define PAL2_PLAYER_MP_MAX 0x128u
+#define PAL2_PLAYER_GOLD 0xb08u
 
 enum cheat_item {
 	CHEAT_MONEY = 0,
@@ -41,6 +59,71 @@ static struct {
 } g_text[CHEAT_TEXT_CACHE];
 static int g_text_clock;
 static SDL_Renderer *g_text_renderer;
+
+static void cheat_set_status(const char *status);
+
+static int cheat_sane_stat(int value)
+{
+	return value > 0 && value <= 9999999;
+}
+
+static void cheat_apply_money(void)
+{
+	volatile int32_t *gold = (volatile int32_t *)(uintptr_t)(
+		PAL2_PLAYER_DATA + PAL2_PLAYER_GOLD);
+
+	*gold = CHEAT_MONEY_MAX;
+	((void (*)(void *, const void *, const void *, int))
+		(uintptr_t)PAL2_LUA_SET_I32)(
+		(void *)(uintptr_t)PAL2_LUA_DATA,
+		(const void *)(uintptr_t)PAL2_STR_PLAYER_DATA,
+		(const void *)(uintptr_t)PAL2_STR_GOLDS,
+		CHEAT_MONEY_MAX);
+	cheat_set_status("金钱已拉满");
+	fprintf(stderr, "sword3-sdl: Pal2 trainer money=%d\n",
+		CHEAT_MONEY_MAX);
+}
+
+static void cheat_apply_hp(void)
+{
+	volatile int32_t *manager =
+		(volatile int32_t *)(uintptr_t)PAL2_PLAYER_DATA;
+	int count = manager[0];
+	int filled = 0;
+	int i;
+
+	if (count < 0 || count > PAL2_PLAYER_COUNT)
+		count = 0;
+	for (i = 0; i < count; i++) {
+		volatile uint8_t *record = (volatile uint8_t *)manager +
+			PAL2_PLAYER_FIRST + (uintptr_t)i * PAL2_PLAYER_STRIDE;
+		volatile int32_t *id =
+			(volatile int32_t *)(record + PAL2_PLAYER_ID);
+		volatile int32_t *hp =
+			(volatile int32_t *)(record + PAL2_PLAYER_HP);
+		volatile int32_t *hp_max =
+			(volatile int32_t *)(record + PAL2_PLAYER_HP_MAX);
+		volatile int32_t *mp =
+			(volatile int32_t *)(record + PAL2_PLAYER_MP);
+		volatile int32_t *mp_max =
+			(volatile int32_t *)(record + PAL2_PLAYER_MP_MAX);
+
+		if (*id <= 0 || !cheat_sane_stat(*hp_max))
+			continue;
+		*hp = *hp_max;
+		if (cheat_sane_stat(*mp_max))
+			*mp = *mp_max;
+		filled++;
+	}
+	if (filled) {
+		cheat_set_status("全员已满血");
+		fprintf(stderr,
+			"sword3-sdl: Pal2 trainer filled %d player records\n",
+			filled);
+	} else {
+		cheat_set_status("找不到队伍数据");
+	}
+}
 
 static int cheat_sx(int value, int logical_w)
 {
@@ -90,8 +173,10 @@ static void cheat_apply(void)
 {
 	switch (g_selected) {
 	case CHEAT_MONEY:
+		cheat_apply_money();
+		break;
 	case CHEAT_HP:
-		cheat_set_status("功能尚未接入");
+		cheat_apply_hp();
 		break;
 	case CHEAT_NO_ENCOUNTER:
 		g_no_encounter = !g_no_encounter;
