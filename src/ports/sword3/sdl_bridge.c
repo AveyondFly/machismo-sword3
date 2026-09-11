@@ -1,5 +1,6 @@
 #include "sdl_bridge.h"
 #include "audio_bridge.h"
+#include "host_cheat.h"
 
 #include <dlfcn.h>
 #ifndef RTLD_DEFAULT
@@ -798,7 +799,7 @@ static int is_guest_pad_event(Uint32 type)
 	return type >= SDL_JOYAXISMOTION && type < SDL_FINGERDOWN;
 }
 
-static int pal2_talk_waiting(void)
+static uint32_t pal2_talk_wait_lock(void)
 {
 	volatile int32_t *talk_id =
 		(volatile int32_t *)(uintptr_t)(PAL2_EVENT_OBJ + 0x108);
@@ -814,7 +815,7 @@ static int pal2_talk_waiting(void)
 	    *channel_count < 1 || !channels)
 		return 0;
 	playing = *(volatile int32_t *)(channels + 8);
-	return playing > 0;
+	return playing > 0 ? *ulck : 0;
 }
 
 static void pal2_stop_waiting_se(void)
@@ -989,11 +990,24 @@ static int pal2_handle_tactic_key(SDL_Event *event)
 
 static int rewrite_event(SDL_Event *event)
 {
+	int cheat_was_open;
+
 	if (!event)
 		return 0;
 	scale_pointer_event(event);
 	if (is_guest_pad_event(event->type) || event->type == SDL_MOUSEMOTION)
 		return 0;
+	if (event->type == SDL_KEYDOWN || event->type == SDL_KEYUP) {
+		cheat_was_open = host_cheat_active();
+		if (host_cheat_key(event->key.keysym.scancode,
+				   event->type == SDL_KEYDOWN,
+				   event->key.repeat)) {
+			if (cheat_was_open != host_cheat_active())
+				((void (*)(void *))(uintptr_t)PAL2_INPUT_RESET)(
+					(void *)(uintptr_t)PAL2_INPUT_MANAGER);
+			return 0;
+		}
+	}
 	/* iOS SDL does not auto-repeat keys; Linux does. Save/list UIs
 	 * treat each KEYDOWN as one step, so drop host repeats. */
 	if (event->type == SDL_KEYDOWN && event->key.repeat)
@@ -1006,10 +1020,20 @@ static int rewrite_event(SDL_Event *event)
 		return 0;
 	if ((event->type == SDL_KEYDOWN || event->type == SDL_KEYUP) &&
 	    event->key.keysym.scancode == SDL_SCANCODE_SPACE) {
-		if (event->type == SDL_KEYDOWN && pal2_talk_waiting()) {
-			pal2_stop_waiting_se();
-			g_talk_space_se = 1;
-			return 0;
+		if (event->type == SDL_KEYDOWN) {
+			uint32_t talk_lock = pal2_talk_wait_lock();
+
+			if (talk_lock) {
+				pal2_stop_waiting_se();
+				/* A pure RMlock is a voiced dialogue wait: consume A
+				 * after ending the SE so it cannot also skip the next
+				 * line. A counted UI lock is an item notice; let the
+				 * same A reach the notice's normal confirm handler. */
+				if (talk_lock == PAL2_TALK_RMLOCK) {
+					g_talk_space_se = 1;
+					return 0;
+				}
+			}
 		}
 		if (event->type == SDL_KEYUP && g_talk_space_se) {
 			g_talk_space_se = 0;
@@ -1475,6 +1499,8 @@ void sword3_SDL_RenderPresent(SDL_Renderer *renderer)
 		SDL_SetRenderDrawColor(renderer, r, g, b, a);
 		SDL_SetRenderDrawBlendMode(renderer, blend);
 	}
+	if (host_cheat_active() && SDL_GetRenderTarget(renderer) == NULL)
+		host_cheat_draw(renderer, g_logical_w, g_logical_h);
 	SDL_RenderPresent(renderer);
 }
 
@@ -1904,7 +1930,9 @@ int sword3_SDL_WaitEventTimeout(SDL_Event *event, int timeout)
 const Uint8 *sword3_SDL_GetKeyboardState(int *numkeys)
 {
 	static unsigned seen;
+	static const Uint8 blocked[SDL_NUM_SCANCODES];
 	const Uint8 *state = SDL_GetKeyboardState(numkeys);
+	const Uint8 *guest_state = host_cheat_active() ? blocked : state;
 
 	if (seen < 3) {
 		seen++;
@@ -1915,7 +1943,7 @@ const Uint8 *sword3_SDL_GetKeyboardState(int *numkeys)
 			state ? state[SDL_SCANCODE_LEFT] : 0,
 			state ? state[SDL_SCANCODE_RIGHT] : 0);
 	}
-	return state;
+	return guest_state;
 }
 
 static int ensure_host_mixer(void);

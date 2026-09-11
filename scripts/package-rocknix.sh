@@ -45,6 +45,11 @@ cp "$ROOT/configs/paladin2/machismo.conf" \
    "$ROOT/configs/paladin2/paladin2.gptk" \
    "$ROOT/run-rocknix.sh" \
    "$OUTPUT.new/"
+CJK_FONT=/usr/share/fonts/truetype/droid/DroidSansFallbackFull.ttf
+if [ -f "$CJK_FONT" ]; then
+    mkdir -p "$OUTPUT.new/assets/host_menu"
+    cp "$CJK_FONT" "$OUTPUT.new/assets/host_menu/cjk.ttf"
+fi
 cat >"$OUTPUT.new/paladin2-ios.sh" <<'EOF'
 #!/bin/sh
 GAMEDIR=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)

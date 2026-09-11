@@ -4,7 +4,8 @@
 # Pal2 binds Return to OK+Menu; that Menu bit toggles 系统/设置, so A-as-Enter
 # opens a menu then backs out of it. Space is OK only.
 # SELECT+START still kills machismo via gptokeyb -k.
-back = esc
+# Select is dedicated to the host trainer; B remains the guest Back key.
+back = tab
 start = space
 a = space
 b = esc

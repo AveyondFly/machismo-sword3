@@ -167,12 +167,15 @@ set_target_properties(sword3_gl_bridge PROPERTIES
 if(NOT PkgConfig_FOUND)
     message(FATAL_ERROR "Sword3 host services require pkg-config")
 endif()
-pkg_check_modules(SWORD3_SDL REQUIRED IMPORTED_TARGET sdl2 SDL2_mixer SDL2_image)
+pkg_check_modules(SWORD3_SDL REQUIRED IMPORTED_TARGET
+    sdl2 SDL2_mixer SDL2_image SDL2_ttf)
 pkg_check_modules(SWORD3_FFMPEG REQUIRED IMPORTED_TARGET
     libavformat libavcodec libavutil libswscale)
 add_library(sword3_host SHARED
     src/ports/sword3/host_prepare.c
     src/ports/sword3/sdl_bridge.c
+    src/ports/sword3/host_cheat.c
+    src/ports/sword3/host_font.c
     src/ports/sword3/paths.c
     src/ports/sword3/input.c
     src/ports/sword3/audio_bridge.c
