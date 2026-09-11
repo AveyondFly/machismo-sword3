@@ -252,6 +252,19 @@ static void owner_drop(enum sword3_sdl_kind kind, void *pointer)
 #define PAL2_INPUT_LAST_KEYDOWN 0x2494
 #define PAL2_INPUT_SLOT_STATE 0
 #define PAL2_INPUT_SLOT_FLAGS 8
+#define PAL2_CHOICE_MANAGER 0x10049df40ull
+#define PAL2_CHOICE_ALLOC 0x100225c2cull
+#define PAL2_CHOICE_HEAD 0x788
+#define PAL2_CHOICE_COUNT 0x8f0
+#define PAL2_CHOICE_RESULTS 0x8f8
+#define PAL2_CHOICE_BUTTONS 0x30
+#define PAL2_CHOICE_WEIGHT 0x78
+#define PAL2_CHOICE_ACTIVE 0x7c
+#define PAL2_CHOICE_SELECTED 0x80
+#define PAL2_CHOICE_PRESSED 0x84
+#define PAL2_CHOICE_CONTENT 0xf8
+#define PAL2_CHOICE_NEXT 0x118
+#define PAL2_CHOICE_HIDDEN 0x128
 #define PAL2_LIST_PENDING 0x4d8
 #define PAL2_LIST_SELECTED 0x1280
 #define PAL2_LIST_SELECTED_INDEX 0x1288
@@ -859,6 +872,59 @@ static void pal2_release_keydown_latch(SDL_Scancode scancode)
 		*last_keydown = 0;
 }
 
+static int pal2_confirm_active_choice(void)
+{
+	static unsigned confirms;
+	uint8_t *manager = (uint8_t *)(uintptr_t)PAL2_CHOICE_MANAGER;
+	uint8_t *choice = *(uint8_t **)(manager + PAL2_CHOICE_HEAD);
+	uint8_t *result;
+	uint8_t **tail;
+	int32_t selected;
+	void *(*allocate)(size_t) =
+		(void *(*)(size_t))(uintptr_t)PAL2_CHOICE_ALLOC;
+
+	/*
+	 * Talk's horizontal choice buttons see keyboard action 6 on KEYDOWN,
+	 * but lose its release before their per-button update can submit the
+	 * highlighted choice. Mirror the native commit branch at 0x100213ec8
+	 * only for the currently active, visible choice group.
+	 */
+	while (choice) {
+		if (!choice[PAL2_CHOICE_HIDDEN] &&
+		    *(void **)(choice + PAL2_CHOICE_CONTENT) &&
+		    *(int32_t *)(manager + PAL2_CHOICE_COUNT) != 0 &&
+		    choice[PAL2_CHOICE_ACTIVE] &&
+		    *(void **)(choice + PAL2_CHOICE_BUTTONS)) {
+			selected = *(int32_t *)(choice + PAL2_CHOICE_SELECTED);
+			if (selected >= 1)
+				break;
+		}
+		choice = *(uint8_t **)(choice + PAL2_CHOICE_NEXT);
+	}
+	if (!choice)
+		return 0;
+
+	result = allocate(0x18);
+	memset(result, 0, 0x18);
+	result[8] = 1;
+	*(int32_t *)(result + 12) = selected;
+	tail = (uint8_t **)(manager + PAL2_CHOICE_RESULTS);
+	while (*tail)
+		tail = (uint8_t **)*tail;
+	*tail = result;
+
+	*(int32_t *)(choice + PAL2_CHOICE_PRESSED) = -1;
+	choice[PAL2_CHOICE_ACTIVE] = 0;
+	*(int32_t *)(manager + PAL2_CHOICE_COUNT) -=
+		*(int32_t *)(choice + PAL2_CHOICE_WEIGHT);
+	*(int32_t *)(choice + PAL2_CHOICE_WEIGHT) = 0;
+	if (confirms++ < 8)
+		fprintf(stderr,
+			"sword3-sdl: Pal2 choice confirmed from Space id=%d\n",
+			selected);
+	return 1;
+}
+
 void sword3_pal2_finish_list_release(void *opaque)
 {
 	static unsigned keyboard_finishes;
@@ -1052,7 +1118,10 @@ static int rewrite_event(SDL_Event *event)
 			return 0;
 		}
 		if (event->type == SDL_KEYUP) {
-			g_space_release_pending = 1;
+			if (pal2_confirm_active_choice())
+				g_space_release_pending = 0;
+			else
+				g_space_release_pending = 1;
 		}
 	}
 	if (event->type == SDL_MOUSEBUTTONDOWN ||
