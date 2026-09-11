@@ -36,6 +36,9 @@
 #define PAL2_PENDING_FIGHT 0x10046b50cull
 #define PAL2_FIGHT_SOURCE_SCRIPT 0x10028c344ull
 #define PAL2_FIGHT_HIT 0x100016260ull
+#define PAL2_FIGHT_DAMAGE_SITE 0x10001660cull
+#define PAL2_FIGHT_DAMAGE_RESUME 0x100016620ull
+#define PAL2_STR_FIGHT_DAMAGE 0x1002277b2ull
 #define PAL2_FIGHT_GET_PROPERTY 0x100040784ull
 #define PAL2_FIGHT_SET_HP 0x10001a0c0ull
 #define PAL2_STR_FIGHT_SOURCE_ID 0x10022775eull
@@ -104,6 +107,50 @@ static void *cheat_make_trampoline(uintptr_t function)
 	*(uint64_t *)(trampoline + 6) = function + 16;
 	__builtin___clear_cache((char *)trampoline, (char *)trampoline + 32);
 	return trampoline;
+}
+
+static void *cheat_make_one_hit_thunk(void)
+{
+	/*
+	 * This runs at Pal2's final damage value (x24), immediately before the
+	 * engine formats the floating number and subtracts HP.  The source actor
+	 * is saved at [sp+0x68], while x26 is the target actor.  Actor type 0 is
+	 * a player and type 2 is an enemy.
+	 */
+	static const uint32_t code[] = {
+		0xf94037f0u, /* ldr x16, [sp, #0x68] */
+		0xb9455611u, /* ldr w17, [x16, #0x554] */
+		0x35000111u, /* cbnz w17, normal */
+		0xb9455751u, /* ldr w17, [x26, #0x554] */
+		0x71000a3fu, /* cmp w17, #2 */
+		0x540000a1u, /* b.ne normal */
+		0x58000150u, /* ldr x16, one_hit_address */
+		0xb9400211u, /* ldr w17, [x16] */
+		0x34000051u, /* cbz w17, normal */
+		0xd284e1f8u, /* mov x24, #9999 */
+		0xf90033f8u, /* normal: str x24, [sp, #0x60] */
+		0xf90003f8u, /* str x24, [sp] */
+		0x9102c3e0u, /* add x0, sp, #0xb0 */
+		0x580000a1u, /* ldr x1, damage_string */
+		0x580000d0u, /* ldr x16, resume_address */
+		0xd61f0200u  /* br x16 */
+	};
+	uint8_t *thunk;
+	long page_size = sysconf(_SC_PAGESIZE);
+
+	if (page_size < 4096)
+		page_size = 4096;
+	thunk = mmap(NULL, (size_t)page_size,
+		PROT_READ | PROT_WRITE | PROT_EXEC,
+		MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+	if (thunk == MAP_FAILED)
+		return NULL;
+	memcpy(thunk, code, sizeof(code));
+	*(uint64_t *)(thunk + 64) = (uintptr_t)&g_one_hit;
+	*(uint64_t *)(thunk + 72) = PAL2_STR_FIGHT_DAMAGE;
+	*(uint64_t *)(thunk + 80) = PAL2_FIGHT_DAMAGE_RESUME;
+	__builtin___clear_cache((char *)thunk, (char *)thunk + 88);
+	return thunk;
 }
 
 static int cheat_patch_jump(uintptr_t function, void *hook,
@@ -281,6 +328,10 @@ void host_cheat_install(void)
 	static const uint32_t fight_hit_expected[4] = {
 		0x6db923e9u, 0xa9016ffcu, 0xa90267fau, 0xa9035ff8u
 	};
+	static const uint32_t fight_damage_expected[4] = {
+		0xf90033f8u, 0xf90003f8u, 0x9102c3e0u, 0xb0001081u
+	};
+	void *one_hit_thunk;
 
 	if (g_hooks_attempted)
 		return;
@@ -302,6 +353,15 @@ void host_cheat_install(void)
 	}
 	if (cheat_patch_jump(PAL2_FIGHT_HIT, cheat_fight_hit_hook,
 			     fight_hit_expected) != 0)
+		return;
+	one_hit_thunk = cheat_make_one_hit_thunk();
+	if (!one_hit_thunk) {
+		fprintf(stderr,
+			"sword3-sdl: Pal2 trainer one-hit thunk allocation failed\n");
+		return;
+	}
+	if (cheat_patch_jump(PAL2_FIGHT_DAMAGE_SITE, one_hit_thunk,
+			     fight_damage_expected) != 0)
 		return;
 	fprintf(stderr,
 		"sword3-sdl: Pal2 trainer battle hooks installed\n");
