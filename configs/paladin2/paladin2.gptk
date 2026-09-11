@@ -6,7 +6,8 @@
 # SELECT+START still kills machismo via gptokeyb -k.
 # Y opens the host trainer. Select and B are both the guest Back key.
 back = esc
-start = space
+# START is host-only fallback-cursor click; keep it distinct from A/Space.
+start = p
 a = space
 b = esc
 # Battle-only host shortcuts: R1 = 围攻, R2 = 强攻. M/N are consumed by

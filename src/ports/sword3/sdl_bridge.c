@@ -210,6 +210,8 @@ static void owner_drop(enum sword3_sdl_kind kind, void *pointer)
  */
 #define HOST_JOYSTICK_FLAGS \
 	(SDL_INIT_JOYSTICK | SDL_INIT_HAPTIC | SDL_INIT_GAMECONTROLLER)
+#define FALLBACK_CURSOR_PX_PER_SEC 380.0f
+#define FALLBACK_CURSOR_HIDE_MS 5000
 #define MENU_ITEMS 2
 #define MENU_GAME_X 115
 #define MENU_GAME_Y0 201
@@ -300,6 +302,15 @@ static int g_save_ui;
 static int g_after_continue;
 static int g_talk_space_se;
 static int g_space_release_pending;
+static int g_fallback_cursor_visible;
+static int g_fallback_cursor_initialized;
+static int g_fallback_cursor_modifier_down;
+static int g_fallback_cursor_modifier_used;
+static int g_fallback_cursor_start_down;
+static Uint32 g_fallback_cursor_hide_at;
+static Uint32 g_fallback_cursor_ticks;
+static Uint32 g_fallback_cursor_dirs;
+static Uint32 g_fallback_cursor_captured_dirs;
 static SDL_Scancode g_movie_swallow_keyup;
 static Uint32 g_cursor_sound_ms;
 static SDL_AudioDeviceID g_guest_audio_device;
@@ -451,6 +462,135 @@ static void ensure_cursor(void)
 	if (g_cursor_ready || g_logical_w <= 0 || g_logical_h <= 0)
 		return;
 	warp_menu_item(0);
+}
+
+static Uint32 fallback_cursor_direction_mask(SDL_Scancode scancode)
+{
+	switch (scancode) {
+	case SDL_SCANCODE_UP:
+		return UINT32_C(1) << 0;
+	case SDL_SCANCODE_RIGHT:
+		return UINT32_C(1) << 1;
+	case SDL_SCANCODE_DOWN:
+		return UINT32_C(1) << 2;
+	case SDL_SCANCODE_LEFT:
+		return UINT32_C(1) << 3;
+	default:
+		return 0;
+	}
+}
+
+static int fallback_cursor_allowed(void)
+{
+	return !sword3_host_video_playing() && !host_cheat_active() &&
+	       !*(volatile uint8_t *)(uintptr_t)PAL2_FIGHT_ACTIVE;
+}
+
+static void fallback_cursor_show(Uint32 now)
+{
+	if (!g_fallback_cursor_initialized) {
+		if (g_logical_w > 0 && g_logical_h > 0) {
+			g_cursor_x = (float)g_logical_w * 0.5f;
+			g_cursor_y = (float)g_logical_h * 0.5f;
+			g_cursor_ready = 1;
+		}
+		g_fallback_cursor_initialized = 1;
+	}
+	g_fallback_cursor_visible = 1;
+	g_fallback_cursor_hide_at = now + FALLBACK_CURSOR_HIDE_MS;
+}
+
+static int fallback_cursor_is_visible(void)
+{
+	Uint32 now;
+
+	if (!g_fallback_cursor_visible)
+		return 0;
+	if (!fallback_cursor_allowed()) {
+		g_fallback_cursor_visible = 0;
+		return 0;
+	}
+	now = SDL_GetTicks();
+	if (!g_fallback_cursor_start_down &&
+	    SDL_TICKS_PASSED(now, g_fallback_cursor_hide_at)) {
+		g_fallback_cursor_visible = 0;
+		fprintf(stderr, "sword3-sdl: fallback cursor hidden\n");
+		return 0;
+	}
+	return 1;
+}
+
+static void fallback_cursor_note_activity(void)
+{
+	if (g_fallback_cursor_visible)
+		g_fallback_cursor_hide_at =
+			SDL_GetTicks() + FALLBACK_CURSOR_HIDE_MS;
+}
+
+static void fallback_cursor_push_finger(Uint32 type)
+{
+	SDL_Event event;
+	float x;
+	float y;
+
+	ensure_cursor();
+	if (g_logical_w <= 0 || g_logical_h <= 0)
+		return;
+	x = g_cursor_x / (float)g_logical_w;
+	y = g_cursor_y / (float)g_logical_h;
+	memset(&event, 0, sizeof(event));
+	event.type = type;
+	event.tfinger.timestamp = SDL_GetTicks();
+	event.tfinger.touchId = TOUCH_ID;
+	event.tfinger.fingerId = FINGER_ID;
+	event.tfinger.x = x;
+	event.tfinger.y = y;
+	event.tfinger.pressure = type == SDL_FINGERUP ? 0.0f : 1.0f;
+	SDL_PushEvent(&event);
+}
+
+static void apply_fallback_cursor_move(void)
+{
+	float dx = 0.0f;
+	float dy = 0.0f;
+	float speed;
+	float dt;
+	Uint32 now;
+
+	if (!g_fallback_cursor_modifier_down || !fallback_cursor_allowed() ||
+	    g_logical_w <= 0 || g_logical_h <= 0) {
+		g_fallback_cursor_ticks = 0;
+		return;
+	}
+	now = SDL_GetTicks();
+	if (!g_fallback_cursor_ticks) {
+		g_fallback_cursor_ticks = now;
+		return;
+	}
+	dt = (float)(now - g_fallback_cursor_ticks) / 1000.0f;
+	g_fallback_cursor_ticks = now;
+	if (dt <= 0.0f)
+		return;
+	if (dt > 0.05f)
+		dt = 0.05f;
+	speed = FALLBACK_CURSOR_PX_PER_SEC *
+		(float)g_logical_w / (float)GAME_W;
+	if (g_fallback_cursor_dirs & (UINT32_C(1) << 0))
+		dy -= speed * dt;
+	if (g_fallback_cursor_dirs & (UINT32_C(1) << 1))
+		dx += speed * dt;
+	if (g_fallback_cursor_dirs & (UINT32_C(1) << 2))
+		dy += speed * dt;
+	if (g_fallback_cursor_dirs & (UINT32_C(1) << 3))
+		dx -= speed * dt;
+	if (dx == 0.0f && dy == 0.0f)
+		return;
+	fallback_cursor_show(now);
+	g_fallback_cursor_modifier_used = 1;
+	ensure_cursor();
+	g_cursor_x += dx;
+	g_cursor_y += dy;
+	clamp_cursor();
 }
 
 static void pal2_log_viewport(void)
@@ -808,6 +948,7 @@ static void apply_pad_pointer(void)
 {
 	pal2_log_viewport();
 	sync_ui_mode();
+	apply_fallback_cursor_move();
 	if (g_pointer_ui) {
 		ensure_cursor();
 		sync_game_pointer();
@@ -1061,6 +1202,98 @@ static int pal2_handle_tactic_key(SDL_Event *event)
 	return 1;
 }
 
+static int fallback_cursor_handle_key(SDL_Event *event)
+{
+	static unsigned clicks;
+	static const SDL_Scancode directions[] = {
+		SDL_SCANCODE_UP,
+		SDL_SCANCODE_RIGHT,
+		SDL_SCANCODE_DOWN,
+		SDL_SCANCODE_LEFT,
+	};
+	const Uint8 *state;
+	SDL_Scancode scancode;
+	Uint32 mask;
+	int down;
+	size_t i;
+
+	if (event->type != SDL_KEYDOWN && event->type != SDL_KEYUP)
+		return 0;
+	down = event->type == SDL_KEYDOWN;
+	scancode = event->key.keysym.scancode;
+
+	/* Start has a distinct gptokeyb mapping and never reaches the guest. */
+	if (scancode == SDL_SCANCODE_P) {
+		if (down && fallback_cursor_is_visible() &&
+		    !g_fallback_cursor_start_down) {
+			fallback_cursor_push_finger(SDL_FINGERDOWN);
+			g_fallback_cursor_start_down = 1;
+			fallback_cursor_note_activity();
+			if (clicks++ < 12)
+				fprintf(stderr,
+					"sword3-sdl: fallback cursor click %.0f,%.0f\n",
+					g_cursor_x, g_cursor_y);
+		} else if (!down && g_fallback_cursor_start_down) {
+			fallback_cursor_push_finger(SDL_FINGERUP);
+			g_fallback_cursor_start_down = 0;
+			fallback_cursor_note_activity();
+		}
+		return 1;
+	}
+
+	/* R1 remains the battle-only siege key; elsewhere it is the cursor
+	 * modifier. Reset guest input when taking ownership so a direction
+	 * already held before R1 cannot keep moving the player. */
+	if (scancode == SDL_SCANCODE_M) {
+		if (down &&
+		    *(volatile uint8_t *)(uintptr_t)PAL2_FIGHT_ACTIVE &&
+		    !g_fallback_cursor_modifier_down)
+			return 0;
+		if (down && fallback_cursor_allowed()) {
+			g_fallback_cursor_modifier_down = 1;
+			g_fallback_cursor_modifier_used = 0;
+			g_fallback_cursor_ticks = SDL_GetTicks();
+			g_fallback_cursor_dirs = 0;
+			g_fallback_cursor_captured_dirs = 0;
+			state = SDL_GetKeyboardState(NULL);
+			for (i = 0; i < sizeof(directions) /
+						 sizeof(directions[0]); i++) {
+				mask = fallback_cursor_direction_mask(directions[i]);
+				if (state && state[directions[i]]) {
+					g_fallback_cursor_dirs |= mask;
+					g_fallback_cursor_captured_dirs |= mask;
+				}
+			}
+			((void (*)(void *))(uintptr_t)PAL2_INPUT_RESET)(
+				(void *)(uintptr_t)PAL2_INPUT_MANAGER);
+		} else if (!down && g_fallback_cursor_modifier_down) {
+			g_fallback_cursor_modifier_down = 0;
+			g_fallback_cursor_ticks = 0;
+			g_fallback_cursor_dirs = 0;
+		}
+		return 1;
+	}
+
+	mask = fallback_cursor_direction_mask(scancode);
+	if (!mask)
+		return 0;
+	if (!down && (g_fallback_cursor_captured_dirs & mask)) {
+		g_fallback_cursor_dirs &= ~mask;
+		g_fallback_cursor_captured_dirs &= ~mask;
+		return 1;
+	}
+	if (!g_fallback_cursor_modifier_down)
+		return 0;
+	if (down && fallback_cursor_allowed()) {
+		g_fallback_cursor_dirs |= mask;
+		g_fallback_cursor_captured_dirs |= mask;
+		g_fallback_cursor_modifier_used = 1;
+	} else if (!down) {
+		g_fallback_cursor_dirs &= ~mask;
+	}
+	return 1;
+}
+
 static int rewrite_event(SDL_Event *event)
 {
 	int cheat_was_open;
@@ -1094,6 +1327,8 @@ static int rewrite_event(SDL_Event *event)
 		g_space_release_pending = 0;
 	if (event->type == SDL_KEYUP)
 		pal2_release_keydown_latch(event->key.keysym.scancode);
+	if (fallback_cursor_handle_key(event))
+		return 0;
 	if (pal2_handle_tactic_key(event))
 		return 0;
 	if ((event->type == SDL_KEYDOWN || event->type == SDL_KEYUP) &&
@@ -1132,6 +1367,7 @@ static int rewrite_event(SDL_Event *event)
 			g_cursor_ready = 1;
 			clamp_cursor();
 		}
+		fallback_cursor_note_activity();
 		return 1;
 	}
 	if (event->type == SDL_FINGERDOWN || event->type == SDL_FINGERUP ||
@@ -1142,6 +1378,7 @@ static int rewrite_event(SDL_Event *event)
 			g_cursor_ready = 1;
 			clamp_cursor();
 		}
+		fallback_cursor_note_activity();
 		return 1;
 	}
 	return 1;
@@ -1549,7 +1786,8 @@ void sword3_SDL_RenderPresent(SDL_Renderer *renderer)
 	seen++;
 	if (seen <= 8 || (seen % 120) == 0)
 		fprintf(stderr, "sword3-sdl: RenderPresent #%u\n", seen);
-	if (g_pointer_ui && g_cursor_ready && g_logical_w > 0 &&
+	if ((g_pointer_ui || fallback_cursor_is_visible()) && g_cursor_ready &&
+	    g_logical_w > 0 && g_logical_h > 0 &&
 	    SDL_GetRenderTarget(renderer) == NULL) {
 		x = (int)g_cursor_x;
 		y = (int)g_cursor_y;
@@ -2013,8 +2251,40 @@ const Uint8 *sword3_SDL_GetKeyboardState(int *numkeys)
 {
 	static unsigned seen;
 	static const Uint8 blocked[SDL_NUM_SCANCODES];
+	static Uint8 filtered[SDL_NUM_SCANCODES];
 	const Uint8 *state = SDL_GetKeyboardState(numkeys);
-	const Uint8 *guest_state = host_cheat_active() ? blocked : state;
+	const Uint8 *guest_state;
+	Uint32 mask;
+	SDL_Scancode scancode;
+	int i;
+	static const SDL_Scancode directions[] = {
+		SDL_SCANCODE_UP,
+		SDL_SCANCODE_RIGHT,
+		SDL_SCANCODE_DOWN,
+		SDL_SCANCODE_LEFT,
+	};
+
+	if (host_cheat_active()) {
+		guest_state = blocked;
+	} else if (state) {
+		memcpy(filtered, state, sizeof(filtered));
+		/* These keys belong to host-only actions. While R1 owns a
+		 * direction, also hide its polled state from the guest. */
+		filtered[SDL_SCANCODE_M] = 0;
+		filtered[SDL_SCANCODE_N] = 0;
+		filtered[SDL_SCANCODE_P] = 0;
+		for (i = 0; i < (int)(sizeof(directions) /
+					 sizeof(directions[0])); i++) {
+			scancode = directions[i];
+			mask = fallback_cursor_direction_mask(scancode);
+			if (g_fallback_cursor_modifier_down ||
+			    (g_fallback_cursor_captured_dirs & mask))
+				filtered[scancode] = 0;
+		}
+		guest_state = filtered;
+	} else {
+		guest_state = state;
+	}
 
 	if (seen < 3) {
 		seen++;
