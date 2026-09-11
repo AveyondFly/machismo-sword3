@@ -38,7 +38,9 @@
 #define PAL2_PLAYER_GOLD 0xb08u
 #define PAL2_SCRIPT_STEP 0x1000271f0ull
 #define PAL2_PENDING_FIGHT 0x10046b50cull
-#define PAL2_FIGHT_SOURCE_SCRIPT 0x10028c344ull
+#define PAL2_FIGHT_SOURCE_ROLE 0x10028c344ull
+#define PAL2_ROLE_MANAGER 0x10047e7a8ull
+#define PAL2_DISABLE_ROLE 0x1001d7c90ull
 #define PAL2_FIGHT_HIT 0x100016260ull
 #define PAL2_FIGHT_DAMAGE_SITE 0x10001660cull
 #define PAL2_FIGHT_DAMAGE_RESUME 0x100016620ull
@@ -191,10 +193,10 @@ static int cheat_patch_jump(uintptr_t function, void *hook,
 	return 0;
 }
 
-static int cheat_is_field_enemy_script(int script)
+static int cheat_is_field_enemy_role(int role)
 {
-	return (script >= 3800 && script <= 3833) ||
-		(script >= 4001 && script <= 4631);
+	return (role >= 3800 && role <= 3833) ||
+		(role >= 4001 && role <= 4631);
 }
 
 static int cheat_script_step_hook(void *thread)
@@ -203,14 +205,20 @@ static int cheat_script_step_hook(void *thread)
 	volatile int32_t *pending =
 		(volatile int32_t *)(uintptr_t)PAL2_PENDING_FIGHT;
 	volatile int32_t *source =
-		(volatile int32_t *)(uintptr_t)PAL2_FIGHT_SOURCE_SCRIPT;
+		(volatile int32_t *)(uintptr_t)PAL2_FIGHT_SOURCE_ROLE;
 
 	if (g_no_encounter && *pending < 0 &&
-	    cheat_is_field_enemy_script(*source)) {
-		fprintf(stderr,
-			"sword3-sdl: Pal2 trainer skipped field enemy script=%d\n",
-			*source);
+	    cheat_is_field_enemy_role(*source)) {
+		int role = *source;
+		void (*disable_role)(void *, int) =
+			(void (*)(void *, int))(uintptr_t)PAL2_DISABLE_ROLE;
+
+		/* Cancel the pending fight before removing the colliding map role. */
 		*pending = 0;
+		disable_role((void *)(uintptr_t)PAL2_ROLE_MANAGER, role);
+		fprintf(stderr,
+			"sword3-sdl: Pal2 trainer removed field enemy role=%d\n",
+			role);
 	}
 	return result;
 }
