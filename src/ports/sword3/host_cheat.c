@@ -31,6 +31,10 @@
 #define PAL2_PLAYER_HP_MAX 0x11cu
 #define PAL2_PLAYER_MP 0x124u
 #define PAL2_PLAYER_MP_MAX 0x128u
+#define PAL2_PLAYER_LEVEL 0x108u
+#define PAL2_PLAYER_LEVEL_MAX 0x10cu
+#define PAL2_PLAYER_EXP 0x110u
+#define PAL2_PLAYER_EXP_NEXT 0x114u
 #define PAL2_PLAYER_GOLD 0xb08u
 #define PAL2_SCRIPT_STEP 0x1000271f0ull
 #define PAL2_PENDING_FIGHT 0x10046b50cull
@@ -48,6 +52,9 @@
 #define PAL2_FIGHT_ACTOR_PLAYER 0
 #define PAL2_FIGHT_ACTOR_ENEMY 2
 #define PAL2_FIGHT_SNAPSHOT_MAX 32
+#define PAL2_PLAYER_ADD_EXP 0x1000700c4ull
+#define PAL2_RESULT_ADD_EXP_ACTIVE_RETURN 0x10001ef18ull
+#define PAL2_RESULT_ADD_EXP_RESERVE_RETURN 0x10001f7d0ull
 
 enum cheat_item {
 	CHEAT_MONEY = 0,
@@ -320,6 +327,50 @@ static void *cheat_fight_hit_hook(void *fight, int phase)
 	return result;
 }
 
+static void cheat_add_exp_hook(void *opaque, int id, int amount)
+{
+	volatile uint8_t *manager = opaque;
+	volatile uint8_t *record;
+	uintptr_t caller = (uintptr_t)__builtin_return_address(0);
+	int count = *(volatile int *)manager;
+	int i;
+
+	if (count < 1)
+		return;
+	for (i = 0; i < count; i++) {
+		record = manager + PAL2_PLAYER_FIRST +
+			(uintptr_t)i * PAL2_PLAYER_STRIDE;
+		if (*(volatile int *)(record + PAL2_PLAYER_ID) == id)
+			break;
+	}
+	if (i == count)
+		return;
+
+	if (g_level_up &&
+	    (caller == PAL2_RESULT_ADD_EXP_ACTIVE_RETURN ||
+	     caller == PAL2_RESULT_ADD_EXP_RESERVE_RETURN)) {
+		int level = *(volatile int *)(record + PAL2_PLAYER_LEVEL);
+		int level_max = *(volatile int *)(record +
+			PAL2_PLAYER_LEVEL_MAX);
+		int exp = *(volatile int *)(record + PAL2_PLAYER_EXP);
+		int next = *(volatile int *)(record + PAL2_PLAYER_EXP_NEXT);
+
+		if (level < level_max && exp >= 0 && next > exp &&
+		    amount >= 0 && amount < next - exp) {
+			amount = next - exp;
+			fprintf(stderr,
+				"sword3-sdl: Pal2 trainer level-up player=%d exp=%d+%d\n",
+				id, exp, amount);
+		}
+	}
+
+	*(volatile uint32_t *)(record + PAL2_PLAYER_EXP) +=
+		(uint32_t)amount;
+	if (*(volatile int *)(record + PAL2_PLAYER_LEVEL) ==
+	    *(volatile int *)(record + PAL2_PLAYER_LEVEL_MAX))
+		*(volatile int *)(record + PAL2_PLAYER_EXP_NEXT) = 0;
+}
+
 void host_cheat_install(void)
 {
 	static const uint32_t script_step_expected[4] = {
@@ -330,6 +381,9 @@ void host_cheat_install(void)
 	};
 	static const uint32_t fight_damage_expected[4] = {
 		0xf90033f8u, 0xf90003f8u, 0x9102c3e0u, 0xb0001081u
+	};
+	static const uint32_t add_exp_expected[4] = {
+		0xb9400008u, 0x7100051fu, 0x540000ebu, 0xb9400409u
 	};
 	void *one_hit_thunk;
 
@@ -362,6 +416,9 @@ void host_cheat_install(void)
 	}
 	if (cheat_patch_jump(PAL2_FIGHT_DAMAGE_SITE, one_hit_thunk,
 			     fight_damage_expected) != 0)
+		return;
+	if (cheat_patch_jump(PAL2_PLAYER_ADD_EXP, cheat_add_exp_hook,
+			     add_exp_expected) != 0)
 		return;
 	fprintf(stderr,
 		"sword3-sdl: Pal2 trainer battle hooks installed\n");
