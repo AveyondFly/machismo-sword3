@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import argparse
 import os
+import posixpath
 import subprocess
 import sys
 from pathlib import Path
@@ -46,6 +47,11 @@ def run(argv: list[str], **kwargs) -> subprocess.CompletedProcess:
 
 
 def deploy(target: str, remote: str, package: Path, ipa: Path | None) -> None:
+    launcher = package.parent / "paladin2.sh"
+    remote_launcher = posixpath.join(posixpath.dirname(remote), "paladin2.sh")
+
+    if not launcher.is_file():
+        raise SystemExit(f"launcher missing: {launcher}")
     run(ssh_cmd(target) + [f"mkdir -p '{remote}'"])
     print(f"+ tar -C {package} -cf - . | ssh {target} tar -C {remote} -xf -",
           flush=True)
@@ -61,6 +67,13 @@ def deploy(target: str, remote: str, package: Path, ipa: Path | None) -> None:
     tar.wait()
     if tar.returncode != 0 or ssh.returncode != 0:
         raise SystemExit("failed to stream the ROCKNIX package over SSH")
+    run(["scp", "-o", "BatchMode=yes", "-o", "ConnectTimeout=10",
+         str(launcher), f"{target}:{remote_launcher}.new"])
+    run(ssh_cmd(target) + [
+        f"chmod 755 '{remote_launcher}.new' && "
+        f"mv -f '{remote_launcher}.new' '{remote_launcher}' && "
+        f"rm -f '{remote}/run-rocknix.sh' '{remote}/paladin2-ios.sh'"
+    ])
     if not ipa or not ipa.is_file():
         return
     expected = run(
@@ -84,10 +97,11 @@ def deploy(target: str, remote: str, package: Path, ipa: Path | None) -> None:
 
 
 def smoke(target: str, remote: str, seconds: int) -> str:
+    remote_launcher = posixpath.join(posixpath.dirname(remote), "paladin2.sh")
     extract = f"""
 set -eu
 cd '{remote}'
-test -x ./run-rocknix.sh
+test -x '{remote_launcher}'
 test -f {REMOTE_IPA}
 if [ ! -f {REMOTE_BINARY} ]; then
   echo 'extracting IPA...'
@@ -114,7 +128,7 @@ echo "WAYLAND_DISPLAY=${{WAYLAND_DISPLAY-}} SDL_VIDEODRIVER=${{SDL_VIDEODRIVER-}
 killall -9 machismo gptokeyb gptokeyb2 2>/dev/null || true
 sleep 1
 rm -f logs/runtime.log
-timeout -k 5 -s INT {seconds} ./run-rocknix.sh || true
+PALADIN2_GAME_DIR='{remote}' timeout -k 5 -s INT {seconds} '{remote_launcher}' || true
 if [ -f logs/runtime.log ]; then
   echo '=== runtime.log ==='
   tail -n 400 logs/runtime.log

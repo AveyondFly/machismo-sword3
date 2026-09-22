@@ -1,12 +1,11 @@
 #!/bin/sh
 set -eu
 
-GAMEDIR=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
+PORTSDIR=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
+GAMEDIR=${PALADIN2_GAME_DIR:-"$PORTSDIR/paladin2-ios"}
 IPA=${PALADIN2_IPA:-${SWORD3_IPA:-"$GAMEDIR/paladin2.ipa"}}
 APPDIR="$GAMEDIR/game/Payload/Pal2_AppStore.app"
 BINARY="$APPDIR/Pal2_AppStore"
-EXPECTED_IPA=8f5abda81c4efe47619850a268905a1eb24149fdde741bd950e972639ce20dcc
-EXPECTED_BINARY=f9e510328d0c22eec61da1f0ebe501fa56454e4972e5149277cc3abe7ce8d2a3
 
 fail()
 {
@@ -14,45 +13,17 @@ fail()
     exit 1
 }
 
-hash_file()
-{
-    sha256sum "$1" | awk '{print $1}'
-}
-
-require_hash=0
-case "${PALADIN2_REQUIRE_HASH-${SWORD3_REQUIRE_HASH-}}" in
-    1|yes|true|TRUE|Yes)
-        require_hash=1
-        ;;
-esac
-
-[ -f "$IPA" ] || fail "place the owned IPA at $IPA"
-if [ "$require_hash" -eq 1 ]; then
-    [ "$(hash_file "$IPA")" = "$EXPECTED_IPA" ] ||
-        fail "unsupported IPA hash"
-fi
-
+[ -d "$GAMEDIR" ] || fail "runtime directory not found: $GAMEDIR"
 mkdir -p "$GAMEDIR/saves" "$GAMEDIR/logs"
 
-need_extract=0
 if [ ! -f "$BINARY" ]; then
-    need_extract=1
-elif [ "$require_hash" -eq 1 ] &&
-     [ "$(hash_file "$BINARY")" != "$EXPECTED_BINARY" ]; then
-    need_extract=1
-fi
-
-if [ "$need_extract" -eq 1 ]; then
+    [ -f "$IPA" ] || fail "place the owned IPA at $IPA"
     command -v unzip >/dev/null 2>&1 || fail "unzip is required"
     rm -rf "$GAMEDIR/game.new"
     mkdir -p "$GAMEDIR/game.new"
     unzip -q "$IPA" 'Payload/Pal2_AppStore.app/*' -d "$GAMEDIR/game.new"
     [ -f "$GAMEDIR/game.new/Payload/Pal2_AppStore.app/Pal2_AppStore" ] ||
         fail "IPA did not contain Payload/Pal2_AppStore.app/Pal2_AppStore"
-    if [ "$require_hash" -eq 1 ]; then
-        [ "$(hash_file "$GAMEDIR/game.new/Payload/Pal2_AppStore.app/Pal2_AppStore")" = \
-          "$EXPECTED_BINARY" ] || fail "extracted Mach-O hash mismatch"
-    fi
     rm -rf "$GAMEDIR/game"
     mv "$GAMEDIR/game.new" "$GAMEDIR/game"
 fi
@@ -83,12 +54,12 @@ if [ -f /storage/.config/gptokeyb/control.ini ]; then
     set -u
 fi
 
-gptk_bin=${GPTOKEYB:-}
-if [ -z "$gptk_bin" ]; then
+gptk_cmd=${GPTOKEYB:-}
+if [ -z "$gptk_cmd" ]; then
     if command -v gptokeyb >/dev/null 2>&1; then
-        gptk_bin=gptokeyb
+        gptk_cmd=gptokeyb
     elif command -v gptokeyb2 >/dev/null 2>&1; then
-        gptk_bin=gptokeyb2
+        gptk_cmd=gptokeyb2
     fi
 fi
 
@@ -102,11 +73,23 @@ cleanup_gptk()
 }
 trap cleanup_gptk EXIT INT TERM
 
+start_gptk()
+{
+    # ROCKNIX may include options in GPTOKEYB, for example
+    # "/storage/.config/gptokeyb/gptokeyb -sudokill". Split those command
+    # words in this helper so the game's original positional arguments stay
+    # intact. Pathname expansion is disabled and eval is deliberately avoided.
+    set -f
+    # shellcheck disable=SC2086
+    set -- $gptk_cmd
+    set +f
+    exec "$@" -k machismo -c "$GAMEDIR/paladin2.gptk"
+}
+
 cd "$GAMEDIR"
-if [ -n "$gptk_bin" ]; then
-    echo "paladin2-ios: $gptk_bin -k machismo -c paladin2.gptk" >&2
-    "$gptk_bin" -k machismo -c "$GAMEDIR/paladin2.gptk" \
-        >>"$GAMEDIR/logs/runtime.log" 2>&1 &
+if [ -n "$gptk_cmd" ]; then
+    echo "paladin2-ios: $gptk_cmd -k machismo -c paladin2.gptk" >&2
+    start_gptk >>"$GAMEDIR/logs/runtime.log" 2>&1 &
     gptk_pid=$!
 else
     echo "paladin2-ios: gptokeyb not found; pad will not be mapped" >&2

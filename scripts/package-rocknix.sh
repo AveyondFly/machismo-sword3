@@ -5,6 +5,7 @@ ROOT=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)
 BUILD_DIR=${BUILD_DIR:-"$ROOT/build-rocknix"}
 LIBCXX_BUILD_DIR=${LIBCXX_BUILD_DIR:-"$ROOT/build-libcxx-rocknix"}
 OUTPUT=${OUTPUT:-"$ROOT/dist/paladin2-ios"}
+LAUNCHER=${LAUNCHER:-"$(dirname "$OUTPUT")/paladin2.sh"}
 
 required="
 $BUILD_DIR/machismo
@@ -43,22 +44,19 @@ cp "$ROOT/configs/paladin2/machismo.conf" \
    "$ROOT/configs/paladin2/patches.conf" \
    "$ROOT/configs/paladin2/sdl-hook-report.json" \
    "$ROOT/configs/paladin2/paladin2.gptk" \
-   "$ROOT/run-rocknix.sh" \
    "$OUTPUT.new/"
 CJK_FONT=/usr/share/fonts/truetype/droid/DroidSansFallbackFull.ttf
 if [ -f "$CJK_FONT" ]; then
     mkdir -p "$OUTPUT.new/assets/host_menu"
     cp "$CJK_FONT" "$OUTPUT.new/assets/host_menu/cjk.ttf"
 fi
-cat >"$OUTPUT.new/paladin2-ios.sh" <<'EOF'
-#!/bin/sh
-GAMEDIR=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
-cd "$GAMEDIR" || exit 1
-exec ./run-rocknix.sh "$@"
-EOF
-chmod +x "$OUTPUT.new/machismo" "$OUTPUT.new/run-rocknix.sh" "$OUTPUT.new/paladin2-ios.sh"
+chmod +x "$OUTPUT.new/machismo"
 
 rm -rf "$OUTPUT"
 mv "$OUTPUT.new" "$OUTPUT"
+cp "$ROOT/paladin2.sh" "$LAUNCHER.new"
+chmod +x "$LAUNCHER.new"
+mv -f "$LAUNCHER.new" "$LAUNCHER"
 echo "ROCKNIX package staged at $OUTPUT"
+echo "ROCKNIX launcher staged at $LAUNCHER"
 echo "Copy your owned paladin2.ipa into that directory before launching."
