@@ -77,13 +77,31 @@ so its calls now use host `SDL_MixAudioFormat`. Legacy audio locking uses the
 host device as well. A device run installed all 46 hooks and logged
 `PauseAudioDevice 1 -> 2 pause=0`; sound effects were then reported working.
 
-## Trainer shell
+## Trainer
 
 Y opens the host trainer overlay using the Paladin 2 menu layout and the same
 six entries: money, full HP, no encounters, level up after battle, one-hit
-kill, and close. D-pad or left stick selects an entry; A on a feature reports
-that it is not implemented. Y, B, or Select closes the overlay. No NewPAL game
-state is modified and no Paladin 2 memory patch is installed for NewPAL.
+kill, and close. D-pad or left stick selects an entry; A activates it. Y, B, or
+Select closes the overlay. The implementation in `host_cheat_newpal.c` uses
+addresses from the pinned NewPAL executable above and reads its live game
+state. It does not load code from `ref` or use the Paladin 2 data layout.
+
+Money is set to the game's script limit of 60000. Full HP uses the game's role
+property updater to restore each party member's HP and MP. The no-encounter
+hook clears positive battle requests emitted by the field script interpreter,
+and when the request belongs to the active visible map monster, it uses the
+game's own actor, collision, and spatial-list cleanup calls to remove that
+object. A guard at the scene transition function handles direct requests.
+Monster removal still needs a live contact test. The battle reward hook raises party EXP to the next
+level threshold and raises the character's raw level cap to 99; the game checks
+both values before granting a level. The one-hit hook increases player-to-monster damage in
+the game's damage calculation path for enemy IDs below 2000. The three toggle
+effects reset when the game
+exits.
+
+The hook installer checks the original ARM64 instructions at every patch site.
+These effects require a live run with a playable save to confirm their behavior
+through contact, combat, and the reward screen.
 
 ## Device `ref` library analysis
 

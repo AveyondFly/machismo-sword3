@@ -142,6 +142,128 @@ if [ "$status" -ne 0 ] && [ "$status" -ne 124 ]; then exit "$status"; fi
     return result.returncode
 
 
+def read_trainer_log(target: str, remote: str) -> int:
+    log = shlex.quote(posixpath.join(remote, "logs/runtime.log"))
+    command = (f"grep -E 'NewPAL trainer|runtime hooks installed|hook mismatch' "
+               f"{log} | tail -n 200")
+    result = subprocess.run(
+        ssh_cmd(target) + [command],
+        capture_output=True, text=True, check=False, timeout=20,
+    )
+    sys.stdout.write(result.stdout)
+    sys.stderr.write(result.stderr)
+    return result.returncode
+
+
+def process_status(target: str) -> int:
+    result = subprocess.run(
+        ssh_cmd(target) + ["pgrep -af machismo || true"],
+        capture_output=True, text=True, check=False, timeout=20,
+    )
+    sys.stdout.write(result.stdout)
+    sys.stderr.write(result.stderr)
+    return result.returncode
+
+
+def snapshot_actors(target: str) -> int:
+    script = '''
+import os, struct, subprocess
+pids = subprocess.check_output(
+    ['pgrep', '-f', '^/roms/ports/newpal-ios/machismo '], text=True).split()
+if not pids:
+    raise SystemExit('NewPAL is not running')
+pid = int(pids[0])
+fd = os.open(f'/proc/{pid}/mem', os.O_RDONLY)
+def read(address, size):
+    return os.pread(fd, size, address)
+def u64(address):
+    return struct.unpack('<Q', read(address, 8))[0]
+def u32(address):
+    return struct.unpack('<I', read(address, 4))[0]
+print('pid', pid, 'scene', u32(0x1001d000c), 'request', u32(0x1001d0010),
+      'event', u32(0x1001f3f30), 'tile-x', u32(0x1001f3f34))
+script_data = u64(0x1001f5928)
+print('script data', hex(script_data))
+if script_data:
+    data = read(script_data, 1 << 20)
+    for offset in range(0, len(data) - 6, 2):
+        opcode, request = struct.unpack_from('<HH', data, offset)
+        if opcode == 0x309 and request in (2001, 2002, 2003, 2343):
+            start = max(0, offset - 24)
+            end = min(len(data), offset + 28)
+            print(' battle script offset', hex(offset), 'request', request,
+                  'near', data[start:end].hex())
+map_count = u32(0x1001d0528)
+print('map objects', map_count)
+for index in range(min(map_count, 32)):
+    address = 0x1001f8810 + index * 0x68
+    data = read(address, 0x68)
+    words = struct.unpack('<24i', data[:96])
+    matches = [(offset, value) for offset, value in
+               enumerate(struct.unpack('<52H', data))
+               if value in (2001, 2002, 2003, 2343)]
+    print(' map', index, words[:16], 'request matches', matches)
+    if 16 <= index <= 27:
+        print('  halfwords', struct.unpack('<52H', data))
+for category in range(10):
+    listing = u64(0x10023a000 + category * 8)
+    if not listing:
+        continue
+    count = u32(listing + 8)
+    if not 0 < count < 100:
+        continue
+    print('category', category, 'count', count, 'list', hex(listing))
+    node = u64(listing)
+    for _ in range(min(count, 24)):
+        if not node:
+            break
+        role = u64(node + 8)
+        if role:
+            words = struct.unpack('<32i', read(role, 128))
+            print(' role', words[0], 'ptr', hex(role), 'words', words[:24])
+        node = u64(node + 0x20)
+os.close(fd)
+'''
+    result = subprocess.run(
+        ssh_cmd(target) + ["python3 -"], input=script,
+        capture_output=True, text=True, check=False, timeout=20,
+    )
+    sys.stdout.write(result.stdout)
+    sys.stderr.write(result.stderr)
+    return result.returncode
+
+
+def sample_script(target: str) -> int:
+    script = '''
+import os, struct, subprocess, time
+pid = int(subprocess.check_output(
+    ['pgrep', '-f', '^/roms/ports/newpal-ios/machismo '], text=True).split()[0])
+fd = os.open(f'/proc/{pid}/mem', os.O_RDONLY)
+last = None
+deadline = time.monotonic() + 5
+samples = 0
+while time.monotonic() < deadline:
+    words = struct.unpack('<12i', os.pread(fd, 48, 0x10022c810))
+    request = struct.unpack('<i', os.pread(fd, 4, 0x1001d0010))[0]
+    marker = struct.unpack('<2i', os.pread(fd, 8, 0x1001f3f30))
+    state = (words, request, marker)
+    if state != last and (request != -1 or words[0] != -1 or
+                          marker != (10, 16)) and samples < 30:
+        print('script', words, 'request', request, 'marker', marker,
+              flush=True)
+        samples += 1
+    last = state
+os.close(fd)
+'''
+    result = subprocess.run(
+        ssh_cmd(target) + ["python3 -"], input=script,
+        capture_output=True, text=True, check=False, timeout=20,
+    )
+    sys.stdout.write(result.stdout)
+    sys.stderr.write(result.stderr)
+    return result.returncode
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--target", default="root@192.168.31.224")
@@ -150,7 +272,23 @@ def main() -> int:
     parser.add_argument("--seconds", type=int, default=25)
     parser.add_argument("--skip-deploy", action="store_true")
     parser.add_argument("--audit-only", action="store_true")
+    parser.add_argument("--read-trainer-log", action="store_true",
+                        help="read recent trainer diagnostics without deploying")
+    parser.add_argument("--process-status", action="store_true",
+                        help="check whether NewPAL is running without deploying")
+    parser.add_argument("--snapshot-actors", action="store_true",
+                        help="read live scene actors without changing the game")
+    parser.add_argument("--sample-script", action="store_true",
+                        help="sample field script context for 10 seconds")
     args = parser.parse_args()
+    if args.read_trainer_log:
+        return read_trainer_log(args.target, args.remote_dir)
+    if args.process_status:
+        return process_status(args.target)
+    if args.snapshot_actors:
+        return snapshot_actors(args.target)
+    if args.sample_script:
+        return sample_script(args.target)
     if not args.skip_deploy:
         deploy(args.target, args.remote_dir, args.package)
     verify_runtime(args.target, args.remote_dir, args.package)

@@ -1,4 +1,5 @@
 #include "host_cheat.h"
+#include "host_cheat_newpal.h"
 #include "host_font.h"
 
 #include <stdint.h>
@@ -551,10 +552,39 @@ static void cheat_close(void)
 static void cheat_apply(void)
 {
 	if (g_newpal_ui) {
-		if (g_selected == CHEAT_CLOSE)
+		switch (g_selected) {
+		case CHEAT_MONEY:
+			cheat_set_status(host_cheat_newpal_money() ?
+				"金钱已拉满" : "请先进入游戏");
+			break;
+		case CHEAT_HP:
+			cheat_set_status(host_cheat_newpal_heal() ?
+				"全员已满血" : "找不到队伍数据");
+			break;
+		case CHEAT_NO_ENCOUNTER:
+			g_no_encounter = !g_no_encounter;
+			host_cheat_newpal_no_encounter(g_no_encounter);
+			cheat_set_status(g_no_encounter ?
+				"不遇敌已开" : "不遇敌已关");
+			break;
+		case CHEAT_LEVEL_UP:
+			g_level_up = !g_level_up;
+			host_cheat_newpal_level_up(g_level_up);
+			cheat_set_status(g_level_up ?
+				"战后升级已开" : "战后升级已关");
+			break;
+		case CHEAT_ONE_HIT:
+			g_one_hit = !g_one_hit;
+			host_cheat_newpal_one_hit(g_one_hit);
+			cheat_set_status(g_one_hit ?
+				"一击必杀已开" : "一击必杀已关");
+			break;
+		case CHEAT_CLOSE:
 			cheat_close();
-		else
-			cheat_set_status("功能暂未实现");
+			break;
+		default:
+			break;
+		}
 		return;
 	}
 	switch (g_selected) {
@@ -924,7 +954,7 @@ void host_cheat_draw(SDL_Renderer *renderer, int logical_w, int logical_h)
 	}
 	cheat_text(renderer, panel_x + cheat_sx(24, logical_w),
 		   panel_y + panel_h - cheat_sy(48, logical_h), pt, hint,
-		   g_newpal_ui ? "A 查看   Y/B/SELECT 关闭   上下选择" :
+		   g_newpal_ui ? "A 确定   Y/B/SELECT 关闭   上下选择" :
 		   "A 确定   Y/B/SELECT 关闭   上下选择");
 	if (g_status[0] && SDL_GetTicks() < g_status_until)
 		cheat_text(renderer, panel_x + cheat_sx(24, logical_w),

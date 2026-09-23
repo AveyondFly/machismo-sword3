@@ -193,6 +193,7 @@ add_library(sword3_host SHARED
     src/ports/sword3/host_prepare.c
     src/ports/sword3/sdl_bridge.c
     src/ports/sword3/host_cheat.c
+    src/ports/sword3/host_cheat_newpal.c
     src/ports/sword3/host_font.c
     src/ports/sword3/paths.c
     src/ports/sword3/input.c

@@ -1,6 +1,7 @@
 #include "sdl_bridge.h"
 #include "audio_bridge.h"
 #include "host_cheat.h"
+#include "host_cheat_newpal.h"
 #include "video_bridge.h"
 
 #include <dlfcn.h>
@@ -1981,6 +1982,7 @@ void sword3_SDL_RenderPresent(SDL_Renderer *renderer)
 
 	owner_check("SDL_RenderPresent", KIND_RENDERER, renderer);
 	if (newpal_mode()) {
+		host_cheat_newpal_install();
 		if (host_cheat_active() && SDL_GetRenderTarget(renderer) == NULL)
 			host_cheat_draw(renderer, g_logical_w, g_logical_h);
 		SDL_RenderPresent(renderer);
