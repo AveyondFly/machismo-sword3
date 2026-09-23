@@ -399,6 +399,7 @@ static int newpal_script_step_hook(void *script)
 	if (g_no_encounter && state_before == 0 && request_after > 0) {
 		int event = *(volatile int *)(uintptr_t)NP_CURRENT_OBJECT_ID;
 		int index = *(volatile int *)(uintptr_t)NP_CURRENT_OBJECT_INDEX;
+		int hidden;
 
 		if (g_encounters_suppressed < 4)
 			fprintf(stderr,
@@ -409,12 +410,20 @@ static int newpal_script_step_hook(void *script)
 				entry_script[6], entry_script[7], entry_script[8],
 				entry_script[9], entry_script[10], entry_script[11],
 				entry_event, entry_index, event, index);
-		if (!newpal_hide_script_encounter_object(request_after,
-							entry_offset) &&
-		    !newpal_hide_encounter_object(event, index) &&
-		    (entry_event != event || entry_index != index))
-			newpal_hide_encounter_object(entry_event,
-					      entry_index);
+		hidden = newpal_hide_script_encounter_object(request_after,
+							 entry_offset);
+		if (!hidden)
+			hidden = newpal_hide_encounter_object(event, index);
+		if (!hidden && (entry_event != event || entry_index != index))
+			hidden = newpal_hide_encounter_object(entry_event,
+						       entry_index);
+		if (!hidden) {
+			fprintf(stderr,
+				"sword3-sdl: NewPAL trainer preserved scripted battle request=%d offset=%u active=%u\n",
+				request_after, entry_offset,
+				*(uint16_t *)((uint8_t *)script + 0x2c));
+			return result;
+		}
 		*(volatile int *)(uintptr_t)NP_SCENE_REQUEST = -1;
 		g_encounters_suppressed++;
 		if (g_encounters_suppressed <= 4 ||
@@ -498,18 +507,9 @@ static void newpal_scene_transition_hook(int requested)
 	int state = *(volatile int *)(uintptr_t)NP_SCENE_STATE;
 	uintptr_t caller = (uintptr_t)__builtin_return_address(0);
 
-	if (g_no_encounter && state == 0 && requested > 0) {
-		*(volatile int *)(uintptr_t)NP_SCENE_REQUEST = -1;
-		g_encounters_suppressed++;
-		fprintf(stderr,
-			"sword3-sdl: NewPAL trainer suppressed direct battle=%d caller=0x%llx count=%u\n",
-			requested, (unsigned long long)caller,
-			g_encounters_suppressed);
-		return;
-	}
 	if (g_no_encounter && state == 0 && samples++ < 32)
 		fprintf(stderr,
-			"sword3-sdl: NewPAL trainer transition request=%d caller=0x%llx suppressed=%u\n",
+			"sword3-sdl: NewPAL trainer preserved transition request=%d caller=0x%llx suppressed=%u\n",
 			requested, (unsigned long long)caller,
 			g_encounters_suppressed);
 	g_scene_transition_orig(requested);

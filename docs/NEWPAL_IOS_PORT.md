@@ -91,11 +91,11 @@ property updater to restore each party member's HP and MP. The no-encounter
 hook recognizes visible monster scripts, removes the monster with the game's
 actor, collision, and spatial-list cleanup calls, and advances past the
 contact delay and battle request opcodes. The interpreter still finishes the
-rest of the script. A fallback clears battle requests from other field scripts,
-and a guard at the scene transition function handles direct requests. While a
-recognized monster script is active, the scene mode hook keeps field movement
-input enabled; the game otherwise hides the virtual stick until that script
-finishes.
+rest of the script. A fallback clears a battle request only after it identifies
+and removes a matching visible monster object. Scripted and boss battle
+requests pass through unchanged. While a recognized monster script is active,
+the scene mode hook keeps field movement input enabled; the game otherwise
+hides the virtual stick until that script finishes.
 The battle reward hook raises party EXP to the next
 level threshold and raises the character's raw level cap to 99; the game checks
 both values before granting a level. The one-hit hook increases player-to-monster damage in
