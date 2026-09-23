@@ -2558,12 +2558,18 @@ SDL_AudioDeviceID sword3_SDL_OpenAudioDevice(const char *device, int iscapture,
 
 void sword3_SDL_MixAudio(Uint8 *dst, const Uint8 *src, Uint32 len, int volume)
 {
+	static _Atomic unsigned newpal_mix_calls;
+
 	/*
-	 * Pal2's bundled SDL_MixAudio reads the format from its private audio
+	 * The bundled SDL_MixAudio reads the format from its private audio
 	 * device. OpenAudioDevice is hosted, so that guest pointer stays NULL
 	 * and the bundled function leaves dst silent. Mix with the format
 	 * obtained by the host device instead.
 	 */
+	if (newpal_mode() && atomic_fetch_add(&newpal_mix_calls, 1) == 0)
+		fprintf(stderr,
+			"sword3-sdl: NewPAL effect mixer active len=%u volume=%d format=0x%x\n",
+			len, volume, g_guest_audio_format);
 	SDL_MixAudioFormat(dst, src, g_guest_audio_format, len, volume);
 }
 

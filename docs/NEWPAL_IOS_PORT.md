@@ -65,6 +65,18 @@ the runtime logged the combination, exited with status 0, and left no
 `machismo` or `gptokeyb` process. The bridge uses `_exit(0)` because the
 guest's exit destructors currently abort on an invalid free.
 
+## Sound effects
+
+BGM uses the `AVAudioPlayer` bridge and host SDL_mixer. The game's sound
+effects use a separate SDL callback device. NewPAL calls its bundled
+`SDL_PauseAudio(0)` after opening that device; the bundled SDL still looks for
+device ID 1, while host SDL opened ID 2. The NewPAL hooks now forward
+`SDL_PauseAudioDevice` to the host bridge, which translates ID 1 to the actual
+device. The bundled `SDL_MixAudio` also cannot see the host device's format,
+so its calls now use host `SDL_MixAudioFormat`. Legacy audio locking uses the
+host device as well. A device run installed all 46 hooks and logged
+`PauseAudioDevice 1 -> 2 pause=0`; sound effects were then reported working.
+
 ## Device `ref` library analysis
 
 The user supplied `/roms/ports/newpal-ios/ref` as a reference runtime. Its
