@@ -26,6 +26,13 @@ library against this branch's package and rejects any config that refers to a
 packaged `libsword3_*`, `libsystem_shim.so`, C++ runtimes, and `machismo` under
 `/roms/ports/newpal-ios`; nothing was loaded from `ref`.
 
+The C++ runtimes come from `scripts/build-libcxx-rocknix.sh`, using the pinned
+`extern/llvm-project` submodule and the RK3326 toolchain. A clean rebuild on
+this branch completed 856 Ninja steps. Its `libc++.so.1` and
+`libc++abi.so.1` hashes equal the copies in `ref`; those bytes are reproducible
+from the checked out source, and the package script copies from
+`build-libcxx-rocknix`, never from `ref`.
+
 For a smoke test, the caller sources `/storage/env.txt` on the device
 to provide Sway's Wayland environment. The installed launcher does not source
 that file. It does not launch `gptokeyb`.
