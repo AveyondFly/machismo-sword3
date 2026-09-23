@@ -169,7 +169,7 @@ def snapshot_actors(target: str) -> int:
     script = '''
 import os, struct, subprocess
 pids = subprocess.check_output(
-    ['pgrep', '-f', '^/roms/ports/newpal-ios/machismo '], text=True).split()
+    ['pgrep', '-f', '^(/storage)?/roms/ports/newpal-ios/machismo '], text=True).split()
 if not pids:
     raise SystemExit('NewPAL is not running')
 pid = int(pids[0])
@@ -237,7 +237,7 @@ def sample_script(target: str) -> int:
     script = '''
 import os, struct, subprocess, time
 pid = int(subprocess.check_output(
-    ['pgrep', '-f', '^/roms/ports/newpal-ios/machismo '], text=True).split()[0])
+    ['pgrep', '-f', '^(/storage)?/roms/ports/newpal-ios/machismo '], text=True).split()[0])
 fd = os.open(f'/proc/{pid}/mem', os.O_RDONLY)
 last = None
 deadline = time.monotonic() + 5
@@ -264,6 +264,129 @@ os.close(fd)
     return result.returncode
 
 
+def trace_mode(target: str) -> int:
+    """Read scene mode and field script transitions from a running game."""
+    script = '''
+import os, struct, subprocess, time
+pid = int(subprocess.check_output(
+    ['pgrep', '-f', '^(/storage)?/roms/ports/newpal-ios/machismo '], text=True).split()[0])
+fd = os.open(f'/proc/{pid}/mem', os.O_RDONLY)
+def read(address, size):
+    return os.pread(fd, size, address)
+def u32(address):
+    return struct.unpack('<I', read(address, 4))[0]
+last = None
+deadline = time.monotonic() + 40
+while time.monotonic() < deadline:
+    source = struct.unpack('<H', read(0x10022c810 + 0x2c, 2))[0]
+    offset = struct.unpack('<H', read(0x10022c810 + 0x28, 2))[0]
+    mode = u32(0x10026d214)
+    request = u32(0x1001d0010)
+    state = (source, offset, mode, request)
+    if state != last:
+        print(f'{time.monotonic():.3f} source={source} offset={offset} '
+              f'mode={mode} request={request}', flush=True)
+        last = state
+    time.sleep(0.002)
+os.close(fd)
+'''
+    result = subprocess.run(
+        ssh_cmd(target) + ["python3 -"], input=script,
+        capture_output=True, text=True, check=False, timeout=55,
+    )
+    sys.stdout.write(result.stdout)
+    sys.stderr.write(result.stderr)
+    return result.returncode
+
+
+def attach_mode_watch(target: str) -> int:
+    """Attach GDB to log scene-mode writes while the user plays."""
+    script = r'''
+import pathlib, subprocess, time
+pid = int(subprocess.check_output(
+    ['pgrep', '-f', '^(/storage)?/roms/ports/newpal-ios/machismo '], text=True).split()[0])
+commands = r''' + '"""' + r'''
+set pagination off
+set confirm off
+watch *(int*)0x10026d214
+set $hits = 0
+commands 1
+silent
+set $hits = $hits + 1
+printf "MODE_TRACE hit=%d mode=%d source=%u offset=%u request=%d pc=%p\n", $hits, *(int*)0x10026d214, *(unsigned short*)0x10022c83c, *(unsigned short*)0x10022c838, *(int*)0x1001d0010, $pc
+bt 5
+if $hits >= 80
+  detach
+  quit
+end
+continue
+end
+continue
+''' + '"""' + r'''
+path = pathlib.Path('/tmp/newpal-mode-watch.gdb')
+log = pathlib.Path('/tmp/newpal-mode-watch.log')
+path.write_text(commands)
+with log.open('w') as output:
+    process = subprocess.Popen(
+        ['timeout', '-s', 'INT', '-k', '5', '120',
+         'gdb', '-q', '-nx', '-batch', '-p', str(pid), '-x', str(path)],
+        stdout=output, stderr=subprocess.STDOUT, start_new_session=True)
+deadline = time.monotonic() + 12
+while time.monotonic() < deadline:
+    contents = log.read_text()
+    if 'Hardware watchpoint 1' in contents:
+        print('GDB watchpoint armed for pid', pid, 'log', log)
+        break
+    if process.poll() is not None:
+        print(contents)
+        raise SystemExit(process.returncode or 1)
+    time.sleep(.2)
+else:
+    print(log.read_text())
+    raise SystemExit('GDB watchpoint did not arm')
+'''
+    result = subprocess.run(
+        ssh_cmd(target) + ["python3 -"], input=script,
+        capture_output=True, text=True, check=False, timeout=20,
+    )
+    sys.stdout.write(result.stdout)
+    sys.stderr.write(result.stderr)
+    return result.returncode
+
+
+def read_mode_watch(target: str) -> int:
+    script = ("cat /tmp/newpal-mode-watch.log; "
+              "printf '\\n--- process ---\\n'; "
+              "awk '/^State:|^TracerPid:/{print}' /proc/$(pgrep -f '^(/storage)?/roms/ports/newpal-ios/machismo ' | head -1)/status; "
+              "pgrep -af 'gdb.*newpal-mode-watch' || true")
+    result = subprocess.run(
+        ssh_cmd(target) + [script], capture_output=True, text=True,
+        check=False, timeout=20,
+    )
+    sys.stdout.write(result.stdout)
+    sys.stderr.write(result.stderr)
+    return result.returncode
+
+
+def stop_mode_watch(target: str) -> int:
+    script = '''
+import os, signal, subprocess, time
+result = subprocess.run(['pgrep', '-f', '^gdb -q -nx -batch -p .*newpal-mode-watch.gdb$'],
+                        capture_output=True, text=True)
+for value in result.stdout.split():
+    os.kill(int(value), signal.SIGINT)
+time.sleep(1)
+print('GDB interrupt sent to', result.stdout.split())
+'''
+    result = subprocess.run(
+        ssh_cmd(target) + ["python3 -"], input=script,
+        capture_output=True, text=True, check=False, timeout=15,
+    )
+    sys.stdout.write(result.stdout)
+    sys.stderr.write(result.stderr)
+    return result.returncode
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--target", default="root@192.168.31.224")
@@ -280,6 +403,14 @@ def main() -> int:
                         help="read live scene actors without changing the game")
     parser.add_argument("--sample-script", action="store_true",
                         help="sample field script context for 10 seconds")
+    parser.add_argument("--trace-mode", action="store_true",
+                        help="trace scene mode and script context for 40 seconds")
+    parser.add_argument("--attach-mode-watch", action="store_true",
+                        help="attach GDB and watch scene-mode writes for two minutes")
+    parser.add_argument("--read-mode-watch", action="store_true",
+                        help="read the active GDB scene-mode trace")
+    parser.add_argument("--stop-mode-watch", action="store_true",
+                        help="interrupt the GDB scene-mode trace")
     args = parser.parse_args()
     if args.read_trainer_log:
         return read_trainer_log(args.target, args.remote_dir)
@@ -289,6 +420,14 @@ def main() -> int:
         return snapshot_actors(args.target)
     if args.sample_script:
         return sample_script(args.target)
+    if args.trace_mode:
+        return trace_mode(args.target)
+    if args.attach_mode_watch:
+        return attach_mode_watch(args.target)
+    if args.read_mode_watch:
+        return read_mode_watch(args.target)
+    if args.stop_mode_watch:
+        return stop_mode_watch(args.target)
     if not args.skip_deploy:
         deploy(args.target, args.remote_dir, args.package)
     verify_runtime(args.target, args.remote_dir, args.package)

@@ -17,6 +17,7 @@
 #define NP_DAMAGE 0x100031328ull
 #define NP_SCRIPT_STEP 0x1000694b4ull
 #define NP_SCENE_TRANSITION 0x100009160ull
+#define NP_SCENE_MODE_SETTER 0x10002d360ull
 #define NP_SCENE_STATE 0x1001d000cull
 #define NP_SCENE_REQUEST 0x1001d0010ull
 #define NP_MAP_OBJECT_COUNT 0x1001d0528ull
@@ -24,6 +25,7 @@
 #define NP_CURRENT_OBJECT_ID 0x1001f3f30ull
 #define NP_CURRENT_OBJECT_INDEX 0x1001f3f34ull
 #define NP_SCRIPT_DATA 0x1001f5928ull
+#define NP_FIELD_SCRIPT 0x10022c810ull
 #define NP_FIND_MAP_OBJECT 0x10000fc94ull
 #define NP_MAP_ACTOR_SLOTS 0x10022c878ull
 #define NP_CLEAR_MAP_ACTOR 0x1000119a4ull
@@ -51,13 +53,16 @@ static int g_level_up;
 static int g_one_hit;
 static int g_no_encounter;
 static unsigned g_encounters_suppressed;
-static unsigned g_encounters_preempted;
+static unsigned g_encounters_bypassed;
 static unsigned g_map_monsters_removed;
+static unsigned g_monster_input_kept;
+static unsigned g_active_monster_input;
 
 static int (*g_reward_orig)(void);
 static int (*g_damage_orig)(void *source, void *target);
-static void (*g_script_step_orig)(void *script);
+static int (*g_script_step_orig)(void *script);
 static void (*g_scene_transition_orig)(int requested);
+static void (*g_scene_mode_orig)(int mode);
 
 static int newpal_list_count(void *list)
 {
@@ -285,11 +290,14 @@ static int newpal_hide_encounter_object(int event_id, int index)
 	return 1;
 }
 
-static int newpal_preempt_visible_encounter(void *script, int state)
+static int newpal_bypass_visible_encounter(void *script, int state)
 {
 	unsigned object_id;
 	unsigned offset;
 	int object_index = -1;
+	int count;
+	uint8_t *object;
+	uint32_t flags;
 	const uint8_t *data;
 	const uint16_t *code;
 
@@ -309,15 +317,24 @@ static int newpal_preempt_visible_encounter(void *script, int state)
 	    code[8] != 0x28 || code[9] != object_id)
 		return 0;
 	if (!((int (*)(int, int *))(uintptr_t)
-	      NP_FIND_MAP_OBJECT)(object_id, &object_index) ||
-	    !newpal_hide_encounter_object(object_id, object_index))
+	      NP_FIND_MAP_OBJECT)(object_id, &object_index))
 		return 0;
-	/* An inactive script returns after updating the interpreter's timers. */
-	*(uint16_t *)((uint8_t *)script + 0x2c) = 0xffff;
-	*(volatile int *)(uintptr_t)NP_SCENE_REQUEST = -1;
-	g_encounters_preempted++;
+	count = *(volatile int *)(uintptr_t)NP_MAP_OBJECT_COUNT;
+	if (object_index <= 0 || object_index >= count || count > 256)
+		return 0;
+	object = (uint8_t *)(uintptr_t)NP_MAP_OBJECTS +
+		(size_t)object_index * NP_MAP_OBJECT_SIZE;
+	flags = *(uint32_t *)(object + 0x18);
+	if (*(uint16_t *)(object + 0x2c) != object_id ||
+	    (flags & 0xf000u) != 0xf000u ||
+	    (flags & 0x10000000u) || !*(void **)(object + 0x58))
+		return 0;
+	if (!newpal_hide_encounter_object(object_id, object_index))
+		return 0;
+	/* The engine must finish this script, but need not enter battle. */
+	*(uint16_t *)((uint8_t *)script + 0x28) = offset + 8;
+	g_encounters_bypassed++;
 	g_encounters_suppressed++;
-	g_script_step_orig(script);
 	return 1;
 }
 
@@ -361,7 +378,7 @@ static int newpal_hide_script_encounter_object(int battle,
 	return 0;
 }
 
-static void newpal_script_step_hook(void *script)
+static int newpal_script_step_hook(void *script)
 {
 	static unsigned samples;
 	int entry_event = *(volatile int *)(uintptr_t)NP_CURRENT_OBJECT_ID;
@@ -372,11 +389,11 @@ static void newpal_script_step_hook(void *script)
 	int request_before = *(volatile int *)(uintptr_t)NP_SCENE_REQUEST;
 	int state_after;
 	int request_after;
+	int result;
 
-	if (newpal_preempt_visible_encounter(script, state_before))
-		return;
+	newpal_bypass_visible_encounter(script, state_before);
 	memcpy(entry_script, script, sizeof(entry_script));
-	g_script_step_orig(script);
+	result = g_script_step_orig(script);
 	state_after = *(volatile int *)(uintptr_t)NP_SCENE_STATE;
 	request_after = *(volatile int *)(uintptr_t)NP_SCENE_REQUEST;
 	if (g_no_encounter && state_before == 0 && request_after > 0) {
@@ -403,9 +420,11 @@ static void newpal_script_step_hook(void *script)
 		if (g_encounters_suppressed <= 4 ||
 		    !(g_encounters_suppressed & (g_encounters_suppressed - 1)))
 			fprintf(stderr,
-				"sword3-sdl: NewPAL trainer suppressed battle request=%d count=%u\n",
-				request_after, g_encounters_suppressed);
-		return;
+				"sword3-sdl: NewPAL trainer suppressed battle request=%d count=%u result=%d offset=%u active=%u\n",
+				request_after, g_encounters_suppressed, result,
+				*(uint16_t *)((uint8_t *)script + 0x28),
+				*(uint16_t *)((uint8_t *)script + 0x2c));
+		return result;
 	}
 	if (g_no_encounter && state_before == 0 &&
 	    (state_after != state_before || request_after != request_before) &&
@@ -418,6 +437,59 @@ static void newpal_script_step_hook(void *script)
 			words[0], words[7], words[8], words[11],
 			g_encounters_suppressed);
 	}
+	return result;
+}
+
+static int newpal_active_visible_encounter(void)
+{
+	const uint8_t *script = (const uint8_t *)(uintptr_t)NP_FIELD_SCRIPT;
+	unsigned object_id = *(const uint16_t *)(script + 0x2c);
+	unsigned offset = *(const uint16_t *)(script + 0x28);
+	int object_index = -1;
+	int count;
+	const uint8_t *object;
+	uint32_t flags;
+
+	if (object_id < 5000 || object_id >= 6000 || offset > 26) {
+		g_active_monster_input = 0;
+		return 0;
+	}
+	if (g_active_monster_input == object_id)
+		return 1;
+	if (!((int (*)(int, int *))(uintptr_t)
+	      NP_FIND_MAP_OBJECT)(object_id, &object_index))
+		return 0;
+	count = *(volatile int *)(uintptr_t)NP_MAP_OBJECT_COUNT;
+	if (object_index <= 0 || object_index >= count || count > 256)
+		return 0;
+	object = (const uint8_t *)(uintptr_t)NP_MAP_OBJECTS +
+		(size_t)object_index * NP_MAP_OBJECT_SIZE;
+	flags = *(const uint32_t *)(object + 0x18);
+	if (*(const uint16_t *)(object + 0x2c) != object_id ||
+	    (flags & 0xf000u) != 0xf000u ||
+	    (flags & 0x10000000u) || !*(void *const *)(object + 0x58))
+		return 0;
+	g_active_monster_input = object_id;
+	return 1;
+}
+
+static void newpal_scene_mode_hook(int mode)
+{
+	if (g_active_monster_input) {
+		const uint8_t *script =
+			(const uint8_t *)(uintptr_t)NP_FIELD_SCRIPT;
+
+		if (*(const uint16_t *)(script + 0x2c) !=
+		    g_active_monster_input ||
+		    *(const uint16_t *)(script + 0x28) > 26)
+			g_active_monster_input = 0;
+	}
+	if (g_no_encounter && mode == 0 &&
+	    newpal_active_visible_encounter()) {
+		mode = 7;
+		g_monster_input_kept++;
+	}
+	g_scene_mode_orig(mode);
 }
 
 static void newpal_scene_transition_hook(int requested)
@@ -458,20 +530,25 @@ void host_cheat_newpal_one_hit(int enabled)
 void host_cheat_newpal_no_encounter(int enabled)
 {
 	fprintf(stderr,
-		"sword3-sdl: NewPAL trainer no-encounter=%d suppressed=%u preempted=%u removed=%u\n",
+		"sword3-sdl: NewPAL trainer no-encounter=%d suppressed=%u bypassed=%u removed=%u input-kept=%u\n",
 		enabled, g_encounters_suppressed,
-		g_encounters_preempted, g_map_monsters_removed);
+		g_encounters_bypassed, g_map_monsters_removed,
+		g_monster_input_kept);
 	if (enabled && !g_no_encounter) {
 		g_encounters_suppressed = 0;
-		g_encounters_preempted = 0;
+		g_encounters_bypassed = 0;
 		g_map_monsters_removed = 0;
+		g_monster_input_kept = 0;
 	}
+	if (!enabled)
+		g_active_monster_input = 0;
 	g_no_encounter = enabled;
 }
 
 static void *newpal_trampoline(uintptr_t function)
 {
 	uint32_t *code;
+	uint64_t adrp_page = 0;
 	long page_size = sysconf(_SC_PAGESIZE);
 
 	if (page_size < 4096)
@@ -481,10 +558,24 @@ static void *newpal_trampoline(uintptr_t function)
 	if (code == MAP_FAILED)
 		return NULL;
 	memcpy(code, (const void *)function, 16);
+	/* A copied ADRP must still refer to its original PC page. Put the
+	 * resolved page in a literal after the return jump. */
+	if ((code[3] & 0x9f000000u) == 0x90000000u) {
+		int64_t imm = ((int64_t)((code[3] >> 5) & 0x7ffffu) << 2) |
+			((code[3] >> 29) & 3u);
+
+		if (imm & (1 << 20))
+			imm -= 1 << 21;
+		adrp_page = (uint64_t)(((function + 12) & ~(uintptr_t)0xfff) +
+					  imm * 4096);
+		code[3] = 0x58000000u | (5u << 5) | (code[3] & 31u);
+	}
 	code[4] = 0x58000051u; /* ldr x17, #8 */
 	code[5] = 0xd61f0220u; /* br x17 */
 	*(uint64_t *)(code + 6) = function + 16;
-	__builtin___clear_cache((char *)code, (char *)code + 32);
+	if (adrp_page)
+		*(uint64_t *)(code + 8) = adrp_page;
+	__builtin___clear_cache((char *)code, (char *)code + 40);
 	return code;
 }
 
@@ -526,6 +617,9 @@ void host_cheat_newpal_install(void)
 	static const uint32_t transition_expected[4] = {
 		0xa9bd57f6u, 0xa9014ff4u, 0xa9027bfdu, 0x910083fdu
 	};
+	static const uint32_t scene_mode_expected[4] = {
+		0xa9be4ff4u, 0xa9017bfdu, 0x910043fdu, 0x90001214u
+	};
 
 	if (g_install_attempted)
 		return;
@@ -535,7 +629,9 @@ void host_cheat_newpal_install(void)
 	    memcmp((const void *)(uintptr_t)NP_SCRIPT_STEP,
 		   script_expected, 16) ||
 	    memcmp((const void *)(uintptr_t)NP_SCENE_TRANSITION,
-		   transition_expected, 16)) {
+		   transition_expected, 16) ||
+	    memcmp((const void *)(uintptr_t)NP_SCENE_MODE_SETTER,
+		   scene_mode_expected, 16)) {
 		fprintf(stderr,
 			"sword3-sdl: NewPAL trainer executable hook fingerprint mismatch\n");
 		return;
@@ -544,8 +640,9 @@ void host_cheat_newpal_install(void)
 	g_damage_orig = newpal_trampoline(NP_DAMAGE);
 	g_script_step_orig = newpal_trampoline(NP_SCRIPT_STEP);
 	g_scene_transition_orig = newpal_trampoline(NP_SCENE_TRANSITION);
+	g_scene_mode_orig = newpal_trampoline(NP_SCENE_MODE_SETTER);
 	if (!g_reward_orig || !g_damage_orig || !g_script_step_orig ||
-	    !g_scene_transition_orig)
+	    !g_scene_transition_orig || !g_scene_mode_orig)
 		return;
 	if (newpal_patch_jump(NP_REWARD, newpal_reward_hook,
 			     reward_expected) != 0)
@@ -559,6 +656,10 @@ void host_cheat_newpal_install(void)
 	if (newpal_patch_jump(NP_SCENE_TRANSITION,
 			     newpal_scene_transition_hook,
 			     transition_expected) != 0)
+		return;
+	if (newpal_patch_jump(NP_SCENE_MODE_SETTER,
+			     newpal_scene_mode_hook,
+			     scene_mode_expected) != 0)
 		return;
 	fprintf(stderr, "sword3-sdl: NewPAL trainer runtime hooks installed\n");
 }

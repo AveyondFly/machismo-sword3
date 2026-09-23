@@ -88,11 +88,15 @@ state. It does not load code from `ref` or use the Paladin 2 data layout.
 
 Money is set to the game's script limit of 60000. Full HP uses the game's role
 property updater to restore each party member's HP and MP. The no-encounter
-hook recognizes visible monster scripts before the field interpreter runs,
-then uses the game's own actor, collision, and spatial-list cleanup calls to
-remove the monster and cancel its script. Other positive battle requests are
-cleared after the interpreter runs. A guard at the scene transition function
-handles direct requests. The battle reward hook raises party EXP to the next
+hook recognizes visible monster scripts, removes the monster with the game's
+actor, collision, and spatial-list cleanup calls, and advances past the
+contact delay and battle request opcodes. The interpreter still finishes the
+rest of the script. A fallback clears battle requests from other field scripts,
+and a guard at the scene transition function handles direct requests. While a
+recognized monster script is active, the scene mode hook keeps field movement
+input enabled; the game otherwise hides the virtual stick until that script
+finishes.
+The battle reward hook raises party EXP to the next
 level threshold and raises the character's raw level cap to 99; the game checks
 both values before granting a level. The one-hit hook increases player-to-monster damage in
 the game's damage calculation path for enemy IDs below 2000. The three toggle
