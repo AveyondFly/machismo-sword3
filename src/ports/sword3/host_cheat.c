@@ -778,6 +778,9 @@ void host_cheat_draw(SDL_Renderer *renderer, int logical_w, int logical_h)
 
 	cheat_text(renderer, panel_x + cheat_sx(24, logical_w),
 		   panel_y + cheat_sy(16, logical_h), pt, title, "修改器");
+	cheat_text(renderer, panel_x + cheat_sx(100, logical_w),
+		   panel_y + cheat_sy(18, logical_h), pt, hint,
+		   "mod by kk(k源机)");
 	for (i = 0; i < CHEAT_ITEM_COUNT; i++) {
 		y = panel_y + cheat_sy(54, logical_h) + i * row_h;
 		label = cheat_label(i, buffer, sizeof(buffer));
