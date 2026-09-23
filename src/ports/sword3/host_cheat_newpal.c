@@ -51,6 +51,8 @@ static int g_level_up;
 static int g_one_hit;
 static int g_no_encounter;
 static unsigned g_encounters_suppressed;
+static unsigned g_encounters_preempted;
+static unsigned g_map_monsters_removed;
 
 static int (*g_reward_orig)(void);
 static int (*g_damage_orig)(void *source, void *target);
@@ -246,9 +248,8 @@ static int newpal_damage_hook(void *source, void *target)
 	return damage;
 }
 
-static int newpal_hide_encounter_object(int battle, int event_id, int index)
+static int newpal_hide_encounter_object(int event_id, int index)
 {
-	static unsigned samples;
 	int count = *(volatile int *)(uintptr_t)NP_MAP_OBJECT_COUNT;
 	uint8_t *object;
 	uint32_t flags;
@@ -261,10 +262,6 @@ static int newpal_hide_encounter_object(int battle, int event_id, int index)
 		(size_t)index * NP_MAP_OBJECT_SIZE;
 	object_id = *(uint16_t *)(object + 0x2c);
 	flags = *(uint32_t *)(object + 0x18);
-	if (samples++ < 32)
-		fprintf(stderr,
-			"sword3-sdl: NewPAL trainer battle=%d event=%d index=%d object=%u flags=0x%x\n",
-			battle, event_id, index, object_id, flags);
 	/* Match the active event and the map's visible monster object class. */
 	if (event_id != object_id || object_id < 5000 || object_id >= 6000 ||
 	    (flags & 0xf000u) != 0xf000u ||
@@ -284,9 +281,43 @@ static int newpal_hide_encounter_object(int battle, int event_id, int index)
 	*(uint32_t *)(object + 0x18) = flags | 0x10000000u;
 	((void (*)(void *, int))(uintptr_t)NP_UNLINK_MAP_OBJECT)(
 		object, flags & 3);
-	fprintf(stderr,
-		"sword3-sdl: NewPAL trainer removed map monster=%u index=%d\n",
-		object_id, index);
+	g_map_monsters_removed++;
+	return 1;
+}
+
+static int newpal_preempt_visible_encounter(void *script, int state)
+{
+	unsigned object_id;
+	unsigned offset;
+	int object_index = -1;
+	const uint8_t *data;
+	const uint16_t *code;
+
+	if (!g_no_encounter || state != 0)
+		return 0;
+	object_id = *(uint16_t *)((uint8_t *)script + 0x2c);
+	offset = *(uint16_t *)((uint8_t *)script + 0x28);
+	if (object_id < 5000 || object_id >= 6000 || offset > 0xffd0)
+		return 0;
+	data = *(const uint8_t **)(uintptr_t)NP_SCRIPT_DATA;
+	if (!data)
+		return 0;
+	code = (const uint16_t *)(data + offset);
+	/* The observed monster scripts enter at this opcode sequence. */
+	if (code[0] != 0x43 || code[1] != 0x8320 ||
+	    code[2] != 0x309 || !code[3] ||
+	    code[8] != 0x28 || code[9] != object_id)
+		return 0;
+	if (!((int (*)(int, int *))(uintptr_t)
+	      NP_FIND_MAP_OBJECT)(object_id, &object_index) ||
+	    !newpal_hide_encounter_object(object_id, object_index))
+		return 0;
+	/* An inactive script returns after updating the interpreter's timers. */
+	*(uint16_t *)((uint8_t *)script + 0x2c) = 0xffff;
+	*(volatile int *)(uintptr_t)NP_SCENE_REQUEST = -1;
+	g_encounters_preempted++;
+	g_encounters_suppressed++;
+	g_script_step_orig(script);
 	return 1;
 }
 
@@ -323,7 +354,7 @@ static int newpal_hide_script_encounter_object(int battle,
 			      NP_FIND_MAP_OBJECT)(object_id, &object_index))
 				return 0;
 			return newpal_hide_encounter_object(
-				battle, object_id, object_index);
+				object_id, object_index);
 		}
 		break;
 	}
@@ -342,6 +373,8 @@ static void newpal_script_step_hook(void *script)
 	int state_after;
 	int request_after;
 
+	if (newpal_preempt_visible_encounter(script, state_before))
+		return;
 	memcpy(entry_script, script, sizeof(entry_script));
 	g_script_step_orig(script);
 	state_after = *(volatile int *)(uintptr_t)NP_SCENE_STATE;
@@ -350,7 +383,7 @@ static void newpal_script_step_hook(void *script)
 		int event = *(volatile int *)(uintptr_t)NP_CURRENT_OBJECT_ID;
 		int index = *(volatile int *)(uintptr_t)NP_CURRENT_OBJECT_INDEX;
 
-		if (g_encounters_suppressed < 32)
+		if (g_encounters_suppressed < 4)
 			fprintf(stderr,
 				"sword3-sdl: NewPAL trainer encounter offset=%u script=%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d entry=%d/%d exit=%d/%d\n",
 				entry_offset,
@@ -361,13 +394,13 @@ static void newpal_script_step_hook(void *script)
 				entry_event, entry_index, event, index);
 		if (!newpal_hide_script_encounter_object(request_after,
 							entry_offset) &&
-		    !newpal_hide_encounter_object(request_after, event, index) &&
+		    !newpal_hide_encounter_object(event, index) &&
 		    (entry_event != event || entry_index != index))
-			newpal_hide_encounter_object(request_after, entry_event,
+			newpal_hide_encounter_object(entry_event,
 					      entry_index);
 		*(volatile int *)(uintptr_t)NP_SCENE_REQUEST = -1;
 		g_encounters_suppressed++;
-		if (g_encounters_suppressed <= 32 ||
+		if (g_encounters_suppressed <= 4 ||
 		    !(g_encounters_suppressed & (g_encounters_suppressed - 1)))
 			fprintf(stderr,
 				"sword3-sdl: NewPAL trainer suppressed battle request=%d count=%u\n",
@@ -425,10 +458,14 @@ void host_cheat_newpal_one_hit(int enabled)
 void host_cheat_newpal_no_encounter(int enabled)
 {
 	fprintf(stderr,
-		"sword3-sdl: NewPAL trainer no-encounter=%d suppressed=%u\n",
-		enabled, g_encounters_suppressed);
-	if (enabled && !g_no_encounter)
+		"sword3-sdl: NewPAL trainer no-encounter=%d suppressed=%u preempted=%u removed=%u\n",
+		enabled, g_encounters_suppressed,
+		g_encounters_preempted, g_map_monsters_removed);
+	if (enabled && !g_no_encounter) {
 		g_encounters_suppressed = 0;
+		g_encounters_preempted = 0;
+		g_map_monsters_removed = 0;
+	}
 	g_no_encounter = enabled;
 }
 
