@@ -70,6 +70,9 @@ enum cheat_item {
 
 static int g_open;
 static int g_selected;
+static int g_newpal_ui;
+static int g_newpal_axis_dir;
+static Uint8 g_newpal_consumed_buttons[SDL_CONTROLLER_BUTTON_MAX];
 static int g_no_encounter;
 static int g_level_up;
 static int g_one_hit;
@@ -526,8 +529,11 @@ static void cheat_open(void)
 {
 	g_open = 1;
 	g_selected = 0;
+	if (g_newpal_ui)
+		g_newpal_axis_dir = 0;
 	g_status[0] = 0;
-	fprintf(stderr, "sword3-sdl: Pal2 trainer open\n");
+	fprintf(stderr, "sword3-sdl: %s trainer open\n",
+		g_newpal_ui ? "NewPAL" : "Pal2");
 }
 
 static void cheat_close(void)
@@ -535,12 +541,22 @@ static void cheat_close(void)
 	if (!g_open)
 		return;
 	g_open = 0;
+	if (g_newpal_ui)
+		g_newpal_axis_dir = 0;
 	g_status[0] = 0;
-	fprintf(stderr, "sword3-sdl: Pal2 trainer close\n");
+	fprintf(stderr, "sword3-sdl: %s trainer close\n",
+		g_newpal_ui ? "NewPAL" : "Pal2");
 }
 
 static void cheat_apply(void)
 {
+	if (g_newpal_ui) {
+		if (g_selected == CHEAT_CLOSE)
+			cheat_close();
+		else
+			cheat_set_status("功能暂未实现");
+		return;
+	}
 	switch (g_selected) {
 	case CHEAT_MONEY:
 		cheat_apply_money();
@@ -606,6 +622,117 @@ int host_cheat_key(SDL_Scancode scancode, int down, int repeat)
 		break;
 	}
 	return 1;
+}
+
+int host_cheat_newpal_event(const SDL_Event *event)
+{
+	static unsigned logged_buttons;
+	int button;
+	int down;
+
+	if (!event)
+		return 0;
+	g_newpal_ui = 1;
+	if (event->type == SDL_CONTROLLERBUTTONDOWN ||
+	    event->type == SDL_CONTROLLERBUTTONUP) {
+		button = event->cbutton.button;
+		if (logged_buttons++ < 16)
+			fprintf(stderr, "sword3-sdl: NewPAL trainer pad button=%d down=%d\n",
+				button, event->type == SDL_CONTROLLERBUTTONDOWN);
+		if (button < 0 || button >= SDL_CONTROLLER_BUTTON_MAX)
+			return g_open;
+		down = event->type == SDL_CONTROLLERBUTTONDOWN;
+		if (!down && g_newpal_consumed_buttons[button]) {
+			g_newpal_consumed_buttons[button] = 0;
+			return 1;
+		}
+		if (!down)
+			return g_open;
+		if (!g_open && button != SDL_CONTROLLER_BUTTON_Y)
+			return 0;
+		g_newpal_consumed_buttons[button] = 1;
+		switch (button) {
+		case SDL_CONTROLLER_BUTTON_Y:
+			if (g_open)
+				cheat_close();
+			else
+				cheat_open();
+			break;
+		case SDL_CONTROLLER_BUTTON_DPAD_UP:
+			g_selected = (g_selected + CHEAT_ITEM_COUNT - 1) %
+				CHEAT_ITEM_COUNT;
+			break;
+		case SDL_CONTROLLER_BUTTON_DPAD_DOWN:
+			g_selected = (g_selected + 1) % CHEAT_ITEM_COUNT;
+			break;
+		case SDL_CONTROLLER_BUTTON_A:
+			cheat_apply();
+			break;
+		case SDL_CONTROLLER_BUTTON_B:
+		case SDL_CONTROLLER_BUTTON_BACK:
+			cheat_close();
+			break;
+		default:
+			break;
+		}
+		return 1;
+	}
+	if (event->type == SDL_CONTROLLERAXISMOTION && g_open) {
+		if (event->caxis.axis == SDL_CONTROLLER_AXIS_LEFTY) {
+			int dir = event->caxis.value < -16000 ? -1 :
+				event->caxis.value > 16000 ? 1 : 0;
+			if (dir && dir != g_newpal_axis_dir)
+				g_selected = (g_selected + CHEAT_ITEM_COUNT +
+					      dir) % CHEAT_ITEM_COUNT;
+			g_newpal_axis_dir = dir;
+		}
+		return 1;
+	}
+	if (event->type == SDL_KEYDOWN || event->type == SDL_KEYUP) {
+		SDL_Scancode key = event->key.keysym.scancode;
+
+		if (key == SDL_SCANCODE_Y) {
+			if (event->type == SDL_KEYDOWN && !event->key.repeat) {
+				if (g_open)
+					cheat_close();
+				else
+					cheat_open();
+			}
+			return 1;
+		}
+		if (!g_open)
+			return 0;
+		if (event->type == SDL_KEYDOWN && !event->key.repeat) {
+			switch (key) {
+			case SDL_SCANCODE_UP:
+				g_selected = (g_selected + CHEAT_ITEM_COUNT - 1) %
+					CHEAT_ITEM_COUNT;
+				break;
+			case SDL_SCANCODE_DOWN:
+				g_selected = (g_selected + 1) % CHEAT_ITEM_COUNT;
+				break;
+			case SDL_SCANCODE_RETURN:
+			case SDL_SCANCODE_SPACE:
+				cheat_apply();
+				break;
+			case SDL_SCANCODE_ESCAPE:
+				cheat_close();
+				break;
+			default:
+				break;
+			}
+		}
+		return 1;
+	}
+	return g_open && (event->type == SDL_JOYAXISMOTION ||
+			  event->type == SDL_JOYBALLMOTION ||
+			  event->type == SDL_JOYHATMOTION ||
+			  event->type == SDL_JOYBUTTONDOWN ||
+			  event->type == SDL_JOYBUTTONUP ||
+			  event->type == SDL_MOUSEBUTTONDOWN ||
+			  event->type == SDL_MOUSEBUTTONUP ||
+			  event->type == SDL_FINGERDOWN ||
+			  event->type == SDL_FINGERUP);
 }
 
 static Uint32 cheat_rgba(SDL_Color color)
@@ -797,6 +924,7 @@ void host_cheat_draw(SDL_Renderer *renderer, int logical_w, int logical_h)
 	}
 	cheat_text(renderer, panel_x + cheat_sx(24, logical_w),
 		   panel_y + panel_h - cheat_sy(48, logical_h), pt, hint,
+		   g_newpal_ui ? "A 查看   Y/B/SELECT 关闭   上下选择" :
 		   "A 确定   Y/B/SELECT 关闭   上下选择");
 	if (g_status[0] && SDL_GetTicks() < g_status_until)
 		cheat_text(renderer, panel_x + cheat_sx(24, logical_w),

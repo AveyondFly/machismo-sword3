@@ -1457,6 +1457,8 @@ static int rewrite_event(SDL_Event *event)
 		static unsigned logged_pad;
 
 		newpal_exit_combo(event);
+		if (host_cheat_newpal_event(event))
+			return 0;
 		if (is_guest_pad_event(event->type) && logged_pad++ < 24)
 			fprintf(stderr, "sword3-sdl: NewPAL controller event type=%u\n",
 				event->type);
@@ -1979,6 +1981,8 @@ void sword3_SDL_RenderPresent(SDL_Renderer *renderer)
 
 	owner_check("SDL_RenderPresent", KIND_RENDERER, renderer);
 	if (newpal_mode()) {
+		if (host_cheat_active() && SDL_GetRenderTarget(renderer) == NULL)
+			host_cheat_draw(renderer, g_logical_w, g_logical_h);
 		SDL_RenderPresent(renderer);
 		return;
 	}
@@ -2467,7 +2471,7 @@ const Uint8 *sword3_SDL_GetKeyboardState(int *numkeys)
 		SDL_SCANCODE_LEFT,
 	};
 	if (newpal_mode())
-		return state;
+		return host_cheat_active() ? blocked : state;
 
 	if (host_cheat_active()) {
 		guest_state = blocked;

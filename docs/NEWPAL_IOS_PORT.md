@@ -77,6 +77,14 @@ so its calls now use host `SDL_MixAudioFormat`. Legacy audio locking uses the
 host device as well. A device run installed all 46 hooks and logged
 `PauseAudioDevice 1 -> 2 pause=0`; sound effects were then reported working.
 
+## Trainer shell
+
+Y opens the host trainer overlay using the Paladin 2 menu layout and the same
+six entries: money, full HP, no encounters, level up after battle, one-hit
+kill, and close. D-pad or left stick selects an entry; A on a feature reports
+that it is not implemented. Y, B, or Select closes the overlay. No NewPAL game
+state is modified and no Paladin 2 memory patch is installed for NewPAL.
+
 ## Device `ref` library analysis
 
 The user supplied `/roms/ports/newpal-ios/ref` as a reference runtime. Its
