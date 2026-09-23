@@ -13,6 +13,7 @@ extern "C" {
  * silently mix with the ROCKNIX SDL implementation.
  */
 int sword3_SDL_InitSubSystem(Uint32 flags);
+int sword3_SDL_IsGameController(int device);
 int sword3_SDL_VideoInit(const char *driver_name);
 void sword3_SDL_VideoQuit(void);
 int sword3_SDL_AudioInit(const char *driver_name);

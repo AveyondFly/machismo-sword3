@@ -4,7 +4,9 @@
 from __future__ import annotations
 
 import argparse
+import hashlib
 import posixpath
+import shlex
 import subprocess
 import sys
 from pathlib import Path
@@ -13,6 +15,16 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 EXPECTED_BINARY = "2056c5b0a921088f96302ce7562884fcb2b7383652912995c3946c104893a0d8"
 REMOTE_BINARY = "game/Payload/NewPAL.app/NewPAL"
+RUNTIME_FILES = (
+    "machismo",
+    "libsystem_shim.so",
+    "libsword3_ios_shim.so",
+    "libsword3_objc_shim.so",
+    "libsword3_gl_bridge.so",
+    "libsword3_host.so",
+    "libc++.so.1",
+    "libc++abi.so.1",
+)
 
 
 def ssh_cmd(target: str) -> list[str]:
@@ -54,6 +66,33 @@ def deploy(target: str, remote: str, package: Path) -> None:
         f"chmod 755 '{remote_launcher}.new' && "
         f"mv -f '{remote_launcher}.new' '{remote_launcher}'"
     ])
+
+
+def verify_runtime(target: str, remote: str, package: Path) -> None:
+    """Confirm deployed libraries came from this branch's build package."""
+    local_hashes = {}
+    for name in RUNTIME_FILES:
+        path = package / name
+        if not path.is_file():
+            raise SystemExit(f"missing packaged runtime: {path}")
+        local_hashes[name] = hashlib.sha256(path.read_bytes()).hexdigest()
+    for name in ("dylib_map.conf", "address-hooks.conf",
+                 "machismo-partial-sdl.conf"):
+        contents = (package / name).read_text()
+        if "/ref/" in contents or "libnewpal_" in contents:
+            raise SystemExit(f"reference library in packaged config: {name}")
+    paths = " ".join(shlex.quote(posixpath.join(remote, name))
+                     for name in RUNTIME_FILES)
+    result = run(ssh_cmd(target) + [f"sha256sum {paths}"],
+                 capture_output=True, text=True)
+    remote_hashes = {
+        posixpath.basename(path): digest
+        for digest, path in (line.split(maxsplit=1)
+                             for line in result.stdout.splitlines())
+    }
+    if remote_hashes != local_hashes:
+        raise SystemExit("device runtime differs from this branch's package")
+    print("NewPAL runtime hashes match this branch's package", flush=True)
 
 
 def inspect(target: str, remote: str, audit_only: bool, seconds: int) -> int:
@@ -114,6 +153,7 @@ def main() -> int:
     args = parser.parse_args()
     if not args.skip_deploy:
         deploy(args.target, args.remote_dir, args.package)
+    verify_runtime(args.target, args.remote_dir, args.package)
     return inspect(args.target, args.remote_dir, args.audit_only, args.seconds)
 
 

@@ -106,18 +106,6 @@
       "group": "image"
     },
     {
-      "symbol": "NewPAL_InitJoyStick",
-      "string": "Could not open gamecontroller %i: %s\n",
-      "host_symbol": "sword3_ret0",
-      "group": "joystick"
-    },
-    {
-      "symbol": "SDL_GameControllerOpen",
-      "string": "Couldn't find mapping for device (%d)",
-      "host_symbol": "sword3_ret0",
-      "group": "joystick"
-    },
-    {
       "symbol": "SDL_PumpEvents",
       "nth_after": {
         "after_symbol": "SDL_PeepEvents",
@@ -314,6 +302,15 @@
         "parent_string": "SDL_SS2D_LoadImage : Unable to load image file: %s\r\n%s\r\n",
         "bl_index": 0
       }
+    },
+    {
+      "symbol": "SDL_IsGameController",
+      "group": "joystick",
+      "nth_after": {
+        "after_symbol": "SDL_RenderPresent",
+        "n": 243
+      },
+      "expected_address": "0x10017e2e4"
     }
   ]
 }

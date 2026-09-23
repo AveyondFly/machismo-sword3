@@ -1,7 +1,7 @@
 {
   "binary_sha256": "2056c5b0a921088f96302ce7562884fcb2b7383652912995c3946c104893a0d8",
   "coverage": "partial",
-  "hook_count": 43,
+  "hook_count": 42,
   "hooks": [
     {
       "address": "0x100116034",
@@ -392,52 +392,6 @@
       "library": "./libsword3_host.so",
       "method": "unique exact cstring xref + LC_FUNCTION_STARTS",
       "symbol": "IMG_LoadTyped_RW"
-    },
-    {
-      "address": "0x10005b0fc",
-      "anchor": "Could not open gamecontroller %i: %s",
-      "end_address": "0x10005b400",
-      "evidence": [
-        {
-          "instruction": "0x10005b218",
-          "string": "Could not open gamecontroller %i: %s\n",
-          "string_address": "0x1001b03a3",
-          "type": "anchor-string-xref"
-        },
-        {
-          "instruction": "0x10005b2dc",
-          "string": "Could not open gamecontroller %i: %s\n",
-          "string_address": "0x1001b03a3",
-          "type": "anchor-string-xref"
-        }
-      ],
-      "expected_hex": "ff0303d1fc6f06a9fa6707a9f85f08a9",
-      "fingerprint": "3c3920035743074b8fd0385f63cbb33ca19df11cd7ad35680e1784342b9cab90",
-      "group": "joystick",
-      "host_symbol": "sword3_ret0",
-      "library": "./libsword3_host.so",
-      "method": "unique exact cstring xref + LC_FUNCTION_STARTS",
-      "symbol": "NewPAL_InitJoyStick"
-    },
-    {
-      "address": "0x10017e448",
-      "anchor": "Couldn't find mapping for device (%d)",
-      "end_address": "0x10017e59c",
-      "evidence": [
-        {
-          "instruction": "0x10017e538",
-          "string": "Couldn't find mapping for device (%d)",
-          "string_address": "0x1001ba147",
-          "type": "anchor-string-xref"
-        }
-      ],
-      "expected_hex": "ff0301d1f65701a9f44f02a9fd7b03a9",
-      "fingerprint": "7b932a933f2df62cb4b869f40152b8f98ae29077211fc822af14e006c31f9842",
-      "group": "joystick",
-      "host_symbol": "sword3_ret0",
-      "library": "./libsword3_host.so",
-      "method": "unique exact cstring xref + LC_FUNCTION_STARTS",
-      "symbol": "SDL_GameControllerOpen"
     },
     {
       "address": "0x10014cab8",
@@ -903,6 +857,26 @@
       "library": "./libsword3_host.so",
       "method": "nth LC_FUNCTION_STARTS after resolved origin",
       "symbol": "SDL_CloseAudioDevice"
+    },
+    {
+      "address": "0x10017e2e4",
+      "anchor": "nth_after SDL_RenderPresent n=243",
+      "end_address": "0x10017e300",
+      "evidence": [
+        {
+          "n": 243,
+          "origin": "SDL_RenderPresent",
+          "origin_address": "0x100161f1c",
+          "type": "nth-function-after"
+        }
+      ],
+      "expected_hex": "fd7bbfa9fd030091050000941f0000f1",
+      "fingerprint": "676e36c67ee3ddabad1c163b8ddb6bc30c54f489839d2572c5db6bf8e182a70c",
+      "group": "joystick",
+      "host_symbol": "sword3_SDL_IsGameController",
+      "library": "./libsword3_host.so",
+      "method": "nth LC_FUNCTION_STARTS after resolved origin",
+      "symbol": "SDL_IsGameController"
     }
   ],
   "method": "unique exact cstring xref, ordered parent BL index, and nth LC_FUNCTION_STARTS after a resolved origin",

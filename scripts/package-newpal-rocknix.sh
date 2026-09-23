@@ -41,7 +41,6 @@ cp "$ROOT/configs/newpal/machismo.conf" \
    "$ROOT/configs/newpal/address-hooks.conf" \
    "$ROOT/configs/newpal/patches.conf" \
    "$ROOT/configs/newpal/sdl-hook-report.json" \
-   "$ROOT/configs/newpal/newpal.gptk" \
    "$OUTPUT.new/"
 chmod +x "$OUTPUT.new/machismo"
 

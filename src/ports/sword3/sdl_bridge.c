@@ -338,6 +338,82 @@ static int newpal_mode(void)
 	return mode;
 }
 
+static SDL_GameController *g_newpal_controller;
+static SDL_JoystickID g_newpal_exit_pad_id = -1;
+static int g_newpal_start_down;
+static int g_newpal_back_down;
+static int g_newpal_guide_down;
+
+static void newpal_open_controller(void)
+{
+	int count;
+	int index;
+
+	if (!newpal_mode() || g_newpal_controller)
+		return;
+	count = SDL_NumJoysticks();
+	for (index = 0; index < count; index++) {
+		if (!SDL_IsGameController(index))
+			continue;
+		g_newpal_controller = SDL_GameControllerOpen(index);
+		if (g_newpal_controller) {
+			g_newpal_exit_pad_id = SDL_JoystickInstanceID(
+				SDL_GameControllerGetJoystick(g_newpal_controller));
+			fprintf(stderr, "sword3-sdl: NewPAL controller opened: %s\n",
+				SDL_GameControllerName(g_newpal_controller));
+			return;
+		}
+	}
+	fprintf(stderr, "sword3-sdl: NewPAL controller unavailable (%d joysticks)\n",
+		count);
+}
+
+static void newpal_exit_combo(SDL_Event *event)
+{
+	int down;
+
+	if (event->type != SDL_CONTROLLERBUTTONDOWN &&
+	    event->type != SDL_CONTROLLERBUTTONUP)
+		return;
+	if (event->cbutton.which != g_newpal_exit_pad_id)
+		return;
+	down = event->type == SDL_CONTROLLERBUTTONDOWN;
+	switch (event->cbutton.button) {
+	case SDL_CONTROLLER_BUTTON_START:
+		g_newpal_start_down = down;
+		break;
+	case SDL_CONTROLLER_BUTTON_BACK:
+		g_newpal_back_down = down;
+		break;
+	case SDL_CONTROLLER_BUTTON_GUIDE:
+		g_newpal_guide_down = down;
+		break;
+	default:
+		return;
+	}
+	if (down && g_newpal_start_down &&
+	    (g_newpal_back_down || g_newpal_guide_down)) {
+		fprintf(stderr, "sword3-sdl: NewPAL exit combo pressed\n");
+		/* The guest's exit destructors free pointers owned by the host SDL.
+		 * Finish this process directly, as the old -k kill path did. */
+		fflush(stderr);
+		_exit(0);
+	}
+}
+
+int sword3_SDL_IsGameController(int device)
+{
+	SDL_Joystick *joystick;
+
+	if (device >= 0 && device < SDL_NumJoysticks() &&
+	    SDL_IsGameController(device))
+		return 1;
+	if (!g_newpal_controller)
+		return 0;
+	joystick = SDL_GameControllerGetJoystick(g_newpal_controller);
+	return joystick && SDL_JoystickInstanceID(joystick) == device;
+}
+
 static const char *ignore_ios_driver(const char *driver_name, const char *ios_name)
 {
 	if (driver_name && SDL_strcasecmp(driver_name, ios_name) == 0) {
@@ -1378,9 +1454,12 @@ static int rewrite_event(SDL_Event *event)
 	if (newpal_mode()) {
 		static unsigned logged_keys;
 		static unsigned logged_mouse;
+		static unsigned logged_pad;
 
-		if (is_guest_pad_event(event->type))
-			return 0;
+		newpal_exit_combo(event);
+		if (is_guest_pad_event(event->type) && logged_pad++ < 24)
+			fprintf(stderr, "sword3-sdl: NewPAL controller event type=%u\n",
+				event->type);
 		if ((event->type == SDL_KEYDOWN || event->type == SDL_KEYUP) &&
 		    logged_keys++ < 32)
 			fprintf(stderr,
@@ -1529,14 +1608,18 @@ int sword3_ret0(void)
 int sword3_SDL_InitSubSystem(Uint32 flags)
 {
 	Uint32 requested = flags;
-	Uint32 host_flags = flags & ~(Uint32)HOST_JOYSTICK_FLAGS;
+	Uint32 host_flags = newpal_mode() ? flags :
+		flags & ~(Uint32)HOST_JOYSTICK_FLAGS;
 	int result;
 
-	if (requested & HOST_JOYSTICK_FLAGS)
+	if (!newpal_mode() && requested & HOST_JOYSTICK_FLAGS)
 		fprintf(stderr,
 			"sword3-sdl: dropping joystick init 0x%x (gptokeyb owns the pad)\n",
 			requested & (Uint32)HOST_JOYSTICK_FLAGS);
 	result = host_flags ? SDL_InitSubSystem(host_flags) : 0;
+	if (result == 0 && newpal_mode() &&
+	    (requested & HOST_JOYSTICK_FLAGS))
+		newpal_open_controller();
 	fprintf(stderr, "sword3-sdl: SDL_InitSubSystem(0x%x) -> %d (%s)\n",
 		requested, result, result == 0 ? "ok" : SDL_GetError());
 	return result;
