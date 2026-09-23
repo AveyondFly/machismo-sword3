@@ -29,6 +29,16 @@ extern sword3_objc_id objc_msgSend(
 
 static _Atomic uint64_t unsupported_call_count;
 
+/* QuartzCore uses a monotonic time base for display and animation timing. */
+SWORD3_EXPORT double CACurrentMediaTime(void)
+{
+    struct timespec ts;
+
+    if (clock_gettime(CLOCK_MONOTONIC, &ts) != 0)
+        return 0.0;
+    return (double)ts.tv_sec + (double)ts.tv_nsec / 1000000000.0;
+}
+
 struct proxy_string {
     sword3_objc_Class isa;
     char *value;
@@ -489,6 +499,20 @@ static uintptr_t proxy_string_length(struct proxy_string *self,
 {
     (void)selector;
     return self && self->value ? strlen(self->value) : 0;
+}
+
+static const char *constant_string_utf8(
+    const struct constant_string_layout *self, sword3_objc_sel selector)
+{
+    (void)selector;
+    return object_cstring(self);
+}
+
+static uintptr_t constant_string_length(
+    const struct constant_string_layout *self, sword3_objc_sel selector)
+{
+    (void)selector;
+    return self ? self->length : 0;
 }
 
 static struct proxy_string *make_proxy_string(const char *value)
@@ -3366,6 +3390,17 @@ static const struct proxy_method_list proxy_string_class_methods = {
     },
 };
 
+static const struct proxy_method_list constant_string_methods = {
+    .entsize_and_flags = sizeof(struct sword3_objc_method),
+    .count = 3,
+    .methods = {
+        {"UTF8String", "*16@0:8", (sword3_objc_imp)constant_string_utf8},
+        {"fileSystemRepresentation", "*16@0:8",
+         (sword3_objc_imp)constant_string_utf8},
+        {"length", "Q16@0:8", (sword3_objc_imp)constant_string_length},
+    },
+};
+
 static const struct proxy_method_list proxy_array_methods = {
     .entsize_and_flags = sizeof(struct sword3_objc_method),
     .count = 10,
@@ -3933,6 +3968,14 @@ static const struct sword3_objc_class_ro proxy_string_ro = {
         (const struct sword3_objc_method_list *)&proxy_string_methods,
 };
 
+static const struct sword3_objc_class_ro constant_string_ro = {
+    .flags = SWORD3_OBJC_RO_ROOT,
+    .instance_size = sizeof(struct constant_string_layout),
+    .name = "__NSCFConstantString",
+    .base_methods =
+        (const struct sword3_objc_method_list *)&constant_string_methods,
+};
+
 static const struct sword3_objc_class_ro proxy_string_metaclass_ro = {
     .flags = SWORD3_OBJC_RO_META | SWORD3_OBJC_RO_ROOT,
     .instance_size = sizeof(struct sword3_objc_class),
@@ -4393,6 +4436,13 @@ SWORD3_EXPORT struct sword3_objc_class proxy_string_class
     __asm__("OBJC_CLASS_$_NSString") = {
         .isa = &proxy_string_metaclass,
         .data_bits = (uintptr_t)&proxy_string_ro,
+    };
+
+SWORD3_EXPORT struct sword3_objc_class constant_string_class
+    __asm__("__CFConstantStringClassReference") = {
+        .isa = &proxy_string_metaclass,
+        .superclass = &proxy_string_class,
+        .data_bits = (uintptr_t)&constant_string_ro,
     };
 
 static struct sword3_objc_class proxy_array_metaclass = {

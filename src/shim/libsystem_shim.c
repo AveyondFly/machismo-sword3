@@ -1172,6 +1172,36 @@ void dispatch_retain(void *object)
 
 /* ===== Thread-local variable support (stubs) ===== */
 
+struct guest_atexit_callback {
+	void (*function)(void);
+};
+
+static void run_guest_atexit(int status, void *opaque)
+{
+	struct guest_atexit_callback *callback = opaque;
+	(void)status;
+	callback->function();
+	free(callback);
+}
+
+int shim_atexit(void (*function)(void)) __asm__("atexit");
+int shim_atexit(void (*function)(void))
+{
+	struct guest_atexit_callback *callback;
+	int result;
+
+	if (!function)
+		return -1;
+	callback = malloc(sizeof(*callback));
+	if (!callback)
+		return -1;
+	callback->function = function;
+	result = on_exit(run_guest_atexit, callback);
+	if (result)
+		free(callback);
+	return result;
+}
+
 void _tlv_atexit(void (*func)(void *), void *arg)
 {
 	(void)func; (void)arg;

@@ -327,6 +327,17 @@ static Uint32 g_cursor_sound_ms;
 static SDL_AudioDeviceID g_guest_audio_device;
 static SDL_AudioFormat g_guest_audio_format = AUDIO_S16SYS;
 
+static int newpal_mode(void)
+{
+	static int mode = -1;
+
+	if (mode < 0) {
+		const char *port = getenv("SWORD3_PORT");
+		mode = port && strcmp(port, "newpal") == 0;
+	}
+	return mode;
+}
+
 static const char *ignore_ios_driver(const char *driver_name, const char *ios_name)
 {
 	if (driver_name && SDL_strcasecmp(driver_name, ios_name) == 0) {
@@ -1364,6 +1375,30 @@ static int rewrite_event(SDL_Event *event)
 
 	if (!event)
 		return 0;
+	if (newpal_mode()) {
+		static unsigned logged_keys;
+		static unsigned logged_mouse;
+
+		if (is_guest_pad_event(event->type))
+			return 0;
+		if ((event->type == SDL_KEYDOWN || event->type == SDL_KEYUP) &&
+		    logged_keys++ < 32)
+			fprintf(stderr,
+				"sword3-sdl: NewPAL key %s scancode=%d keycode=%d repeat=%u\n",
+				event->type == SDL_KEYDOWN ? "down" : "up",
+				event->key.keysym.scancode,
+				event->key.keysym.sym, event->key.repeat);
+		if ((event->type == SDL_MOUSEMOTION ||
+		     event->type == SDL_MOUSEBUTTONDOWN ||
+		     event->type == SDL_MOUSEBUTTONUP) && logged_mouse++ < 24)
+			fprintf(stderr,
+				"sword3-sdl: NewPAL mouse type=%u x=%d y=%d button=%u\n",
+				event->type,
+				event->type == SDL_MOUSEMOTION ? event->motion.x : event->button.x,
+				event->type == SDL_MOUSEMOTION ? event->motion.y : event->button.y,
+				event->type == SDL_MOUSEMOTION ? 0 : event->button.button);
+		return event->type != SDL_KEYDOWN || !event->key.repeat;
+	}
 	if (event->type == SDL_KEYUP && g_movie_swallow_keyup != SDL_SCANCODE_UNKNOWN &&
 	    event->key.keysym.scancode == g_movie_swallow_keyup) {
 		g_movie_swallow_keyup = SDL_SCANCODE_UNKNOWN;
@@ -1457,8 +1492,10 @@ static int next_translated_event(SDL_Event *event, int timeout)
 
 	for (;;) {
 		tick_ios_display_links();
-		pal2_kick_present();
-		apply_pad_pointer();
+		if (!newpal_mode()) {
+			pal2_kick_present();
+			apply_pad_pointer();
+		}
 		if (timeout == 0)
 			slice = 0;
 		else if (blocking)
@@ -1611,7 +1648,8 @@ SDL_Window *sword3_SDL_CreateWindow(const char *title, int x, int y, int w,
 		driver ? driver : "(none)", window, window ? "" : " ",
 		window ? "" : SDL_GetError());
 	g_window = window;
-	if (!g_cursor_ready && g_logical_w > 0 && g_logical_h > 0)
+	if (!newpal_mode() && !g_cursor_ready && g_logical_w > 0 &&
+	    g_logical_h > 0)
 		warp_menu_item(0);
 	owner_register(KIND_WINDOW, window);
 	return window;
@@ -1620,6 +1658,12 @@ SDL_Window *sword3_SDL_CreateWindow(const char *title, int x, int y, int w,
 void sword3_SDL_DestroyWindow(SDL_Window *window)
 {
 	owner_check("SDL_DestroyWindow", KIND_WINDOW, window);
+	if (newpal_mode()) {
+		SDL_DestroyWindow(window);
+		if (window == g_window)
+			g_window = NULL;
+		return;
+	}
 	fprintf(stderr, "sword3-sdl: ignore DestroyWindow on port window\n");
 }
 
@@ -1704,6 +1748,12 @@ SDL_Renderer *sword3_SDL_CreateRenderer(SDL_Window *window, int index,
 
 void sword3_SDL_DestroyRenderer(SDL_Renderer *renderer)
 {
+	if (newpal_mode()) {
+		SDL_DestroyRenderer(renderer);
+		if (renderer == g_renderer)
+			g_renderer = NULL;
+		return;
+	}
 	(void)renderer;
 	fprintf(stderr, "sword3-sdl: DestroyRenderer -> exit\n");
 	_exit(0);
@@ -1845,6 +1895,10 @@ void sword3_SDL_RenderPresent(SDL_Renderer *renderer)
 	SDL_Rect arm_h, arm_v;
 
 	owner_check("SDL_RenderPresent", KIND_RENDERER, renderer);
+	if (newpal_mode()) {
+		SDL_RenderPresent(renderer);
+		return;
+	}
 	host_cheat_install();
 	apply_pad_pointer();
 	seen++;
@@ -2265,7 +2319,7 @@ int sword3_SDL_PeepEvents(SDL_Event *events, int numevents,
 	int i;
 	int kept;
 
-	if (action != SDL_ADDEVENT)
+	if (action != SDL_ADDEVENT && !newpal_mode())
 		apply_pad_pointer();
 	n = SDL_PeepEvents(events, numevents, action, minType, maxType);
 	if (action == SDL_ADDEVENT || n <= 0 || !events)
@@ -2285,8 +2339,10 @@ void sword3_SDL_PumpEvents(void)
 {
 	SDL_PumpEvents();
 	tick_ios_display_links();
-	pal2_kick_present();
-	apply_pad_pointer();
+	if (!newpal_mode()) {
+		pal2_kick_present();
+		apply_pad_pointer();
+	}
 }
 
 int sword3_SDL_PollEvent(SDL_Event *event)
@@ -2327,6 +2383,8 @@ const Uint8 *sword3_SDL_GetKeyboardState(int *numkeys)
 		SDL_SCANCODE_DOWN,
 		SDL_SCANCODE_LEFT,
 	};
+	if (newpal_mode())
+		return state;
 
 	if (host_cheat_active()) {
 		guest_state = blocked;

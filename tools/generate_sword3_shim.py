@@ -43,6 +43,7 @@ DATA_STORAGE_SIZE = 64
 DATA_STORAGE_ALIGNMENT = 16
 IMPLEMENTED_FUNCTIONS = frozenset(
     {
+        "CACurrentMediaTime",
         "CFRunLoopGetCurrent",
         "CFRunLoopRunInMode",
         "CGRectGetHeight",
@@ -59,6 +60,7 @@ IMPLEMENTED_FUNCTIONS = frozenset(
 )
 IMPLEMENTED_DATA = frozenset(
     {
+        "__CFConstantStringClassReference",
         "OBJC_CLASS_$_NSBundle",
         "OBJC_METACLASS_$_NSBundle",
         "OBJC_CLASS_$_NSDictionary",

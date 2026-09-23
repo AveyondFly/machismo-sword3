@@ -99,11 +99,11 @@ add_custom_command(
     COMMAND ${Python3_EXECUTABLE}
             ${CMAKE_CURRENT_SOURCE_DIR}/tools/generate_sword3_shim.py
             --manifest
-            ${CMAKE_CURRENT_SOURCE_DIR}/configs/paladin2/binary-manifest.json
+            ${CMAKE_CURRENT_SOURCE_DIR}/configs/newpal/binary-manifest.json
             --output ${SWORD3_GENERATED_IMPORTS}
     DEPENDS
             tools/generate_sword3_shim.py
-            configs/paladin2/binary-manifest.json
+            configs/newpal/binary-manifest.json
     VERBATIM
 )
 add_library(sword3_ios_shim SHARED
@@ -127,11 +127,11 @@ add_custom_command(
     COMMAND ${Python3_EXECUTABLE}
             ${CMAKE_CURRENT_SOURCE_DIR}/tools/generate_objc_shim.py
             --manifest
-            ${CMAKE_CURRENT_SOURCE_DIR}/configs/paladin2/binary-manifest.json
+            ${CMAKE_CURRENT_SOURCE_DIR}/configs/newpal/binary-manifest.json
             --output ${SWORD3_GENERATED_OBJC_IMPORTS}
     DEPENDS
             tools/generate_objc_shim.py
-            configs/paladin2/binary-manifest.json
+            configs/newpal/binary-manifest.json
     VERBATIM
 )
 add_library(sword3_objc_shim SHARED

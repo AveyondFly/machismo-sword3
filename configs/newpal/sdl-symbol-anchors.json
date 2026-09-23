@@ -1,0 +1,319 @@
+{
+  "binary_sha256": "2056c5b0a921088f96302ce7562884fcb2b7383652912995c3946c104893a0d8",
+  "library": "./libsword3_host.so",
+  "symbols": [
+    {
+      "symbol": "SDL_InitSubSystem",
+      "string": "Application didn't initialize properly, did you include SDL_main.h in the file containing your main() function?",
+      "group": "init"
+    },
+    {
+      "symbol": "SDL_VideoInit",
+      "string": "The video driver did not add any displays",
+      "group": "init"
+    },
+    {
+      "symbol": "SDL_AudioInit",
+      "string": "No available audio device",
+      "group": "init"
+    },
+    {
+      "symbol": "SDL_RWFromFile",
+      "string": "SDL_RWFromFile(): No file or no mode specified",
+      "group": "rwops"
+    },
+    {
+      "symbol": "SDL_CreateWindow",
+      "string": "SDL_VIDEO_HIGHDPI_DISABLED",
+      "group": "window"
+    },
+    {
+      "symbol": "SDL_SetWindowDisplayMode",
+      "group": "window",
+      "via": {
+        "parent_string": "Window requested size %dx%d, got %dx%d\n",
+        "bl_index": 54
+      },
+      "expected_address": "0x10014cab8"
+    },
+    {
+      "symbol": "SDL_CreateRenderer",
+      "string": "SDL_RENDER_VSYNC",
+      "group": "renderer"
+    },
+    {
+      "symbol": "SDL_RenderCopyF",
+      "string": "Texture was not created with this renderer",
+      "exclude_strings": [
+        "Texture not created with SDL_TEXTUREACCESS_TARGET",
+        "Renderer does not support RenderCopyEx"
+      ],
+      "group": "renderer"
+    },
+    {
+      "symbol": "SDL_SetRenderTarget",
+      "string": "Texture not created with SDL_TEXTUREACCESS_TARGET",
+      "group": "renderer"
+    },
+    {
+      "symbol": "SDL_GetRendererOutputSize",
+      "string": "Renderer doesn't support querying output size",
+      "group": "renderer"
+    },
+    {
+      "symbol": "SDL_CreateTexture",
+      "string": "Texture dimensions can't be 0",
+      "group": "texture"
+    },
+    {
+      "symbol": "SDL_CreateTextureFromSurface",
+      "string": "SDL_CreateTextureFromSurface() passed NULL surface",
+      "group": "texture"
+    },
+    {
+      "symbol": "SDL_LockTexture",
+      "string": "SDL_LockTexture(): texture must be streaming",
+      "group": "texture"
+    },
+    {
+      "symbol": "SDL_SetSurfacePalette",
+      "string": "SDL_SetSurfacePalette() passed a NULL surface",
+      "group": "surface"
+    },
+    {
+      "symbol": "SDL_UpperBlit",
+      "string": "SDL_UpperBlit: passed a NULL surface",
+      "group": "surface"
+    },
+    {
+      "symbol": "SDL_UpperBlitScaled",
+      "string": "SDL_UpperBlitScaled: passed a NULL surface",
+      "group": "surface"
+    },
+    {
+      "symbol": "SDL_PeepEvents",
+      "string": "Couldn't lock event queue",
+      "group": "event"
+    },
+    {
+      "symbol": "SDL_OpenAudioDevice",
+      "string": "Couldn't create mixer lock",
+      "group": "audio"
+    },
+    {
+      "symbol": "IMG_LoadTyped_RW",
+      "string": "Passed a NULL data source",
+      "group": "image"
+    },
+    {
+      "symbol": "NewPAL_InitJoyStick",
+      "string": "Could not open gamecontroller %i: %s\n",
+      "host_symbol": "sword3_ret0",
+      "group": "joystick"
+    },
+    {
+      "symbol": "SDL_GameControllerOpen",
+      "string": "Couldn't find mapping for device (%d)",
+      "host_symbol": "sword3_ret0",
+      "group": "joystick"
+    },
+    {
+      "symbol": "SDL_PumpEvents",
+      "nth_after": {
+        "after_symbol": "SDL_PeepEvents",
+        "n": 3
+      },
+      "expected_address": "0x1001125d0",
+      "group": "events"
+    },
+    {
+      "symbol": "SDL_PollEvent",
+      "nth_after": {
+        "after_symbol": "SDL_PeepEvents",
+        "n": 4
+      },
+      "expected_address": "0x10011261c",
+      "group": "events"
+    },
+    {
+      "symbol": "SDL_WaitEventTimeout",
+      "nth_after": {
+        "after_symbol": "SDL_PeepEvents",
+        "n": 5
+      },
+      "expected_address": "0x100112624",
+      "group": "events"
+    },
+    {
+      "symbol": "SDL_GetKeyboardState",
+      "nth_after": {
+        "after_symbol": "SDL_PeepEvents",
+        "n": 22
+      },
+      "expected_address": "0x1001131a0",
+      "group": "events"
+    },
+    {
+      "symbol": "SDL_RenderSetLogicalSize",
+      "nth_after": {
+        "after_symbol": "SDL_CreateRenderer",
+        "n": 16
+      },
+      "expected_address": "0x100161828",
+      "group": "render"
+    },
+    {
+      "symbol": "SDL_RenderSetScale",
+      "nth_after": {
+        "after_symbol": "SDL_CreateRenderer",
+        "n": 17
+      },
+      "expected_address": "0x1001618d0",
+      "group": "render"
+    },
+    {
+      "symbol": "SDL_SetRenderDrawColor",
+      "nth_after": {
+        "after_symbol": "SDL_CreateRenderer",
+        "n": 20
+      },
+      "expected_address": "0x100161bf4",
+      "group": "render"
+    },
+    {
+      "symbol": "SDL_RenderClear",
+      "nth_after": {
+        "after_symbol": "SDL_CreateRenderer",
+        "n": 21
+      },
+      "expected_address": "0x100161c48",
+      "group": "render"
+    },
+    {
+      "symbol": "SDL_RenderPresent",
+      "nth_after": {
+        "after_symbol": "SDL_RenderCopyF",
+        "n": 0
+      },
+      "expected_address": "0x100161f1c",
+      "group": "render"
+    },
+    {
+      "symbol": "SDL_DestroyRenderer",
+      "nth_after": {
+        "after_symbol": "SDL_RenderCopyF",
+        "n": 1
+      },
+      "expected_address": "0x100161f88",
+      "group": "render"
+    },
+    {
+      "symbol": "SDL_DestroyTexture",
+      "nth_after": {
+        "after_symbol": "SDL_CreateTexture",
+        "n": 0
+      },
+      "expected_address": "0x1001607c4",
+      "group": "texture"
+    },
+    {
+      "symbol": "SDL_UpdateTexture",
+      "nth_after": {
+        "after_symbol": "SDL_CreateTexture",
+        "n": 2
+      },
+      "expected_address": "0x100160c80",
+      "group": "texture"
+    },
+    {
+      "symbol": "SDL_UnlockTexture",
+      "nth_after": {
+        "after_symbol": "SDL_CreateTexture",
+        "n": 7
+      },
+      "expected_address": "0x100161304",
+      "group": "texture"
+    },
+    {
+      "symbol": "SDL_VideoQuit",
+      "nth_after": {
+        "after_symbol": "SDL_VideoInit",
+        "n": 0
+      },
+      "expected_address": "0x10014b788",
+      "group": "init"
+    },
+    {
+      "symbol": "SDL_DestroyWindow",
+      "nth_after": {
+        "after_symbol": "SDL_CreateWindow",
+        "n": 2
+      },
+      "expected_address": "0x10014d420",
+      "group": "window"
+    },
+    {
+      "symbol": "SDL_SetWindowSize",
+      "nth_after": {
+        "after_symbol": "SDL_CreateWindow",
+        "n": 15
+      },
+      "expected_address": "0x10014dfbc",
+      "group": "window"
+    },
+    {
+      "symbol": "SDL_GetWindowSize",
+      "via": {
+        "parent_string": "Window requested size %dx%d, got %dx%d\n",
+        "bl_index": 53
+      },
+      "expected_address": "0x10014e14c",
+      "group": "window"
+    },
+    {
+      "symbol": "SDL_ShowWindow",
+      "nth_after": {
+        "after_symbol": "SDL_CreateWindow",
+        "n": 20
+      },
+      "expected_address": "0x10014e3b8",
+      "group": "window"
+    },
+    {
+      "symbol": "SDL_CloseAudioDevice",
+      "nth_after": {
+        "after_symbol": "SDL_OpenAudioDevice",
+        "n": 4
+      },
+      "expected_address": "0x10010b05c",
+      "group": "audio"
+    },
+    {
+      "symbol": "SDL_CreateRGBSurfaceWithFormat",
+      "via": {
+        "parent_string": "Background.png",
+        "bl_index": 9
+      },
+      "expected_address": "0x100149c14",
+      "group": "surface"
+    },
+    {
+      "symbol": "SDL_FreeSurface",
+      "via": {
+        "parent_string": "Background.png",
+        "bl_index": 11
+      },
+      "expected_address": "0x100149e40",
+      "group": "surface"
+    },
+    {
+      "symbol": "IMG_Load",
+      "expected_address": "0x10007e960",
+      "group": "image",
+      "via": {
+        "parent_string": "SDL_SS2D_LoadImage : Unable to load image file: %s\r\n%s\r\n",
+        "bl_index": 0
+      }
+    }
+  ]
+}

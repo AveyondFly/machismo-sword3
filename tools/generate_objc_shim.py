@@ -138,12 +138,6 @@ def read_imports(manifest: dict[str, Any]) -> ObjCImports:
         raise GenerationError(
             "data symbols unexpectedly use lazy binds: " + ", ".join(unexpected_lazy_data)
         )
-    missing_data = sorted(DATA_SYMBOLS - regular)
-    if missing_data:
-        raise GenerationError(
-            "required Objective-C data imports are missing: " + ", ".join(missing_data)
-        )
-
     all_symbols = lazy | regular
     data = tuple(sorted(all_symbols & DATA_SYMBOLS))
     functions = tuple(sorted(all_symbols - DATA_SYMBOLS))
