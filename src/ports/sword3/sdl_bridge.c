@@ -361,10 +361,7 @@ static Uint32 g_newpal_synthetic_key_until[SDL_NUM_SCANCODES];
 #define NEWPAL_DPAD_DOWN  0x02u
 #define NEWPAL_DPAD_LEFT  0x04u
 #define NEWPAL_DPAD_RIGHT 0x08u
-#define NEWPAL_AXIS_DEADZONE 8000
 #define NEWPAL_SYNTHETIC_KEY_MS 200
-
-static int newpal_title_active(void);
 
 static int newpal_keyboard_ui_active(void)
 {
@@ -405,15 +402,6 @@ static Sint16 newpal_direction_value(Uint8 negative, Uint8 positive,
 	return negative_down ? INT16_MIN : INT16_MAX;
 }
 
-static Sint16 newpal_run_axis_value(Sint16 value)
-{
-	if (value < -NEWPAL_AXIS_DEADZONE)
-		return INT16_MIN;
-	if (value > NEWPAL_AXIS_DEADZONE)
-		return INT16_MAX;
-	return 0;
-}
-
 static void newpal_map_dpad_to_left_axis(SDL_Event *event)
 {
 	static unsigned logged;
@@ -435,12 +423,7 @@ static void newpal_map_dpad_to_left_axis(SDL_Event *event)
 			event->caxis.value = newpal_direction_value(
 				NEWPAL_DPAD_UP, NEWPAL_DPAD_DOWN,
 				g_newpal_left_y);
-		} else {
-			return;
 		}
-		if (!newpal_title_active())
-			event->caxis.value = newpal_run_axis_value(
-				event->caxis.value);
 		return;
 	}
 	if (event->type != SDL_CONTROLLERBUTTONDOWN &&
@@ -483,8 +466,6 @@ static void newpal_map_dpad_to_left_axis(SDL_Event *event)
 				       g_newpal_left_x) :
 		newpal_direction_value(NEWPAL_DPAD_UP, NEWPAL_DPAD_DOWN,
 				       g_newpal_left_y);
-	if (!newpal_title_active())
-		value = newpal_run_axis_value(value);
 	memset(event, 0, sizeof(*event));
 	event->type = SDL_CONTROLLERAXISMOTION;
 	event->caxis.timestamp = timestamp;
@@ -495,12 +476,6 @@ static void newpal_map_dpad_to_left_axis(SDL_Event *event)
 		fprintf(stderr,
 			"sword3-sdl: NewPAL dpad -> left axis=%u value=%d\n",
 			axis, value);
-}
-
-static int newpal_title_active(void)
-{
-	return *(volatile int *)(uintptr_t)NEWPAL_UI_MODE ==
-	       NEWPAL_TITLE_UI_MODE;
 }
 
 static void newpal_fill_key(SDL_Event *event, SDL_Scancode scancode,
