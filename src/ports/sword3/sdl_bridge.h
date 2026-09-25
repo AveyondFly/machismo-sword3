@@ -26,6 +26,8 @@ SDL_Window *sword3_SDL_CreateWindow(const char *title, int x, int y, int w,
 void sword3_SDL_DestroyWindow(SDL_Window *window);
 void sword3_SDL_SetWindowSize(SDL_Window *window, int w, int h);
 void sword3_SDL_GetWindowSize(SDL_Window *window, int *w, int *h);
+int sword3_SDL_GetDesktopDisplayMode(int display_index,
+				    SDL_DisplayMode *mode);
 void sword3_SDL_ShowWindow(SDL_Window *window);
 int sword3_SDL_SetWindowDisplayMode(SDL_Window *window,
 				    const SDL_DisplayMode *mode);

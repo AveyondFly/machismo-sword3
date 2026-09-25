@@ -1,7 +1,7 @@
 {
   "binary_sha256": "f7df6df91783bcb19abbd6be365651cbf1878982d8d280509f5784b6fa331b8e",
   "coverage": "partial",
-  "hook_count": 46,
+  "hook_count": 48,
   "hooks": [
     {
       "address": "0x100116034",
@@ -392,6 +392,48 @@
       "library": "./libsword3_host.so",
       "method": "unique exact cstring xref + LC_FUNCTION_STARTS",
       "symbol": "IMG_LoadTyped_RW"
+    },
+    {
+      "address": "0x10014c5c0",
+      "anchor": "via Window requested size %dx%d, got %dx%d bl[4]",
+      "end_address": "0x10014c644",
+      "evidence": [
+        {
+          "bl_index": 4,
+          "call_site": "0x10005b5c0",
+          "parent_address": "0x10005b400",
+          "parent_string": "Window requested size %dx%d, got %dx%d\n",
+          "type": "parent-bl-index"
+        }
+      ],
+      "expected_hex": "ff8300d1fd7b01a9fd430091c90c0090",
+      "fingerprint": "6008f1c860c608c3a29787cec8299806b322070f870a2aa78339c97b6745ead6",
+      "group": "window",
+      "host_symbol": "sword3_SDL_GetDesktopDisplayMode",
+      "library": "./libsword3_host.so",
+      "method": "unique parent string + ordered direct BL index",
+      "symbol": "SDL_GetDesktopDisplayMode"
+    },
+    {
+      "address": "0x10014f3a0",
+      "anchor": "via Window requested size %dx%d, got %dx%d bl[6]",
+      "end_address": "0x10014f400",
+      "evidence": [
+        {
+          "bl_index": 6,
+          "call_site": "0x10005b62c",
+          "parent_address": "0x10005b400",
+          "parent_string": "Window requested size %dx%d, got %dx%d\n",
+          "type": "parent-bl-index"
+        }
+      ],
+      "expected_hex": "e30302aae20301aae10300aaa80c00b0",
+      "fingerprint": "61b94af392ade8cff4fc0dccf72d1e1a1a9a7b812257fbff64be6ee50ae3ec6d",
+      "group": "window",
+      "host_symbol": "sword3_SDL_GetWindowSize",
+      "library": "./libsword3_host.so",
+      "method": "unique parent string + ordered direct BL index",
+      "symbol": "SDL_GetWindowSizeDispatch"
     },
     {
       "address": "0x10014cab8",

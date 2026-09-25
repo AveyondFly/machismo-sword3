@@ -1787,6 +1787,29 @@ void sword3_SDL_GetWindowSize(SDL_Window *window, int *w, int *h)
 	SDL_GetWindowSize(window, w, h);
 }
 
+int sword3_SDL_GetDesktopDisplayMode(int display_index, SDL_DisplayMode *mode)
+{
+	int result = SDL_GetDesktopDisplayMode(display_index, mode);
+
+	if (!newpal_mode() || !mode)
+		return result;
+	/*
+	 * NewPAL asks its bundled SDL for the desktop mode after the window was
+	 * created through host SDL. The bundled video device cannot see that host
+	 * display and leaves the mode at 0x0. The previously modified executable
+	 * patched this call site to 640x480; keep the official executable intact
+	 * and provide the same logical size at the SDL boundary.
+	 */
+	mode->w = GAME_W;
+	mode->h = GAME_H;
+	g_logical_w = GAME_W;
+	g_logical_h = GAME_H;
+	fprintf(stderr,
+		"sword3-sdl: GetDesktopDisplayMode -> logical %dx%d host_result=%d\n",
+		mode->w, mode->h, result);
+	return 0;
+}
+
 void sword3_SDL_ShowWindow(SDL_Window *window)
 {
 	owner_check("SDL_ShowWindow", KIND_WINDOW, window);

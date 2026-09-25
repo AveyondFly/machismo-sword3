@@ -28,6 +28,26 @@
       "group": "window"
     },
     {
+      "symbol": "SDL_GetDesktopDisplayMode",
+      "host_symbol": "sword3_SDL_GetDesktopDisplayMode",
+      "group": "window",
+      "via": {
+        "parent_string": "Window requested size %dx%d, got %dx%d\n",
+        "bl_index": 4
+      },
+      "expected_address": "0x10014c5c0"
+    },
+    {
+      "symbol": "SDL_GetWindowSizeDispatch",
+      "host_symbol": "sword3_SDL_GetWindowSize",
+      "group": "window",
+      "via": {
+        "parent_string": "Window requested size %dx%d, got %dx%d\n",
+        "bl_index": 6
+      },
+      "expected_address": "0x10014f3a0"
+    },
+    {
       "symbol": "SDL_SetWindowDisplayMode",
       "group": "window",
       "via": {

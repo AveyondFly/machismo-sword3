@@ -39,6 +39,13 @@ For a smoke test, the caller sources `/storage/env.txt` on the device
 to provide Sway's Wayland environment. The installed launcher does not source
 that file. It does not launch `gptokeyb`.
 
+The original executable asks its bundled SDL for the desktop mode and window
+size after the window was created by host SDL. The bundled video device cannot
+see that host window and returns zero dimensions, which produces a null main
+texture and audio-only gameplay. Address hooks now route both the desktop-mode
+query and the public window-size dispatcher to the host bridge, which reports
+the game's 640x480 logical size. The original executable remains unchanged.
+
 ## Input findings
 
 The host SDL2 library opens the ROCKNIX game controller and forwards its
