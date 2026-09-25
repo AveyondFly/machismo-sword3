@@ -11,6 +11,7 @@ int host_cheat_newpal_money(void);
 int host_cheat_newpal_heal(void);
 void host_cheat_newpal_level_up(int enabled);
 void host_cheat_newpal_one_hit(int enabled);
-void host_cheat_newpal_no_encounter(int enabled);
+/* 0 off, 1 skip visible monsters, 2 also skip penalty-zone battles. */
+void host_cheat_newpal_no_encounter(int mode);
 
 #endif

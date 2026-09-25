@@ -562,10 +562,11 @@ static void cheat_apply(void)
 				"全员已满血" : "找不到队伍数据");
 			break;
 		case CHEAT_NO_ENCOUNTER:
-			g_no_encounter = !g_no_encounter;
+			g_no_encounter = (g_no_encounter + 1) % 3;
 			host_cheat_newpal_no_encounter(g_no_encounter);
-			cheat_set_status(g_no_encounter ?
-				"不遇敌已开" : "不遇敌已关");
+			cheat_set_status(g_no_encounter == 2 ? "严格不遇敌已开" :
+					 g_no_encounter ? "不遇敌已开" :
+					 "不遇敌已关");
 			break;
 		case CHEAT_LEVEL_UP:
 			g_level_up = !g_level_up;
@@ -857,6 +858,7 @@ static const char *cheat_label(int item, char *buffer, size_t size)
 		return "人物满血";
 	case CHEAT_NO_ENCOUNTER:
 		snprintf(buffer, size, "不遇敌    %s",
+			 g_no_encounter == 2 ? "严格" :
 			 g_no_encounter ? "开" : "关");
 		return buffer;
 	case CHEAT_LEVEL_UP:

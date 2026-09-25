@@ -34,8 +34,12 @@
 #define NP_MONEY_MAX 60000
 #define NP_LIST_LIMIT 32
 #define NP_MAP_OBJECT_SIZE 0x68
+/* The object array ends where NP_FIELD_SCRIPT begins. */
+#define NP_MAP_OBJECT_CAPACITY 2048
 #define NP_MAP_ACTOR_SLOT_SIZE 0x21c
 #define NP_MAP_ACTOR_SLOT_COUNT 72
+#define NP_OP_BATTLE 0x309
+#define NP_NO_ENCOUNTER_STRICT 2
 
 enum newpal_property {
 	NP_LEVEL_CAP = 4,
@@ -261,7 +265,8 @@ static int newpal_hide_encounter_object(int event_id, int index)
 	uint16_t object_id;
 	int slot;
 
-	if (index <= 0 || index >= count || count > 256)
+	if (index <= 0 || index >= count ||
+	    count > NP_MAP_OBJECT_CAPACITY)
 		return 0;
 	object = (uint8_t *)(uintptr_t)NP_MAP_OBJECTS +
 		(size_t)index * NP_MAP_OBJECT_SIZE;
@@ -320,7 +325,8 @@ static int newpal_bypass_visible_encounter(void *script, int state)
 	      NP_FIND_MAP_OBJECT)(object_id, &object_index))
 		return 0;
 	count = *(volatile int *)(uintptr_t)NP_MAP_OBJECT_COUNT;
-	if (object_index <= 0 || object_index >= count || count > 256)
+	if (object_index <= 0 || object_index >= count ||
+	    count > NP_MAP_OBJECT_CAPACITY)
 		return 0;
 	object = (uint8_t *)(uintptr_t)NP_MAP_OBJECTS +
 		(size_t)object_index * NP_MAP_OBJECT_SIZE;
@@ -378,6 +384,17 @@ static int newpal_hide_script_encounter_object(int battle,
 	return 0;
 }
 
+/* Penalty-zone triggers start their script with the battle; the observed
+ * story battles run dialogue or other steps before theirs. */
+#define NP_PENALTY_BATTLE_OFFSET_MAX 8
+
+static int newpal_penalty_battle(const uint16_t *at, int battle,
+				 unsigned offset)
+{
+	return at && offset <= NP_PENALTY_BATTLE_OFFSET_MAX &&
+	       at[0] == NP_OP_BATTLE && at[1] == battle;
+}
+
 static int newpal_script_step_hook(void *script)
 {
 	static unsigned samples;
@@ -418,10 +435,42 @@ static int newpal_script_step_hook(void *script)
 			hidden = newpal_hide_encounter_object(entry_event,
 						       entry_index);
 		if (!hidden) {
+			const uint16_t *code =
+				*(const uint16_t **)(uintptr_t)NP_SCRIPT_DATA;
+			const uint16_t *at = code && entry_offset <= 0xffc0 ?
+				code + entry_offset / 2 : NULL;
+
+			if (g_no_encounter == NP_NO_ENCOUNTER_STRICT &&
+			    newpal_penalty_battle(at, request_after,
+						  entry_offset)) {
+				fprintf(stderr,
+					"sword3-sdl: NewPAL trainer strict suppressed penalty battle request=%d offset=%u source=%u head=%04x %04x %04x %04x\n",
+					request_after, entry_offset,
+					*(uint16_t *)((uint8_t *)entry_script +
+						      0x2c),
+					code[0], code[1], code[2], code[3]);
+				hidden = 1;
+			}
+		}
+		if (!hidden) {
+			const uint16_t *code =
+				*(const uint16_t **)(uintptr_t)NP_SCRIPT_DATA;
+			const uint16_t *at = code && entry_offset <= 0xffc0 ?
+				code + entry_offset / 2 : NULL;
+
 			fprintf(stderr,
-				"sword3-sdl: NewPAL trainer preserved scripted battle request=%d offset=%u active=%u\n",
+				"sword3-sdl: NewPAL trainer preserved scripted battle request=%d offset=%u active=%u source=%u event=%d/%d\n",
 				request_after, entry_offset,
-				*(uint16_t *)((uint8_t *)script + 0x2c));
+				*(uint16_t *)((uint8_t *)script + 0x2c),
+				*(uint16_t *)((uint8_t *)entry_script + 0x2c),
+				event, index);
+			if (at)
+				fprintf(stderr,
+					"sword3-sdl: NewPAL trainer preserved code %04x %04x %04x %04x %04x %04x %04x %04x %04x %04x %04x %04x %04x %04x %04x %04x head=%04x %04x %04x %04x\n",
+					at[0], at[1], at[2], at[3], at[4], at[5],
+					at[6], at[7], at[8], at[9], at[10], at[11],
+					at[12], at[13], at[14], at[15],
+					code[0], code[1], code[2], code[3]);
 			return result;
 		}
 		*(volatile int *)(uintptr_t)NP_SCENE_REQUEST = -1;
@@ -469,7 +518,8 @@ static int newpal_active_visible_encounter(void)
 	      NP_FIND_MAP_OBJECT)(object_id, &object_index))
 		return 0;
 	count = *(volatile int *)(uintptr_t)NP_MAP_OBJECT_COUNT;
-	if (object_index <= 0 || object_index >= count || count > 256)
+	if (object_index <= 0 || object_index >= count ||
+	    count > NP_MAP_OBJECT_CAPACITY)
 		return 0;
 	object = (const uint8_t *)(uintptr_t)NP_MAP_OBJECTS +
 		(size_t)object_index * NP_MAP_OBJECT_SIZE;
@@ -527,22 +577,22 @@ void host_cheat_newpal_one_hit(int enabled)
 	fprintf(stderr, "sword3-sdl: NewPAL trainer one-hit=%d\n", enabled);
 }
 
-void host_cheat_newpal_no_encounter(int enabled)
+void host_cheat_newpal_no_encounter(int mode)
 {
 	fprintf(stderr,
 		"sword3-sdl: NewPAL trainer no-encounter=%d suppressed=%u bypassed=%u removed=%u input-kept=%u\n",
-		enabled, g_encounters_suppressed,
+		mode, g_encounters_suppressed,
 		g_encounters_bypassed, g_map_monsters_removed,
 		g_monster_input_kept);
-	if (enabled && !g_no_encounter) {
+	if (mode && !g_no_encounter) {
 		g_encounters_suppressed = 0;
 		g_encounters_bypassed = 0;
 		g_map_monsters_removed = 0;
 		g_monster_input_kept = 0;
 	}
-	if (!enabled)
+	if (!mode)
 		g_active_monster_input = 0;
-	g_no_encounter = enabled;
+	g_no_encounter = mode;
 }
 
 static void *newpal_trampoline(uintptr_t function)
