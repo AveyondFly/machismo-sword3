@@ -224,6 +224,7 @@ static void owner_drop(enum sword3_sdl_kind kind, void *pointer)
 #define GAME_H 480
 #define NEWPAL_SCENE_STATE 0x1001d000cull
 #define NEWPAL_TITLE_SCENE 2
+#define NEWPAL_INPUT_STATE 0x10025e898ull
 #define GUEST_UIGAMEPAD 0x100304e28ull
 #define GUEST_SCREEN 0x100319450ull
 #define GUEST_MAP_ID 0x1002a99d4ull
@@ -358,6 +359,9 @@ static Sint16 g_newpal_left_y;
 #define NEWPAL_DPAD_DOWN  0x02u
 #define NEWPAL_DPAD_LEFT  0x04u
 #define NEWPAL_DPAD_RIGHT 0x08u
+#define NEWPAL_AXIS_DEADZONE 8000
+
+static int newpal_title_active(void);
 
 static Sint16 newpal_direction_value(Uint8 negative, Uint8 positive,
 				     Sint16 physical)
@@ -368,6 +372,43 @@ static Sint16 newpal_direction_value(Uint8 negative, Uint8 positive,
 	if (negative_down == positive_down)
 		return negative_down ? 0 : physical;
 	return negative_down ? INT16_MIN : INT16_MAX;
+}
+
+static Sint16 newpal_run_axis_value(Sint16 value)
+{
+	if (value < -NEWPAL_AXIS_DEADZONE)
+		return INT16_MIN;
+	if (value > NEWPAL_AXIS_DEADZONE)
+		return INT16_MAX;
+	return 0;
+}
+
+static void newpal_force_axis_run(Uint8 axis, Sint16 value)
+{
+	volatile uint8_t *input =
+		(volatile uint8_t *)(uintptr_t)NEWPAL_INPUT_STATE;
+	size_t state_offset;
+	size_t run_offset;
+
+	if (newpal_title_active() || value == 0)
+		return;
+	if (axis == SDL_CONTROLLER_AXIS_LEFTX && value < 0) {
+		state_offset = 0x1f8;
+		run_offset = 0x200;
+	} else if (axis == SDL_CONTROLLER_AXIS_LEFTY && value < 0) {
+		state_offset = 0x20c;
+		run_offset = 0x214;
+	} else if (axis == SDL_CONTROLLER_AXIS_LEFTX) {
+		state_offset = 0x220;
+		run_offset = 0x228;
+	} else if (axis == SDL_CONTROLLER_AXIS_LEFTY) {
+		state_offset = 0x234;
+		run_offset = 0x23c;
+	} else {
+		return;
+	}
+	input[state_offset] = 3;
+	*(volatile uint32_t *)(input + run_offset) = 1;
 }
 
 static void newpal_map_dpad_to_left_axis(SDL_Event *event)
@@ -391,7 +432,13 @@ static void newpal_map_dpad_to_left_axis(SDL_Event *event)
 			event->caxis.value = newpal_direction_value(
 				NEWPAL_DPAD_UP, NEWPAL_DPAD_DOWN,
 				g_newpal_left_y);
+		} else {
+			return;
 		}
+		if (!newpal_title_active())
+			event->caxis.value = newpal_run_axis_value(
+				event->caxis.value);
+		newpal_force_axis_run(event->caxis.axis, event->caxis.value);
 		return;
 	}
 	if (event->type != SDL_CONTROLLERBUTTONDOWN &&
@@ -434,6 +481,9 @@ static void newpal_map_dpad_to_left_axis(SDL_Event *event)
 				       g_newpal_left_x) :
 		newpal_direction_value(NEWPAL_DPAD_UP, NEWPAL_DPAD_DOWN,
 				       g_newpal_left_y);
+	if (!newpal_title_active())
+		value = newpal_run_axis_value(value);
+	newpal_force_axis_run(axis, value);
 	memset(event, 0, sizeof(*event));
 	event->type = SDL_CONTROLLERAXISMOTION;
 	event->caxis.timestamp = timestamp;
