@@ -579,8 +579,8 @@ static void *newpal_trampoline(uintptr_t function)
 	return code;
 }
 
-static int newpal_patch_jump(uintptr_t function, void *hook,
-			     const uint32_t expected[4])
+int host_newpal_patch_jump(uintptr_t function, void *hook,
+			   const uint32_t expected[4])
 {
 	uint32_t stub[4] = { 0x58000050u, 0xd61f0200u, 0, 0 };
 	uintptr_t page;
@@ -644,20 +644,20 @@ void host_cheat_newpal_install(void)
 	if (!g_reward_orig || !g_damage_orig || !g_script_step_orig ||
 	    !g_scene_transition_orig || !g_scene_mode_orig)
 		return;
-	if (newpal_patch_jump(NP_REWARD, newpal_reward_hook,
+	if (host_newpal_patch_jump(NP_REWARD, newpal_reward_hook,
 			     reward_expected) != 0)
 		return;
-	if (newpal_patch_jump(NP_DAMAGE, newpal_damage_hook,
+	if (host_newpal_patch_jump(NP_DAMAGE, newpal_damage_hook,
 			     damage_expected) != 0)
 		return;
-	if (newpal_patch_jump(NP_SCRIPT_STEP, newpal_script_step_hook,
+	if (host_newpal_patch_jump(NP_SCRIPT_STEP, newpal_script_step_hook,
 			     script_expected) != 0)
 		return;
-	if (newpal_patch_jump(NP_SCENE_TRANSITION,
+	if (host_newpal_patch_jump(NP_SCENE_TRANSITION,
 			     newpal_scene_transition_hook,
 			     transition_expected) != 0)
 		return;
-	if (newpal_patch_jump(NP_SCENE_MODE_SETTER,
+	if (host_newpal_patch_jump(NP_SCENE_MODE_SETTER,
 			     newpal_scene_mode_hook,
 			     scene_mode_expected) != 0)
 		return;

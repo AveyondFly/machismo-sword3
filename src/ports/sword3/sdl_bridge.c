@@ -362,6 +362,32 @@ static Uint32 g_newpal_synthetic_key_until[SDL_NUM_SCANCODES];
 #define NEWPAL_DPAD_LEFT  0x04u
 #define NEWPAL_DPAD_RIGHT 0x08u
 #define NEWPAL_SYNTHETIC_KEY_MS 200
+#define NEWPAL_INPUT 0x10025e898ull
+#define NEWPAL_INPUT_FROM_AXIS 0x1b4
+#define NEWPAL_REPEAT_DELAY_MS 400
+#define NEWPAL_REPEAT_INTERVAL_MS 120
+
+struct newpal_direction_query {
+	uintptr_t function;
+	size_t slot;
+	uint32_t expected[4];
+	int held;
+	Uint32 next;
+};
+
+/* NewPAL menus poll these per-direction queries. Each one reports a press
+ * once and then clears the slot's pending flag, so a held direction moves
+ * the cursor a single step. */
+static struct newpal_direction_query g_newpal_direction_queries[] = {
+	{ .function = 0x10004fc98u, .slot = 0x1f8,
+	  .expected = { 0xf0001068u, 0x91226108u, 0xb9420109u, 0x7100053fu } },
+	{ .function = 0x10004fd20u, .slot = 0x20c,
+	  .expected = { 0xf0001068u, 0x91226108u, 0xb9421509u, 0x7100053fu } },
+	{ .function = 0x10004fda8u, .slot = 0x220,
+	  .expected = { 0xf0001068u, 0x91226108u, 0xb9422909u, 0x7100053fu } },
+	{ .function = 0x10004fe30u, .slot = 0x234,
+	  .expected = { 0xf0001068u, 0x91226108u, 0xb9423d09u, 0x7100053fu } },
+};
 
 static int newpal_keyboard_ui_active(void)
 {
@@ -389,6 +415,78 @@ static void newpal_set_synthetic_key(SDL_Scancode scancode, int down)
 	} else {
 		g_newpal_synthetic_key_released[scancode] = 1;
 	}
+}
+
+static int newpal_direction_pressed(struct newpal_direction_query *query)
+{
+	volatile uint8_t *input = (volatile uint8_t *)(uintptr_t)NEWPAL_INPUT;
+	volatile uint32_t *pending =
+		(volatile uint32_t *)(input + query->slot + 8);
+	uint8_t state = input[query->slot];
+	Uint32 now = SDL_GetTicks();
+
+	if (*pending == 1 &&
+	    (state == 1 || (state == 3 && !input[NEWPAL_INPUT_FROM_AXIS]))) {
+		*pending = 0;
+		query->held = 1;
+		query->next = now + NEWPAL_REPEAT_DELAY_MS;
+		return 1;
+	}
+	if (state != 1 && state != 3) {
+		query->held = 0;
+		return 0;
+	}
+	if (!query->held || !SDL_TICKS_PASSED(now, query->next))
+		return 0;
+	query->next = now + NEWPAL_REPEAT_INTERVAL_MS;
+	return 1;
+}
+
+static int newpal_left_pressed(void)
+{
+	return newpal_direction_pressed(&g_newpal_direction_queries[0]);
+}
+
+static int newpal_up_pressed(void)
+{
+	return newpal_direction_pressed(&g_newpal_direction_queries[1]);
+}
+
+static int newpal_right_pressed(void)
+{
+	return newpal_direction_pressed(&g_newpal_direction_queries[2]);
+}
+
+static int newpal_down_pressed(void)
+{
+	return newpal_direction_pressed(&g_newpal_direction_queries[3]);
+}
+
+static void newpal_install_direction_repeat(void)
+{
+	static int attempted;
+	static int (*const hooks[])(void) = {
+		newpal_left_pressed, newpal_up_pressed,
+		newpal_right_pressed, newpal_down_pressed,
+	};
+	size_t i;
+
+	if (attempted)
+		return;
+	attempted = 1;
+	for (i = 0; i < sizeof(hooks) / sizeof(hooks[0]); i++) {
+		struct newpal_direction_query *query =
+			&g_newpal_direction_queries[i];
+
+		if (host_newpal_patch_jump(query->function, (void *)hooks[i],
+					   query->expected) != 0) {
+			fprintf(stderr,
+				"sword3-sdl: NewPAL direction repeat hook failed at 0x%llx\n",
+				(unsigned long long)query->function);
+			return;
+		}
+	}
+	fprintf(stderr, "sword3-sdl: NewPAL direction repeat installed\n");
 }
 
 static Sint16 newpal_direction_value(Uint8 negative, Uint8 positive,
@@ -2282,6 +2380,7 @@ void sword3_SDL_RenderPresent(SDL_Renderer *renderer)
 	owner_check("SDL_RenderPresent", KIND_RENDERER, renderer);
 	if (newpal_mode()) {
 		host_cheat_newpal_install();
+		newpal_install_direction_repeat();
 		if (host_cheat_active() && SDL_GetRenderTarget(renderer) == NULL)
 			host_cheat_draw(renderer, g_logical_w, g_logical_h);
 		SDL_RenderPresent(renderer);
