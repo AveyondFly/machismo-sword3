@@ -222,9 +222,9 @@ static void owner_drop(enum sword3_sdl_kind kind, void *pointer)
 #define FINGER_ID ((SDL_FingerID)1)
 #define GAME_W 640
 #define GAME_H 480
-#define NEWPAL_SCENE_STATE 0x1001d000cull
-#define NEWPAL_TITLE_SCENE 2
-#define NEWPAL_INPUT_STATE 0x10025e898ull
+#define NEWPAL_UI_MODE 0x1001d09f8ull
+#define NEWPAL_TITLE_UI_MODE 14
+#define NEWPAL_SAVE_UI_MODE 8
 #define GUEST_UIGAMEPAD 0x100304e28ull
 #define GUEST_SCREEN 0x100319450ull
 #define GUEST_MAP_ID 0x1002a99d4ull
@@ -349,19 +349,50 @@ static SDL_JoystickID g_newpal_exit_pad_id = -1;
 static int g_newpal_start_down;
 static int g_newpal_back_down;
 static int g_newpal_guide_down;
-static int g_newpal_title_resource;
 static int g_newpal_title_axis_dir;
 static Uint8 g_newpal_dpad_state;
 static Sint16 g_newpal_left_x;
 static Sint16 g_newpal_left_y;
+static Uint8 g_newpal_synthetic_keys[SDL_NUM_SCANCODES];
+static Uint8 g_newpal_synthetic_key_released[SDL_NUM_SCANCODES];
+static Uint32 g_newpal_synthetic_key_until[SDL_NUM_SCANCODES];
 
 #define NEWPAL_DPAD_UP    0x01u
 #define NEWPAL_DPAD_DOWN  0x02u
 #define NEWPAL_DPAD_LEFT  0x04u
 #define NEWPAL_DPAD_RIGHT 0x08u
 #define NEWPAL_AXIS_DEADZONE 8000
+#define NEWPAL_SYNTHETIC_KEY_MS 200
 
 static int newpal_title_active(void);
+
+static int newpal_keyboard_ui_active(void)
+{
+	int mode = *(volatile int *)(uintptr_t)NEWPAL_UI_MODE;
+
+	return mode == NEWPAL_TITLE_UI_MODE || mode == NEWPAL_SAVE_UI_MODE;
+}
+
+static void newpal_set_synthetic_key(SDL_Scancode scancode, int down)
+{
+	Uint32 now;
+
+	if (scancode < 0 || scancode >= SDL_NUM_SCANCODES)
+		return;
+	now = SDL_GetTicks();
+	if (down) {
+		g_newpal_synthetic_keys[scancode] = 1;
+		g_newpal_synthetic_key_released[scancode] = 0;
+		g_newpal_synthetic_key_until[scancode] =
+			now + NEWPAL_SYNTHETIC_KEY_MS;
+	} else if (SDL_TICKS_PASSED(now,
+				    g_newpal_synthetic_key_until[scancode])) {
+		g_newpal_synthetic_keys[scancode] = 0;
+		g_newpal_synthetic_key_released[scancode] = 0;
+	} else {
+		g_newpal_synthetic_key_released[scancode] = 1;
+	}
+}
 
 static Sint16 newpal_direction_value(Uint8 negative, Uint8 positive,
 				     Sint16 physical)
@@ -381,34 +412,6 @@ static Sint16 newpal_run_axis_value(Sint16 value)
 	if (value > NEWPAL_AXIS_DEADZONE)
 		return INT16_MAX;
 	return 0;
-}
-
-static void newpal_force_axis_run(Uint8 axis, Sint16 value)
-{
-	volatile uint8_t *input =
-		(volatile uint8_t *)(uintptr_t)NEWPAL_INPUT_STATE;
-	size_t state_offset;
-	size_t run_offset;
-
-	if (newpal_title_active() || value == 0)
-		return;
-	if (axis == SDL_CONTROLLER_AXIS_LEFTX && value < 0) {
-		state_offset = 0x1f8;
-		run_offset = 0x200;
-	} else if (axis == SDL_CONTROLLER_AXIS_LEFTY && value < 0) {
-		state_offset = 0x20c;
-		run_offset = 0x214;
-	} else if (axis == SDL_CONTROLLER_AXIS_LEFTX) {
-		state_offset = 0x220;
-		run_offset = 0x228;
-	} else if (axis == SDL_CONTROLLER_AXIS_LEFTY) {
-		state_offset = 0x234;
-		run_offset = 0x23c;
-	} else {
-		return;
-	}
-	input[state_offset] = 3;
-	*(volatile uint32_t *)(input + run_offset) = 1;
 }
 
 static void newpal_map_dpad_to_left_axis(SDL_Event *event)
@@ -438,7 +441,6 @@ static void newpal_map_dpad_to_left_axis(SDL_Event *event)
 		if (!newpal_title_active())
 			event->caxis.value = newpal_run_axis_value(
 				event->caxis.value);
-		newpal_force_axis_run(event->caxis.axis, event->caxis.value);
 		return;
 	}
 	if (event->type != SDL_CONTROLLERBUTTONDOWN &&
@@ -483,7 +485,6 @@ static void newpal_map_dpad_to_left_axis(SDL_Event *event)
 				       g_newpal_left_y);
 	if (!newpal_title_active())
 		value = newpal_run_axis_value(value);
-	newpal_force_axis_run(axis, value);
 	memset(event, 0, sizeof(*event));
 	event->type = SDL_CONTROLLERAXISMOTION;
 	event->caxis.timestamp = timestamp;
@@ -498,9 +499,8 @@ static void newpal_map_dpad_to_left_axis(SDL_Event *event)
 
 static int newpal_title_active(void)
 {
-	return g_newpal_title_resource &&
-	       *(volatile int *)(uintptr_t)NEWPAL_SCENE_STATE ==
-		       NEWPAL_TITLE_SCENE;
+	return *(volatile int *)(uintptr_t)NEWPAL_UI_MODE ==
+	       NEWPAL_TITLE_UI_MODE;
 }
 
 static void newpal_fill_key(SDL_Event *event, SDL_Scancode scancode,
@@ -533,7 +533,7 @@ static int newpal_title_controller_event(SDL_Event *event)
 	SDL_Scancode scancode;
 	int down;
 
-	if (!newpal_title_active()) {
+	if (!newpal_keyboard_ui_active()) {
 		if (g_newpal_title_axis_dir < 0)
 			newpal_push_key(SDL_SCANCODE_UP, 0);
 		else if (g_newpal_title_axis_dir > 0)
@@ -542,8 +542,8 @@ static int newpal_title_controller_event(SDL_Event *event)
 		return 0;
 	}
 
-	/* The title widget consumes keyboard navigation while gameplay uses
-	 * NewPAL's native SDL controller path. Keep that boundary intact. */
+	/* The title and save-selection widgets consume keyboard navigation while
+	 * gameplay uses NewPAL's native SDL controller path. */
 	if (event->type == SDL_CONTROLLERAXISMOTION) {
 		int direction;
 
@@ -586,6 +586,7 @@ static int newpal_title_controller_event(SDL_Event *event)
 		return 0;
 	}
 	newpal_fill_key(event, scancode, down);
+	newpal_set_synthetic_key(scancode, down);
 	if (down && logged++ < 16)
 		fprintf(stderr,
 			"sword3-sdl: NewPAL title controller -> key=%d\n",
@@ -1715,6 +1716,12 @@ static int rewrite_event(SDL_Event *event)
 
 	if (!event)
 		return 0;
+	if (newpal_mode() &&
+	    (event->type == SDL_KEYDOWN || event->type == SDL_KEYUP) &&
+	    event->key.keysym.scancode >= 0 &&
+	    event->key.keysym.scancode < SDL_NUM_SCANCODES)
+		newpal_set_synthetic_key(event->key.keysym.scancode,
+					 event->type == SDL_KEYDOWN);
 	if (event->type == SDL_KEYUP &&
 	    g_movie_swallow_keyup != SDL_SCANCODE_UNKNOWN &&
 	    event->key.keysym.scancode == g_movie_swallow_keyup) {
@@ -1739,6 +1746,26 @@ static int rewrite_event(SDL_Event *event)
 		title_result = newpal_title_controller_event(event);
 		if (title_result)
 			return title_result > 0;
+		if ((event->type == SDL_CONTROLLERBUTTONDOWN ||
+		     event->type == SDL_CONTROLLERBUTTONUP) &&
+		    (event->cbutton.button == SDL_CONTROLLER_BUTTON_A ||
+		     event->cbutton.button == SDL_CONTROLLER_BUTTON_B)) {
+			int down = event->type == SDL_CONTROLLERBUTTONDOWN;
+			SDL_Scancode scancode =
+				event->cbutton.button == SDL_CONTROLLER_BUTTON_A ?
+				SDL_SCANCODE_RETURN : SDL_SCANCODE_ESCAPE;
+
+			newpal_fill_key(event, scancode, down);
+			newpal_set_synthetic_key(scancode, down);
+			return 1;
+		}
+		/* SDL emits both joystick and controller events for the same
+		 * mapped device. NewPAL consumes both paths as game input, which
+		 * turns one physical action into two presses. Keep the controller
+		 * stream and discard only the duplicate joystick input events. */
+		if (event->type >= SDL_JOYAXISMOTION &&
+		    event->type <= SDL_JOYBUTTONUP)
+			return 0;
 		if (is_guest_pad_event(event->type) && logged_pad++ < 24)
 			fprintf(stderr, "sword3-sdl: NewPAL controller event type=%u\n",
 				event->type);
@@ -2659,18 +2686,10 @@ static void log_img_surface(const char *api, SDL_Surface *surface)
 SDL_Surface *sword3_IMG_Load(const char *file)
 {
 	SDL_Surface *surface;
-	const char *name;
 	char api[256];
 
 	ensure_img_init();
 	surface = IMG_Load(file);
-	name = file ? strrchr(file, '/') : NULL;
-	name = name ? name + 1 : file;
-	if (newpal_mode() && name && strcmp(name, "Title.png") == 0) {
-		g_newpal_title_resource = 1;
-		fprintf(stderr,
-			"sword3-sdl: NewPAL title keyboard bridge armed\n");
-	}
 	snprintf(api, sizeof(api), "IMG_Load(%s)", file ? file : "NULL");
 	log_img_surface(api, surface);
 	owner_register(KIND_SURFACE, surface);
@@ -2777,8 +2796,34 @@ const Uint8 *sword3_SDL_GetKeyboardState(int *numkeys)
 		SDL_SCANCODE_DOWN,
 		SDL_SCANCODE_LEFT,
 	};
-	if (newpal_mode())
-		return host_cheat_active() ? blocked : state;
+	if (newpal_mode()) {
+		Uint32 now = SDL_GetTicks();
+
+		if (host_cheat_active())
+			return blocked;
+		if (!state)
+			return state;
+		memcpy(filtered, state, sizeof(filtered));
+		if (newpal_keyboard_ui_active()) {
+			for (i = 0; i < SDL_NUM_SCANCODES; i++) {
+				if (g_newpal_synthetic_key_released[i] &&
+				    SDL_TICKS_PASSED(
+					    now,
+					    g_newpal_synthetic_key_until[i])) {
+					g_newpal_synthetic_keys[i] = 0;
+					g_newpal_synthetic_key_released[i] = 0;
+				}
+				if (g_newpal_synthetic_keys[i])
+					filtered[i] = 1;
+			}
+		} else {
+			memset(g_newpal_synthetic_keys, 0,
+			       sizeof(g_newpal_synthetic_keys));
+			memset(g_newpal_synthetic_key_released, 0,
+			       sizeof(g_newpal_synthetic_key_released));
+		}
+		return filtered;
+	}
 
 	if (host_cheat_active()) {
 		guest_state = blocked;
