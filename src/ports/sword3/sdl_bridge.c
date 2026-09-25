@@ -222,6 +222,8 @@ static void owner_drop(enum sword3_sdl_kind kind, void *pointer)
 #define FINGER_ID ((SDL_FingerID)1)
 #define GAME_W 640
 #define GAME_H 480
+#define NEWPAL_SCENE_STATE 0x1001d000cull
+#define NEWPAL_TITLE_SCENE 2
 #define GUEST_UIGAMEPAD 0x100304e28ull
 #define GUEST_SCREEN 0x100319450ull
 #define GUEST_MAP_ID 0x1002a99d4ull
@@ -325,6 +327,7 @@ static Uint32 g_fallback_cursor_ticks;
 static Uint32 g_fallback_cursor_dirs;
 static Uint32 g_fallback_cursor_captured_dirs;
 static SDL_Scancode g_movie_swallow_keyup;
+static int g_movie_swallow_controller_button = -1;
 static Uint32 g_cursor_sound_ms;
 static SDL_AudioDeviceID g_guest_audio_device;
 static SDL_AudioFormat g_guest_audio_format = AUDIO_S16SYS;
@@ -345,6 +348,105 @@ static SDL_JoystickID g_newpal_exit_pad_id = -1;
 static int g_newpal_start_down;
 static int g_newpal_back_down;
 static int g_newpal_guide_down;
+static int g_newpal_title_resource;
+static int g_newpal_title_axis_dir;
+
+static int newpal_title_active(void)
+{
+	return g_newpal_title_resource &&
+	       *(volatile int *)(uintptr_t)NEWPAL_SCENE_STATE ==
+		       NEWPAL_TITLE_SCENE;
+}
+
+static void newpal_fill_key(SDL_Event *event, SDL_Scancode scancode,
+			    int down)
+{
+	Uint32 timestamp = SDL_GetTicks();
+
+	memset(event, 0, sizeof(*event));
+	event->type = down ? SDL_KEYDOWN : SDL_KEYUP;
+	event->key.timestamp = timestamp;
+	event->key.windowID = g_window ? SDL_GetWindowID(g_window) : 0;
+	event->key.state = down ? SDL_PRESSED : SDL_RELEASED;
+	event->key.repeat = 0;
+	event->key.keysym.scancode = scancode;
+	event->key.keysym.sym = SDL_GetKeyFromScancode(scancode);
+	event->key.keysym.mod = KMOD_NONE;
+}
+
+static void newpal_push_key(SDL_Scancode scancode, int down)
+{
+	SDL_Event event;
+
+	newpal_fill_key(&event, scancode, down);
+	SDL_PushEvent(&event);
+}
+
+static int newpal_title_controller_event(SDL_Event *event)
+{
+	static unsigned logged;
+	SDL_Scancode scancode;
+	int down;
+
+	if (!newpal_title_active()) {
+		if (g_newpal_title_axis_dir < 0)
+			newpal_push_key(SDL_SCANCODE_UP, 0);
+		else if (g_newpal_title_axis_dir > 0)
+			newpal_push_key(SDL_SCANCODE_DOWN, 0);
+		g_newpal_title_axis_dir = 0;
+		return 0;
+	}
+
+	/* The title widget consumes keyboard navigation while gameplay uses
+	 * NewPAL's native SDL controller path. Keep that boundary intact. */
+	if (event->type == SDL_CONTROLLERAXISMOTION) {
+		int direction;
+
+		if (event->caxis.axis != SDL_CONTROLLER_AXIS_LEFTY)
+			return -1;
+		direction = event->caxis.value < -14000 ? -1 :
+			    (event->caxis.value > 14000 ? 1 : 0);
+		if (direction == g_newpal_title_axis_dir)
+			return -1;
+		if (g_newpal_title_axis_dir < 0)
+			newpal_push_key(SDL_SCANCODE_UP, 0);
+		else if (g_newpal_title_axis_dir > 0)
+			newpal_push_key(SDL_SCANCODE_DOWN, 0);
+		g_newpal_title_axis_dir = direction;
+		if (direction < 0)
+			newpal_push_key(SDL_SCANCODE_UP, 1);
+		else if (direction > 0)
+			newpal_push_key(SDL_SCANCODE_DOWN, 1);
+		return -1;
+	}
+	if (event->type != SDL_CONTROLLERBUTTONDOWN &&
+	    event->type != SDL_CONTROLLERBUTTONUP)
+		return event->type >= SDL_JOYAXISMOTION &&
+		       event->type < SDL_FINGERDOWN ? -1 : 0;
+	down = event->type == SDL_CONTROLLERBUTTONDOWN;
+	switch (event->cbutton.button) {
+	case SDL_CONTROLLER_BUTTON_DPAD_UP:
+		scancode = SDL_SCANCODE_UP;
+		break;
+	case SDL_CONTROLLER_BUTTON_DPAD_DOWN:
+		scancode = SDL_SCANCODE_DOWN;
+		break;
+	case SDL_CONTROLLER_BUTTON_A:
+		scancode = SDL_SCANCODE_RETURN;
+		break;
+	case SDL_CONTROLLER_BUTTON_B:
+		scancode = SDL_SCANCODE_ESCAPE;
+		break;
+	default:
+		return 0;
+	}
+	newpal_fill_key(event, scancode, down);
+	if (down && logged++ < 16)
+		fprintf(stderr,
+			"sword3-sdl: NewPAL title controller -> key=%d\n",
+			scancode);
+	return 1;
+}
 
 static void newpal_open_controller(void)
 {
@@ -836,7 +938,20 @@ struct host_av_slot {
 	Sword3AudioHandle *handle;
 	void *token;
 	int channel; /* slot index, or HOST_AV_MUSIC_CH */
+	uint64_t generation;
+	int pending;
+	int paused;
+	int volume;
 	_Atomic int stopping;
+};
+
+struct host_av_decode_job {
+	void *data;
+	size_t size;
+	void *token;
+	uint64_t generation;
+	int slot_index;
+	int loops;
 };
 
 static struct host_av_slot g_av_slots[HOST_AV_SLOTS];
@@ -889,6 +1004,7 @@ static void on_host_music_finished(void)
 		slot->handle = NULL;
 		slot->token = NULL;
 		slot->channel = host_av_slot_index(slot);
+		slot->paused = 0;
 	}
 	pthread_mutex_unlock(&g_av_lock);
 	if (handle)
@@ -1450,9 +1566,22 @@ static int fallback_cursor_handle_key(SDL_Event *event)
 static int rewrite_event(SDL_Event *event)
 {
 	int cheat_was_open;
+	int title_result;
 
 	if (!event)
 		return 0;
+	if (event->type == SDL_KEYUP &&
+	    g_movie_swallow_keyup != SDL_SCANCODE_UNKNOWN &&
+	    event->key.keysym.scancode == g_movie_swallow_keyup) {
+		g_movie_swallow_keyup = SDL_SCANCODE_UNKNOWN;
+		return 0;
+	}
+	if (event->type == SDL_CONTROLLERBUTTONUP &&
+	    g_movie_swallow_controller_button >= 0 &&
+	    event->cbutton.button == g_movie_swallow_controller_button) {
+		g_movie_swallow_controller_button = -1;
+		return 0;
+	}
 	if (newpal_mode()) {
 		static unsigned logged_keys;
 		static unsigned logged_mouse;
@@ -1461,6 +1590,9 @@ static int rewrite_event(SDL_Event *event)
 		newpal_exit_combo(event);
 		if (host_cheat_newpal_event(event))
 			return 0;
+		title_result = newpal_title_controller_event(event);
+		if (title_result)
+			return title_result > 0;
 		if (is_guest_pad_event(event->type) && logged_pad++ < 24)
 			fprintf(stderr, "sword3-sdl: NewPAL controller event type=%u\n",
 				event->type);
@@ -1481,11 +1613,6 @@ static int rewrite_event(SDL_Event *event)
 				event->type == SDL_MOUSEMOTION ? event->motion.y : event->button.y,
 				event->type == SDL_MOUSEMOTION ? 0 : event->button.button);
 		return event->type != SDL_KEYDOWN || !event->key.repeat;
-	}
-	if (event->type == SDL_KEYUP && g_movie_swallow_keyup != SDL_SCANCODE_UNKNOWN &&
-	    event->key.keysym.scancode == g_movie_swallow_keyup) {
-		g_movie_swallow_keyup = SDL_SCANCODE_UNKNOWN;
-		return 0;
 	}
 	scale_pointer_event(event);
 	if (is_guest_pad_event(event->type) || event->type == SDL_MOUSEMOTION)
@@ -2386,10 +2513,18 @@ static void log_img_surface(const char *api, SDL_Surface *surface)
 SDL_Surface *sword3_IMG_Load(const char *file)
 {
 	SDL_Surface *surface;
+	const char *name;
 	char api[256];
 
 	ensure_img_init();
 	surface = IMG_Load(file);
+	name = file ? strrchr(file, '/') : NULL;
+	name = name ? name + 1 : file;
+	if (newpal_mode() && name && strcmp(name, "Title.png") == 0) {
+		g_newpal_title_resource = 1;
+		fprintf(stderr,
+			"sword3-sdl: NewPAL title keyboard bridge armed\n");
+	}
 	snprintf(api, sizeof(api), "IMG_Load(%s)", file ? file : "NULL");
 	log_img_surface(api, surface);
 	owner_register(KIND_SURFACE, surface);
@@ -3015,6 +3150,7 @@ static void on_host_channel_finished(int channel)
 	handle = slot->handle;
 	slot->handle = NULL;
 	slot->token = NULL;
+	slot->paused = 0;
 	pthread_mutex_unlock(&g_av_lock);
 	if (handle)
 		sword3_audio_close(handle);
@@ -3078,6 +3214,10 @@ static int ensure_host_mixer(void)
 		g_av_slots[i].channel = i;
 		g_av_slots[i].handle = NULL;
 		g_av_slots[i].token = NULL;
+		g_av_slots[i].generation = 0;
+		g_av_slots[i].pending = 0;
+		g_av_slots[i].paused = 0;
+		g_av_slots[i].volume = MIX_MAX_VOLUME;
 		atomic_store(&g_av_slots[i].stopping, 0);
 	}
 	return 1;
@@ -3090,7 +3230,8 @@ static struct host_av_slot *host_av_find_token_locked(void *token)
 	if (!token)
 		return NULL;
 	for (i = 0; i < HOST_AV_SLOTS; i++) {
-		if (g_av_slots[i].token == token && g_av_slots[i].handle)
+		if (g_av_slots[i].token == token &&
+		    (g_av_slots[i].handle || g_av_slots[i].pending))
 			return &g_av_slots[i];
 	}
 	return NULL;
@@ -3101,7 +3242,7 @@ static struct host_av_slot *host_av_alloc_locked(void)
 	int i;
 
 	for (i = 0; i < HOST_AV_SLOTS; i++) {
-		if (!g_av_slots[i].handle)
+		if (!g_av_slots[i].handle && !g_av_slots[i].pending)
 			return &g_av_slots[i];
 	}
 	return NULL;
@@ -3113,7 +3254,7 @@ static void host_av_stop_slot_locked(struct host_av_slot *slot)
 	int was_music;
 	int mix_ch;
 
-	if (!slot || !slot->handle)
+	if (!slot || (!slot->handle && !slot->pending))
 		return;
 	atomic_store(&slot->stopping, 1);
 	handle = slot->handle;
@@ -3122,15 +3263,148 @@ static void host_av_stop_slot_locked(struct host_av_slot *slot)
 	slot->handle = NULL;
 	slot->token = NULL;
 	slot->channel = mix_ch;
+	slot->generation++;
+	slot->pending = 0;
+	slot->paused = 0;
 	pthread_mutex_unlock(&g_av_lock);
-	if (was_music)
+	if (handle && was_music)
 		atomic_store(&g_music_halt, 1);
-	sword3_audio_stop(handle);
-	sword3_audio_close(handle);
-	if (was_music)
+	if (handle) {
+		sword3_audio_stop(handle);
+		sword3_audio_close(handle);
+	}
+	if (handle && was_music)
 		atomic_store(&g_music_halt, 0);
 	pthread_mutex_lock(&g_av_lock);
 	atomic_store(&slot->stopping, 0);
+}
+
+static void *host_av_decode_thread(void *opaque)
+{
+	struct host_av_decode_job *job = opaque;
+	struct host_av_slot *slot = &g_av_slots[job->slot_index];
+	Sword3AudioHandle *handle = NULL;
+	void *decoded_pcm = NULL;
+	size_t decoded_size = 0;
+	Uint32 started = SDL_GetTicks();
+	int channel = -1;
+	int valid;
+
+	if (decode_memory_audio(job->data, job->size, &decoded_pcm,
+				&decoded_size) == 0) {
+		handle = sword3_audio_open_pcm_owned(g_av_audio_bridge,
+						    decoded_pcm,
+						    decoded_size);
+		if (handle)
+			decoded_pcm = NULL;
+	}
+	free(decoded_pcm);
+
+	pthread_mutex_lock(&g_av_lock);
+	valid = slot->pending && slot->generation == job->generation &&
+		slot->token == job->token;
+	if (valid && handle) {
+		slot->handle = handle;
+		slot->pending = 0;
+		sword3_audio_set_volume(handle, slot->volume);
+		channel = sword3_audio_play_on(handle, job->slot_index,
+					      job->loops);
+		if (channel >= 0 && slot->paused)
+			Mix_Pause(channel);
+		if (channel < 0) {
+			slot->handle = NULL;
+			slot->token = NULL;
+			slot->paused = 0;
+		}
+	} else if (valid) {
+		slot->pending = 0;
+		slot->token = NULL;
+		slot->paused = 0;
+	}
+	pthread_mutex_unlock(&g_av_lock);
+
+	if ((!valid || channel < 0) && handle)
+		sword3_audio_close(handle);
+	if (valid && channel >= 0)
+		fprintf(stderr,
+			"sword3-sdl: decoded M4A %zu bytes to %zu bytes PCM "
+			"in %u ms; playing Mix ch=%d\n",
+			job->size, decoded_size, SDL_GetTicks() - started,
+			channel);
+	else if (!valid)
+		fprintf(stderr,
+			"sword3-sdl: discarded cancelled M4A decode token=%p\n",
+			job->token);
+
+	free(job->data);
+	free(job);
+	return NULL;
+}
+
+static int host_av_start_m4a_async(void *token, const void *data,
+				    size_t size, int loops)
+{
+	struct host_av_decode_job *job;
+	struct host_av_slot *slot;
+	struct host_av_slot *old;
+	pthread_t thread;
+	int result;
+
+	job = calloc(1, sizeof(*job));
+	if (!job)
+		return -1;
+	job->data = malloc(size);
+	if (!job->data) {
+		free(job);
+		return -1;
+	}
+	memcpy(job->data, data, size);
+	job->size = size;
+	job->token = token;
+	job->loops = loops;
+
+	pthread_mutex_lock(&g_av_lock);
+	old = host_av_find_token_locked(token);
+	if (old)
+		host_av_stop_slot_locked(old);
+	slot = host_av_alloc_locked();
+	if (!slot) {
+		pthread_mutex_unlock(&g_av_lock);
+		free(job->data);
+		free(job);
+		fprintf(stderr, "sword3-sdl: no free async AVAudioPlayer slot\n");
+		return -1;
+	}
+	job->slot_index = host_av_slot_index(slot);
+	job->generation = ++slot->generation;
+	slot->handle = NULL;
+	slot->token = token;
+	slot->channel = job->slot_index;
+	slot->pending = 1;
+	slot->paused = 0;
+	slot->volume = MIX_MAX_VOLUME;
+	atomic_store(&slot->stopping, 0);
+	result = pthread_create(&thread, NULL, host_av_decode_thread, job);
+	if (result == 0)
+		pthread_detach(thread);
+	else {
+		slot->pending = 0;
+		slot->token = NULL;
+		slot->generation++;
+	}
+	pthread_mutex_unlock(&g_av_lock);
+	if (result != 0) {
+		free(job->data);
+		free(job);
+		fprintf(stderr,
+			"sword3-sdl: M4A decode thread create failed rc=%d\n",
+			result);
+		return -1;
+	}
+	fprintf(stderr,
+		"sword3-sdl: queued M4A decode token=%p bytes=%zu\n",
+		token, size);
+	return 0;
 }
 
 __attribute__((visibility("default")))
@@ -3172,10 +3446,16 @@ int sword3_host_play_memory_audio_for(void *token, const void *data,
 		return -1;
 	if (!ensure_host_mixer())
 		return -1;
+	if (loops < 0)
+		loops = -1;
 
 	handle = sword3_audio_open_memory(g_av_audio_bridge, SWORD3_AUDIO_MUSIC,
 					  data, size);
 	is_music = handle != NULL;
+	if (!handle && size >= 12 &&
+	    memcmp((const uint8_t *)data + 4, "ftyp", 4) == 0 &&
+	    host_av_start_m4a_async(token, data, size, loops) == 0)
+		return 0;
 	if (!handle && size >= 12 &&
 	    memcmp((const uint8_t *)data + 4, "ftyp", 4) == 0 &&
 	    decode_memory_audio(data, size, &decoded_pcm, &decoded_size) == 0) {
@@ -3207,11 +3487,13 @@ int sword3_host_play_memory_audio_for(void *token, const void *data,
 		return -1;
 	}
 	sword3_audio_set_volume(handle, MIX_MAX_VOLUME);
-	if (loops < 0)
-		loops = -1;
 
 	pthread_mutex_lock(&g_av_lock);
 	old = host_av_find_token_locked(token);
+	if (old && old->pending) {
+		host_av_stop_slot_locked(old);
+		old = NULL;
+	}
 	if (old && old->handle) {
 		atomic_store(&old->stopping, 1);
 		old_handle = old->handle;
@@ -3239,6 +3521,9 @@ int sword3_host_play_memory_audio_for(void *token, const void *data,
 	slot->handle = handle;
 	slot->token = token;
 	slot->channel = is_music ? HOST_AV_MUSIC_CH : mix_ch;
+	slot->pending = 0;
+	slot->paused = 0;
+	slot->volume = MIX_MAX_VOLUME;
 	atomic_store(&slot->stopping, 0);
 	pthread_mutex_unlock(&g_av_lock);
 
@@ -3297,7 +3582,10 @@ void sword3_host_pause_memory_audio_for(void *token)
 	pthread_mutex_lock(&g_av_lock);
 	slot = host_av_find_token_locked(token);
 	if (slot) {
-		if (slot->channel == HOST_AV_MUSIC_CH)
+		slot->paused = 1;
+		if (slot->pending) {
+			/* The worker will start the decoded channel paused. */
+		} else if (slot->channel == HOST_AV_MUSIC_CH)
 			Mix_PauseMusic();
 		else if (slot->channel >= 0)
 			Mix_Pause(slot->channel);
@@ -3314,7 +3602,9 @@ int sword3_host_memory_audio_playing_for(void *token)
 	pthread_mutex_lock(&g_av_lock);
 	slot = host_av_find_token_locked(token);
 	if (slot) {
-		if (slot->channel == HOST_AV_MUSIC_CH)
+		if (slot->pending)
+			playing = !slot->paused;
+		else if (slot->channel == HOST_AV_MUSIC_CH)
 			playing = Mix_PlayingMusic() && !Mix_PausedMusic();
 		else if (slot->channel >= 0)
 			playing = Mix_Playing(slot->channel) &&
@@ -3335,8 +3625,11 @@ void sword3_host_set_memory_audio_volume_for(void *token, int volume)
 		volume = MIX_MAX_VOLUME;
 	pthread_mutex_lock(&g_av_lock);
 	slot = host_av_find_token_locked(token);
-	if (slot && slot->handle)
-		sword3_audio_set_volume(slot->handle, volume);
+	if (slot) {
+		slot->volume = volume;
+		if (slot->handle)
+			sword3_audio_set_volume(slot->handle, volume);
+	}
 	pthread_mutex_unlock(&g_av_lock);
 }
 
@@ -3768,6 +4061,17 @@ static void movie_skip(SDL_Scancode scancode)
 	movie_close(1);
 }
 
+static void movie_skip_controller(Uint8 button)
+{
+	if (!g_movie.active)
+		return;
+	fprintf(stderr,
+		"sword3-sdl: skipping movie from controller button=%u\n",
+		button);
+	g_movie_swallow_controller_button = button;
+	movie_close(1);
+}
+
 static void movie_pump_events(void)
 {
 	SDL_Event event;
@@ -3775,6 +4079,8 @@ static void movie_pump_events(void)
 	SDL_PumpEvents();
 	while (SDL_PeepEvents(&event, 1, SDL_GETEVENT, SDL_FIRSTEVENT,
 			      SDL_LASTEVENT) > 0) {
+		if (newpal_mode())
+			newpal_exit_combo(&event);
 		if (event.type == SDL_QUIT) {
 			movie_close(1);
 			return;
@@ -3789,6 +4095,12 @@ static void movie_pump_events(void)
 		if (event.type == SDL_FINGERDOWN ||
 		    event.type == SDL_MOUSEBUTTONDOWN) {
 			movie_skip(SDL_SCANCODE_SPACE);
+			return;
+		}
+		if (event.type == SDL_CONTROLLERBUTTONDOWN &&
+		    (event.cbutton.button == SDL_CONTROLLER_BUTTON_A ||
+		     event.cbutton.button == SDL_CONTROLLER_BUTTON_B)) {
+			movie_skip_controller(event.cbutton.button);
 			return;
 		}
 	}
