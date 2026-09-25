@@ -350,6 +350,101 @@ static int g_newpal_back_down;
 static int g_newpal_guide_down;
 static int g_newpal_title_resource;
 static int g_newpal_title_axis_dir;
+static Uint8 g_newpal_dpad_state;
+static Sint16 g_newpal_left_x;
+static Sint16 g_newpal_left_y;
+
+#define NEWPAL_DPAD_UP    0x01u
+#define NEWPAL_DPAD_DOWN  0x02u
+#define NEWPAL_DPAD_LEFT  0x04u
+#define NEWPAL_DPAD_RIGHT 0x08u
+
+static Sint16 newpal_direction_value(Uint8 negative, Uint8 positive,
+				     Sint16 physical)
+{
+	int negative_down = (g_newpal_dpad_state & negative) != 0;
+	int positive_down = (g_newpal_dpad_state & positive) != 0;
+
+	if (negative_down == positive_down)
+		return negative_down ? 0 : physical;
+	return negative_down ? INT16_MIN : INT16_MAX;
+}
+
+static void newpal_map_dpad_to_left_axis(SDL_Event *event)
+{
+	static unsigned logged;
+	Uint32 timestamp;
+	SDL_JoystickID which;
+	Uint8 bit;
+	Uint8 axis;
+	Sint16 value;
+	int down;
+
+	if (event->type == SDL_CONTROLLERAXISMOTION) {
+		if (event->caxis.axis == SDL_CONTROLLER_AXIS_LEFTX) {
+			g_newpal_left_x = event->caxis.value;
+			event->caxis.value = newpal_direction_value(
+				NEWPAL_DPAD_LEFT, NEWPAL_DPAD_RIGHT,
+				g_newpal_left_x);
+		} else if (event->caxis.axis == SDL_CONTROLLER_AXIS_LEFTY) {
+			g_newpal_left_y = event->caxis.value;
+			event->caxis.value = newpal_direction_value(
+				NEWPAL_DPAD_UP, NEWPAL_DPAD_DOWN,
+				g_newpal_left_y);
+		}
+		return;
+	}
+	if (event->type != SDL_CONTROLLERBUTTONDOWN &&
+	    event->type != SDL_CONTROLLERBUTTONUP)
+		return;
+	if (g_newpal_exit_pad_id >= 0 &&
+	    event->cbutton.which != g_newpal_exit_pad_id)
+		return;
+
+	switch (event->cbutton.button) {
+	case SDL_CONTROLLER_BUTTON_DPAD_UP:
+		bit = NEWPAL_DPAD_UP;
+		axis = SDL_CONTROLLER_AXIS_LEFTY;
+		break;
+	case SDL_CONTROLLER_BUTTON_DPAD_DOWN:
+		bit = NEWPAL_DPAD_DOWN;
+		axis = SDL_CONTROLLER_AXIS_LEFTY;
+		break;
+	case SDL_CONTROLLER_BUTTON_DPAD_LEFT:
+		bit = NEWPAL_DPAD_LEFT;
+		axis = SDL_CONTROLLER_AXIS_LEFTX;
+		break;
+	case SDL_CONTROLLER_BUTTON_DPAD_RIGHT:
+		bit = NEWPAL_DPAD_RIGHT;
+		axis = SDL_CONTROLLER_AXIS_LEFTX;
+		break;
+	default:
+		return;
+	}
+
+	down = event->type == SDL_CONTROLLERBUTTONDOWN;
+	if (down)
+		g_newpal_dpad_state |= bit;
+	else
+		g_newpal_dpad_state &= (Uint8)~bit;
+	timestamp = event->cbutton.timestamp;
+	which = event->cbutton.which;
+	value = axis == SDL_CONTROLLER_AXIS_LEFTX ?
+		newpal_direction_value(NEWPAL_DPAD_LEFT, NEWPAL_DPAD_RIGHT,
+				       g_newpal_left_x) :
+		newpal_direction_value(NEWPAL_DPAD_UP, NEWPAL_DPAD_DOWN,
+				       g_newpal_left_y);
+	memset(event, 0, sizeof(*event));
+	event->type = SDL_CONTROLLERAXISMOTION;
+	event->caxis.timestamp = timestamp;
+	event->caxis.which = which;
+	event->caxis.axis = axis;
+	event->caxis.value = value;
+	if (logged++ < 16)
+		fprintf(stderr,
+			"sword3-sdl: NewPAL dpad -> left axis=%u value=%d\n",
+			axis, value);
+}
 
 static int newpal_title_active(void)
 {
@@ -1590,6 +1685,7 @@ static int rewrite_event(SDL_Event *event)
 		newpal_exit_combo(event);
 		if (host_cheat_newpal_event(event))
 			return 0;
+		newpal_map_dpad_to_left_axis(event);
 		title_result = newpal_title_controller_event(event);
 		if (title_result)
 			return title_result > 0;
