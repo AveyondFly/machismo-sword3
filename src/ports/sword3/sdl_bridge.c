@@ -1824,9 +1824,11 @@ static int rewrite_event(SDL_Event *event)
 		    (event->cbutton.button == SDL_CONTROLLER_BUTTON_A ||
 		     event->cbutton.button == SDL_CONTROLLER_BUTTON_B)) {
 			int down = event->type == SDL_CONTROLLERBUTTONDOWN;
+			/* Return also opens the field menu; Space is the game's
+			 * confirm and examine key. */
 			SDL_Scancode scancode =
 				event->cbutton.button == SDL_CONTROLLER_BUTTON_A ?
-				SDL_SCANCODE_RETURN : SDL_SCANCODE_ESCAPE;
+				SDL_SCANCODE_SPACE : SDL_SCANCODE_ESCAPE;
 
 			newpal_fill_key(event, scancode, down);
 			newpal_set_synthetic_key(scancode, down);
