@@ -218,7 +218,36 @@ Sword3AudioHandle *sword3_audio_open_memory(Sword3AudioBridge *bridge,
 	 * points at this copy. Freeing it here plays silence (and the iOS
 	 * malloc shim zeros recycled pages).
 	 */
-	handle->memory_owner = memory_copy;
+	if (kind == SWORD3_AUDIO_MUSIC)
+		handle->memory_owner = memory_copy;
+	else
+		free(memory_copy);
+	link_handle_locked(handle);
+	SDL_UnlockMutex(bridge->mutex);
+	return handle;
+}
+
+Sword3AudioHandle *sword3_audio_open_pcm_owned(Sword3AudioBridge *bridge,
+					       void *pcm, size_t size)
+{
+	Sword3AudioHandle *handle;
+
+	if (!pcm || !size || size > UINT32_MAX) {
+		errno = EINVAL;
+		SDL_SetError("invalid owned PCM buffer");
+		return NULL;
+	}
+	handle = allocate_handle(bridge, SWORD3_AUDIO_EFFECT);
+	if (!handle)
+		return NULL;
+	SDL_LockMutex(bridge->mutex);
+	handle->media.chunk = Mix_QuickLoad_RAW(pcm, (Uint32)size);
+	if (!handle->media.chunk) {
+		SDL_UnlockMutex(bridge->mutex);
+		free(handle);
+		return NULL;
+	}
+	handle->memory_owner = pcm;
 	link_handle_locked(handle);
 	SDL_UnlockMutex(bridge->mutex);
 	return handle;

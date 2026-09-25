@@ -1,5 +1,5 @@
 {
-  "binary_sha256": "2056c5b0a921088f96302ce7562884fcb2b7383652912995c3946c104893a0d8",
+  "binary_sha256": "f7df6df91783bcb19abbd6be365651cbf1878982d8d280509f5784b6fa331b8e",
   "library": "./libsword3_host.so",
   "symbols": [
     {
@@ -32,7 +32,7 @@
       "group": "window",
       "via": {
         "parent_string": "Window requested size %dx%d, got %dx%d\n",
-        "bl_index": 54
+        "bl_index": 56
       },
       "expected_address": "0x10014cab8"
     },
@@ -253,7 +253,7 @@
       "symbol": "SDL_GetWindowSize",
       "via": {
         "parent_string": "Window requested size %dx%d, got %dx%d\n",
-        "bl_index": 53
+        "bl_index": 55
       },
       "expected_address": "0x10014e14c",
       "group": "window"

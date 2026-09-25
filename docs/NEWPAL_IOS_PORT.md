@@ -1,10 +1,12 @@
 # NewPAL iOS on ROCKNIX
 
-This branch targets the already extracted app at
-`/roms/ports/newpal-ios/game/Payload/NewPAL.app`. Its executable is pinned by
-`configs/newpal/binary-manifest.json` and `configs/newpal/sdl-symbol-anchors.json`
-to SHA-256 `2056c5b0a921088f96302ce7562884fcb2b7383652912995c3946c104893a0d8`.
-No IPA is needed.
+This branch targets an extracted, user-supplied NewPAL 2.16 (build 102) app at
+`/roms/ports/newpal-ios/game/Payload/NewPAL.app`. Its original executable is
+pinned by `configs/newpal/binary-manifest.json` and
+`configs/newpal/sdl-symbol-anchors.json` to SHA-256
+`f7df6df91783bcb19abbd6be365651cbf1878982d8d280509f5784b6fa331b8e`.
+The runtime package contains no game executable, music, resources, or other
+game data.
 
 ## Build and device test
 
@@ -67,9 +69,15 @@ guest's exit destructors currently abort on an invalid free.
 
 ## Sound effects
 
-BGM uses the `AVAudioPlayer` bridge and host SDL_mixer. The game's sound
-effects use a separate SDL callback device. NewPAL calls its bundled
-`SDL_PauseAudio(0)` after opening that device; the bundled SDL still looks for
+BGM uses the `AVAudioPlayer` bridge. SDL_mixer 2.8 cannot load the original
+M4A files, so the host bridge decodes their AAC audio from memory with FFmpeg,
+converts it to the active mixer format, and plays the resulting PCM on a mixer
+channel. The original M4A files remain unchanged. An isolated device run with
+the original executable and `m001.m4a` decoded 2,598,944 input bytes into
+14,469,956 bytes of 44.1 kHz PCM and started playback successfully.
+
+The game's sound effects use a separate SDL callback device. NewPAL calls its
+bundled `SDL_PauseAudio(0)` after opening that device; the bundled SDL still looks for
 device ID 1, while host SDL opened ID 2. The NewPAL hooks now forward
 `SDL_PauseAudioDevice` to the host bridge, which translates ID 1 to the actual
 device. The bundled `SDL_MixAudio` also cannot see the host device's format,
@@ -114,17 +122,14 @@ The user supplied `/roms/ports/newpal-ios/ref` as a reference runtime. Its
 and battle controls. Its exported symbols include `host_battle_button`,
 `host_battle_confirm_command`, and `host_battle_confirm_entry`.
 
-The reference `address-hooks.conf` comments name SHA-256
-`f7df6df91783bcb19abbd6be365651cbf1878982d8d280509f5784b6fa331b8e`,
-which differs from the current executable. Nevertheless, all 59 hook
-fingerprints match. An isolated device run loaded the **current** executable
-with the reference's `machismo-partial-sdl.conf`: all 59 hooks installed, the
+The reference `address-hooks.conf` names the same original executable SHA-256
+used by this branch. All 59 reference hook fingerprints also match. An
+isolated device run loaded the executable with the reference's
+`machismo-partial-sdl.conf`: all 59 hooks installed, the
 intro rendered, and SDL found one `retrogame_joypad` with a controller mapping.
-The SHA comment is therefore not sufficient evidence of incompatibility.
 
-An isolated reference run also reached a two-enemy battle with the current
+An isolated reference run also reached a two-enemy battle with the
 executable. Native controller A selected a command and confirmed a highlighted
-enemy, so the relevant battle path works with this binary despite the differing
-SHA comment. The reference's default `machismo.conf` comments out
+enemy. The reference's default `machismo.conf` comments out
 `address_hooks`; its `machismo-partial-sdl.conf` enables them. No launcher was
 included in `ref`.

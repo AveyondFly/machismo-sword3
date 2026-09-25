@@ -22,6 +22,7 @@
 #include <libavcodec/avcodec.h>
 #include <libavformat/avformat.h>
 #include <libavutil/channel_layout.h>
+#include <libavutil/mem.h>
 #include <libavutil/samplefmt.h>
 
 #ifndef SDL_WINDOW_METAL
@@ -2623,6 +2624,352 @@ void sword3_SDL_CloseAudioDevice(SDL_AudioDeviceID dev)
 
 static Sword3AudioBridge *g_av_audio_bridge;
 
+struct memory_audio_source {
+	const uint8_t *data;
+	size_t size;
+	size_t offset;
+};
+
+struct decoded_audio_buffer {
+	SDL_AudioStream *stream;
+	uint8_t *pcm;
+	size_t pcm_size;
+	size_t pcm_capacity;
+	uint8_t *packed;
+	size_t packed_capacity;
+};
+
+static int memory_audio_read(void *opaque, uint8_t *buffer, int length)
+{
+	struct memory_audio_source *source = opaque;
+	size_t remaining;
+
+	if (!source || length <= 0)
+		return AVERROR(EINVAL);
+	remaining = source->size - source->offset;
+	if (!remaining)
+		return AVERROR_EOF;
+	if ((size_t)length > remaining)
+		length = (int)remaining;
+	memcpy(buffer, source->data + source->offset, (size_t)length);
+	source->offset += (size_t)length;
+	return length;
+}
+
+static int64_t memory_audio_seek(void *opaque, int64_t offset, int whence)
+{
+	struct memory_audio_source *source = opaque;
+	int64_t base;
+	int64_t next;
+
+	if (!source)
+		return AVERROR(EINVAL);
+	if (whence == AVSEEK_SIZE)
+		return (int64_t)source->size;
+	whence &= ~AVSEEK_FORCE;
+	if (whence == SEEK_SET)
+		base = 0;
+	else if (whence == SEEK_CUR)
+		base = (int64_t)source->offset;
+	else if (whence == SEEK_END)
+		base = (int64_t)source->size;
+	else
+		return AVERROR(EINVAL);
+	if ((offset > 0 && base > INT64_MAX - offset) ||
+	    (offset < 0 && base < -offset))
+		return AVERROR(EINVAL);
+	next = base + offset;
+	if (next < 0 || (uint64_t)next > source->size)
+		return AVERROR(EINVAL);
+	source->offset = (size_t)next;
+	return next;
+}
+
+static int decoded_audio_reserve(struct decoded_audio_buffer *out,
+				 size_t extra)
+{
+	size_t needed;
+	size_t capacity;
+	void *grown;
+
+	if (extra > SIZE_MAX - out->pcm_size)
+		return -1;
+	needed = out->pcm_size + extra;
+	if (needed <= out->pcm_capacity)
+		return 0;
+	capacity = out->pcm_capacity ? out->pcm_capacity : 256 * 1024;
+	while (capacity < needed) {
+		if (capacity > SIZE_MAX / 2) {
+			capacity = needed;
+			break;
+		}
+		capacity *= 2;
+	}
+	grown = realloc(out->pcm, capacity);
+	if (!grown)
+		return -1;
+	out->pcm = grown;
+	out->pcm_capacity = capacity;
+	return 0;
+}
+
+static int decoded_audio_drain(struct decoded_audio_buffer *out)
+{
+	int available;
+	int got;
+
+	for (;;) {
+		available = SDL_AudioStreamAvailable(out->stream);
+		if (available < 0)
+			return -1;
+		if (!available)
+			return 0;
+		if (decoded_audio_reserve(out, (size_t)available) != 0)
+			return -1;
+		got = SDL_AudioStreamGet(out->stream, out->pcm + out->pcm_size,
+					 available);
+		if (got <= 0)
+			return -1;
+		out->pcm_size += (size_t)got;
+	}
+}
+
+static SDL_AudioFormat decoded_audio_sdl_format(enum AVSampleFormat format)
+{
+	switch (av_get_packed_sample_fmt(format)) {
+	case AV_SAMPLE_FMT_U8:
+		return AUDIO_U8;
+	case AV_SAMPLE_FMT_S16:
+		return AUDIO_S16SYS;
+	case AV_SAMPLE_FMT_S32:
+		return AUDIO_S32SYS;
+	case AV_SAMPLE_FMT_FLT:
+		return AUDIO_F32SYS;
+	default:
+		return 0;
+	}
+}
+
+static int decoded_audio_put_frame(struct decoded_audio_buffer *out,
+				   AVCodecContext *codec,
+				   const AVFrame *frame,
+				   int target_rate,
+				   SDL_AudioFormat target_format,
+				   int target_channels)
+{
+	enum AVSampleFormat format = (enum AVSampleFormat)frame->format;
+	SDL_AudioFormat source_format = decoded_audio_sdl_format(format);
+	int channels = frame->ch_layout.nb_channels;
+	int sample_rate = frame->sample_rate;
+	int sample_bytes;
+	int planar;
+	size_t bytes;
+
+	if (!source_format)
+		return -1;
+	if (channels <= 0)
+		channels = codec->ch_layout.nb_channels;
+	if (sample_rate <= 0)
+		sample_rate = codec->sample_rate;
+	if (channels <= 0 || sample_rate <= 0 || frame->nb_samples <= 0)
+		return -1;
+	if (!out->stream) {
+		out->stream = SDL_NewAudioStream(source_format, (Uint8)channels,
+						 sample_rate, target_format,
+						 (Uint8)target_channels,
+						 target_rate);
+		if (!out->stream)
+			return -1;
+	}
+	sample_bytes = av_get_bytes_per_sample(av_get_packed_sample_fmt(format));
+	if (sample_bytes <= 0 ||
+	    (size_t)frame->nb_samples >
+		SIZE_MAX / (size_t)channels / (size_t)sample_bytes)
+		return -1;
+	bytes = (size_t)frame->nb_samples * (size_t)channels *
+		(size_t)sample_bytes;
+	if (bytes > INT_MAX)
+		return -1;
+	if (bytes > out->packed_capacity) {
+		void *grown = realloc(out->packed, bytes);
+
+		if (!grown)
+			return -1;
+		out->packed = grown;
+		out->packed_capacity = bytes;
+	}
+	planar = av_sample_fmt_is_planar(format);
+	if (planar) {
+		uint8_t *dest = out->packed;
+		int sample;
+		int channel;
+
+		for (sample = 0; sample < frame->nb_samples; ++sample) {
+			for (channel = 0; channel < channels; ++channel) {
+				memcpy(dest,
+				       frame->extended_data[channel] +
+					       (size_t)sample * sample_bytes,
+				       (size_t)sample_bytes);
+				dest += sample_bytes;
+			}
+		}
+	} else {
+		memcpy(out->packed, frame->extended_data[0], bytes);
+	}
+	if (SDL_AudioStreamPut(out->stream, out->packed, (int)bytes) != 0)
+		return -1;
+	return decoded_audio_drain(out);
+}
+
+static int decoded_audio_receive(AVCodecContext *codec, AVFrame *frame,
+				 struct decoded_audio_buffer *out,
+				 int target_rate,
+				 SDL_AudioFormat target_format,
+				 int target_channels)
+{
+	int rc;
+
+	for (;;) {
+		rc = avcodec_receive_frame(codec, frame);
+		if (rc == AVERROR(EAGAIN) || rc == AVERROR_EOF)
+			return rc;
+		if (rc < 0)
+			return rc;
+		rc = decoded_audio_put_frame(out, codec, frame, target_rate,
+					     target_format, target_channels);
+		av_frame_unref(frame);
+		if (rc != 0)
+			return AVERROR(EINVAL);
+	}
+}
+
+static int decoded_audio_send(AVCodecContext *codec, const AVPacket *packet,
+			      AVFrame *frame,
+			      struct decoded_audio_buffer *out,
+			      int target_rate,
+			      SDL_AudioFormat target_format,
+			      int target_channels)
+{
+	int rc;
+
+	for (;;) {
+		rc = avcodec_send_packet(codec, packet);
+		if (rc != AVERROR(EAGAIN))
+			break;
+		rc = decoded_audio_receive(codec, frame, out, target_rate,
+					   target_format, target_channels);
+		if (rc < 0 && rc != AVERROR(EAGAIN))
+			return rc;
+	}
+	if (rc < 0)
+		return rc;
+	return decoded_audio_receive(codec, frame, out, target_rate,
+				     target_format, target_channels);
+}
+
+static int decode_memory_audio(const void *data, size_t size,
+			       void **pcm_out, size_t *pcm_size_out)
+{
+	struct memory_audio_source source = { data, size, 0 };
+	struct decoded_audio_buffer out = {0};
+	AVFormatContext *format = NULL;
+	AVCodecContext *codec = NULL;
+	AVIOContext *avio = NULL;
+	AVPacket *packet = NULL;
+	AVFrame *frame = NULL;
+	const AVCodec *decoder = NULL;
+	uint8_t *avio_buffer = NULL;
+	int stream_index;
+	int target_rate = 0;
+	int target_channels = 0;
+	SDL_AudioFormat target_format = 0;
+	int rc = -1;
+
+	*pcm_out = NULL;
+	*pcm_size_out = 0;
+	if (!data || !size || !Mix_QuerySpec(&target_rate, &target_format,
+					       &target_channels))
+		return -1;
+	format = avformat_alloc_context();
+	avio_buffer = av_malloc(32 * 1024);
+	if (!format || !avio_buffer)
+		goto done;
+	avio = avio_alloc_context(avio_buffer, 32 * 1024, 0, &source,
+				  memory_audio_read, NULL, memory_audio_seek);
+	if (!avio)
+		goto done;
+	/* avio owns its buffer after this point. */
+	avio_buffer = NULL;
+	format->pb = avio;
+	format->flags |= AVFMT_FLAG_CUSTOM_IO;
+	rc = avformat_open_input(&format, NULL, NULL, NULL);
+	if (rc < 0)
+		goto done;
+	rc = avformat_find_stream_info(format, NULL);
+	if (rc < 0)
+		goto done;
+	stream_index = av_find_best_stream(format, AVMEDIA_TYPE_AUDIO, -1, -1,
+					   &decoder, 0);
+	if (stream_index < 0 || !decoder) {
+		rc = stream_index < 0 ? stream_index : AVERROR_DECODER_NOT_FOUND;
+		goto done;
+	}
+	codec = avcodec_alloc_context3(decoder);
+	packet = av_packet_alloc();
+	frame = av_frame_alloc();
+	if (!codec || !packet || !frame) {
+		rc = AVERROR(ENOMEM);
+		goto done;
+	}
+	rc = avcodec_parameters_to_context(
+		codec, format->streams[stream_index]->codecpar);
+	if (rc < 0 || (rc = avcodec_open2(codec, decoder, NULL)) < 0)
+		goto done;
+	while ((rc = av_read_frame(format, packet)) >= 0) {
+		if (packet->stream_index == stream_index) {
+			rc = decoded_audio_send(codec, packet, frame, &out,
+						target_rate, target_format,
+						target_channels);
+		}
+		av_packet_unref(packet);
+		if (rc < 0 && rc != AVERROR(EAGAIN))
+			goto done;
+	}
+	if (rc != AVERROR_EOF)
+		goto done;
+	rc = decoded_audio_send(codec, NULL, frame, &out, target_rate,
+				target_format, target_channels);
+	if (rc != AVERROR_EOF && rc != AVERROR(EAGAIN))
+		goto done;
+	if (!out.stream || SDL_AudioStreamFlush(out.stream) != 0 ||
+	    decoded_audio_drain(&out) != 0 || !out.pcm_size) {
+		rc = AVERROR(EINVAL);
+		goto done;
+	}
+	*pcm_out = out.pcm;
+	*pcm_size_out = out.pcm_size;
+	out.pcm = NULL;
+	rc = 0;
+
+done:
+	if (rc < 0)
+		fprintf(stderr,
+			"sword3-sdl: FFmpeg memory audio decode failed rc=%d SDL=%s\n",
+			rc, SDL_GetError());
+	free(out.packed);
+	free(out.pcm);
+	if (out.stream)
+		SDL_FreeAudioStream(out.stream);
+	av_packet_free(&packet);
+	av_frame_free(&frame);
+	avcodec_free_context(&codec);
+	avformat_close_input(&format);
+	if (avio)
+		avio_context_free(&avio);
+	av_free(avio_buffer);
+	return rc < 0 ? -1 : 0;
+}
+
 static void on_host_channel_finished(int channel)
 {
 	struct host_av_slot *slot;
@@ -2795,6 +3142,8 @@ int sword3_host_play_memory_audio_for(void *token, const void *data,
 	int channel;
 	int is_music = 0;
 	int mix_ch;
+	void *decoded_pcm = NULL;
+	size_t decoded_size = 0;
 
 	if (!data || size == 0 || !token)
 		return -1;
@@ -2804,6 +3153,20 @@ int sword3_host_play_memory_audio_for(void *token, const void *data,
 	handle = sword3_audio_open_memory(g_av_audio_bridge, SWORD3_AUDIO_MUSIC,
 					  data, size);
 	is_music = handle != NULL;
+	if (!handle && size >= 12 &&
+	    memcmp((const uint8_t *)data + 4, "ftyp", 4) == 0 &&
+	    decode_memory_audio(data, size, &decoded_pcm, &decoded_size) == 0) {
+		handle = sword3_audio_open_pcm_owned(g_av_audio_bridge,
+						    decoded_pcm,
+						    decoded_size);
+		if (handle) {
+			fprintf(stderr,
+				"sword3-sdl: decoded M4A %zu bytes to %zu bytes PCM\n",
+				size, decoded_size);
+			decoded_pcm = NULL;
+		}
+		free(decoded_pcm);
+	}
 	if (!handle) {
 		handle = sword3_audio_open_memory(g_av_audio_bridge,
 						  SWORD3_AUDIO_EFFECT, data,

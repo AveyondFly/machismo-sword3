@@ -1,5 +1,5 @@
 {
-  "binary_sha256": "2056c5b0a921088f96302ce7562884fcb2b7383652912995c3946c104893a0d8",
+  "binary_sha256": "f7df6df91783bcb19abbd6be365651cbf1878982d8d280509f5784b6fa331b8e",
   "coverage": "partial",
   "hook_count": 46,
   "hooks": [
@@ -395,11 +395,11 @@
     },
     {
       "address": "0x10014cab8",
-      "anchor": "via Window requested size %dx%d, got %dx%d bl[54]",
+      "anchor": "via Window requested size %dx%d, got %dx%d bl[56]",
       "end_address": "0x10014cba8",
       "evidence": [
         {
-          "bl_index": 54,
+          "bl_index": 56,
           "call_site": "0x10005bea0",
           "parent_address": "0x10005b400",
           "parent_string": "Window requested size %dx%d, got %dx%d\n",
@@ -416,11 +416,11 @@
     },
     {
       "address": "0x10014e14c",
-      "anchor": "via Window requested size %dx%d, got %dx%d bl[53]",
+      "anchor": "via Window requested size %dx%d, got %dx%d bl[55]",
       "end_address": "0x10014e1a0",
       "evidence": [
         {
-          "bl_index": 53,
+          "bl_index": 55,
           "call_site": "0x10005bde8",
           "parent_address": "0x10005b400",
           "parent_string": "Window requested size %dx%d, got %dx%d\n",

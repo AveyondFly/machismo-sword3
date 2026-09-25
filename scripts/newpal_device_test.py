@@ -13,7 +13,7 @@ from pathlib import Path
 
 
 ROOT = Path(__file__).resolve().parents[1]
-EXPECTED_BINARY = "2056c5b0a921088f96302ce7562884fcb2b7383652912995c3946c104893a0d8"
+EXPECTED_BINARY = "f7df6df91783bcb19abbd6be365651cbf1878982d8d280509f5784b6fa331b8e"
 REMOTE_BINARY = "game/Payload/NewPAL.app/NewPAL"
 RUNTIME_FILES = (
     "machismo",

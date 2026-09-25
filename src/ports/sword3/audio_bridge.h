@@ -51,6 +51,13 @@ Sword3AudioHandle *sword3_audio_open_memory(Sword3AudioBridge *bridge,
 					   Sword3AudioKind kind,
 					   const void *data, size_t size);
 /*
+ * Opens mixer-format PCM without another copy. On success the handle owns
+ * pcm and releases it during close; on failure ownership remains with the
+ * caller. This is an effect handle and is played on a Mix channel.
+ */
+Sword3AudioHandle *sword3_audio_open_pcm_owned(Sword3AudioBridge *bridge,
+					       void *pcm, size_t size);
+/*
  * Memory input is copied and kept on the handle until close. Mix_LoadMUS_RW
  * streams MP3 from that buffer for the whole lifetime of Mix_Music.
  */

@@ -81,6 +81,7 @@ IMPLEMENTED_DATA = frozenset(
         "OBJC_CLASS_$_UIColor",
         "OBJC_CLASS_$_UIImage",
         "OBJC_CLASS_$_UIImageView",
+        "OBJC_CLASS_$_UIAlertView",
         "OBJC_CLASS_$_UIResponder",
         "OBJC_METACLASS_$_UIResponder",
         "OBJC_CLASS_$_UIView",

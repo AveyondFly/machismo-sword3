@@ -263,6 +263,9 @@ extern struct sword3_objc_class proxy_view_controller_metaclass
 extern struct sword3_objc_class proxy_image_view_class
     __asm__("OBJC_CLASS_$_UIImageView");
 static struct sword3_objc_class proxy_image_view_metaclass;
+extern struct sword3_objc_class proxy_alert_view_class
+    __asm__("OBJC_CLASS_$_UIAlertView");
+static struct sword3_objc_class proxy_alert_view_metaclass;
 extern struct sword3_objc_class proxy_exception_class
     __asm__("OBJC_CLASS_$_NSException");
 static struct sword3_objc_class proxy_exception_metaclass;
@@ -1501,6 +1504,25 @@ static sword3_objc_id proxy_return_self(sword3_objc_id self,
                                         sword3_objc_sel selector)
 {
     (void)selector;
+    return self;
+}
+
+static sword3_objc_id proxy_alert_view_init(
+    sword3_objc_id self,
+    sword3_objc_sel selector,
+    sword3_objc_id title,
+    sword3_objc_id message,
+    sword3_objc_id delegate,
+    sword3_objc_id cancel_button_title,
+    sword3_objc_id other_button_titles
+)
+{
+    (void)selector;
+    (void)title;
+    (void)message;
+    (void)delegate;
+    (void)cancel_button_title;
+    (void)other_button_titles;
     return self;
 }
 
@@ -3788,6 +3810,17 @@ static const struct proxy_method_list proxy_uikit_methods = {
     },
 };
 
+static const struct proxy_method_list proxy_alert_view_methods = {
+    .entsize_and_flags = sizeof(struct sword3_objc_method),
+    .count = 2,
+    .methods = {
+        {"initWithTitle:message:delegate:cancelButtonTitle:otherButtonTitles:",
+         "@64@0:8@16@24@32@40@48",
+         (sword3_objc_imp)proxy_alert_view_init},
+        {"show", "v16@0:8", (sword3_objc_imp)proxy_noop},
+    },
+};
+
 static const struct proxy_method_list proxy_url_methods = {
     .entsize_and_flags = sizeof(struct sword3_objc_method),
     .count = 6,
@@ -4256,6 +4289,20 @@ static const struct sword3_objc_class_ro proxy_uikit_ro_image_view = {
         (const struct sword3_objc_method_list *)&proxy_uikit_methods,
 };
 
+static const struct sword3_objc_class_ro proxy_alert_view_ro = {
+    .flags = SWORD3_OBJC_RO_ROOT,
+    .instance_size = sizeof(struct proxy_uikit_object),
+    .name = "UIAlertView",
+    .base_methods =
+        (const struct sword3_objc_method_list *)&proxy_alert_view_methods,
+};
+
+static const struct sword3_objc_class_ro proxy_alert_view_metaclass_ro = {
+    .flags = SWORD3_OBJC_RO_META | SWORD3_OBJC_RO_ROOT,
+    .instance_size = sizeof(struct sword3_objc_class),
+    .name = "UIAlertView",
+};
+
 static const struct sword3_objc_class_ro proxy_uikit_meta_ro_responder = {
     .flags = SWORD3_OBJC_RO_META | SWORD3_OBJC_RO_ROOT,
     .instance_size = sizeof(struct sword3_objc_class),
@@ -4699,6 +4746,19 @@ SWORD3_EXPORT struct sword3_objc_class proxy_image_view_class
         .isa = &proxy_image_view_metaclass,
         .superclass = &proxy_view_class,
         .data_bits = (uintptr_t)&proxy_uikit_ro_image_view,
+    };
+
+static struct sword3_objc_class proxy_alert_view_metaclass = {
+    .isa = &proxy_alert_view_metaclass,
+    .superclass = &proxy_view_metaclass,
+    .data_bits = (uintptr_t)&proxy_alert_view_metaclass_ro,
+};
+
+SWORD3_EXPORT struct sword3_objc_class proxy_alert_view_class
+    __asm__("OBJC_CLASS_$_UIAlertView") = {
+        .isa = &proxy_alert_view_metaclass,
+        .superclass = &proxy_view_class,
+        .data_bits = (uintptr_t)&proxy_alert_view_ro,
     };
 
 static struct sword3_objc_class proxy_url_metaclass = {

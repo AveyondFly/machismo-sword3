@@ -3766,6 +3766,10 @@
               },
               {
                 "count": 1,
+                "name": "_OBJC_CLASS_$_UIAlertView"
+              },
+              {
+                "count": 1,
                 "name": "_OBJC_CLASS_$_UIApplication"
               },
               {
@@ -3787,10 +3791,6 @@
               {
                 "count": 1,
                 "name": "_OBJC_CLASS_$_UIPasteboard"
-              },
-              {
-                "count": 1,
-                "name": "_OBJC_CLASS_$_UIResponder"
               },
               {
                 "count": 1,
@@ -4483,6 +4483,16 @@
                 "name": "/System/Library/Frameworks/UIKit.framework/UIKit"
               }
             ],
+            "symbol": "_OBJC_CLASS_$_UIAlertView"
+          },
+          {
+            "count": 1,
+            "dylibs": [
+              {
+                "count": 1,
+                "name": "/System/Library/Frameworks/UIKit.framework/UIKit"
+              }
+            ],
             "symbol": "_OBJC_CLASS_$_UIApplication"
           },
           {
@@ -4534,16 +4544,6 @@
               }
             ],
             "symbol": "_OBJC_CLASS_$_UIPasteboard"
-          },
-          {
-            "count": 1,
-            "dylibs": [
-              {
-                "count": 1,
-                "name": "/System/Library/Frameworks/UIKit.framework/UIKit"
-              }
-            ],
-            "symbol": "_OBJC_CLASS_$_UIResponder"
           },
           {
             "count": 1,
@@ -6267,7 +6267,7 @@
   },
   "file": {
     "name": "NewPAL",
-    "sha256": "2056c5b0a921088f96302ce7562884fcb2b7383652912995c3946c104893a0d8",
+    "sha256": "f7df6df91783bcb19abbd6be365651cbf1878982d8d280509f5784b6fa331b8e",
     "size": 2026112
   },
   "function_starts": {
