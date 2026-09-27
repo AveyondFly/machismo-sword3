@@ -13,6 +13,14 @@ int host_cheat_newpal_money(void);
 int host_cheat_newpal_heal(void);
 int host_cheat_newpal_has_puppet(void);
 int host_cheat_newpal_fill_puppet(void);
+
+enum {
+	NP_WAKE_LINGER,
+	NP_WAKE_YUERU
+};
+int host_cheat_newpal_wake_scene(void);
+int host_cheat_newpal_can_wake(int who);
+int host_cheat_newpal_wake(int who);
 void host_cheat_newpal_level_up(int enabled);
 void host_cheat_newpal_one_hit(int enabled);
 void host_cheat_newpal_no_encounter(int enabled);

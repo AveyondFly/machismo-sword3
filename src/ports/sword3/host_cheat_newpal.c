@@ -43,6 +43,15 @@
 #define NP_ITEM_COUNT 20
 #define NP_ITEM_PUPPET 3902
 #define NP_ITEM_COUNT_MAX 99
+/* The old woman's hut: each bedside trigger shows its later text once the
+ * story script swaps in the next event, the same swap done here. */
+#define NP_OBJECT_EVENT 0x26
+#define NP_LINGER_OBJECT 2
+#define NP_LINGER_ASLEEP 1153
+#define NP_LINGER_SMILING 1196
+#define NP_YUERU_OBJECT 3
+#define NP_YUERU_COLD 1197
+#define NP_YUERU_WARM 1198
 #define NP_LIST_LIMIT 32
 #define NP_MAP_OBJECT_SIZE 0x68
 /* The object array ends where NP_FIELD_SCRIPT begins. */
@@ -273,6 +282,51 @@ int host_cheat_newpal_fill_puppet(void)
 	}
 	fprintf(stderr, "sword3-sdl: NewPAL trainer puppet count %d->%d\n",
 		before, NP_ITEM_COUNT_MAX);
+	return 1;
+}
+
+static uint16_t *newpal_wake_event(int who, int include_awake)
+{
+	int count = *(volatile int *)(uintptr_t)NP_MAP_OBJECT_COUNT;
+	int object_id = who == NP_WAKE_YUERU ? NP_YUERU_OBJECT : NP_LINGER_OBJECT;
+	int asleep = who == NP_WAKE_YUERU ? NP_YUERU_COLD : NP_LINGER_ASLEEP;
+	int awake = who == NP_WAKE_YUERU ? NP_YUERU_WARM : NP_LINGER_SMILING;
+	int i;
+
+	if (count <= 0 || count > NP_MAP_OBJECT_CAPACITY)
+		return NULL;
+	for (i = 1; i < count; i++) {
+		uint8_t *object = (uint8_t *)(uintptr_t)NP_MAP_OBJECTS +
+			(size_t)i * NP_MAP_OBJECT_SIZE;
+		uint16_t *event = (uint16_t *)(object + NP_OBJECT_EVENT);
+
+		if (*(uint16_t *)(object + 0x2c) == object_id &&
+		    (*event == asleep || (include_awake && *event == awake)))
+			return event;
+	}
+	return NULL;
+}
+
+int host_cheat_newpal_wake_scene(void)
+{
+	return newpal_wake_event(NP_WAKE_LINGER, 1) ||
+	       newpal_wake_event(NP_WAKE_YUERU, 1);
+}
+
+int host_cheat_newpal_can_wake(int who)
+{
+	return newpal_wake_event(who, 0) != NULL;
+}
+
+int host_cheat_newpal_wake(int who)
+{
+	uint16_t *event = newpal_wake_event(who, 0);
+
+	if (!event)
+		return 0;
+	*event = who == NP_WAKE_YUERU ? NP_YUERU_WARM : NP_LINGER_SMILING;
+	fprintf(stderr, "sword3-sdl: NewPAL trainer wake %s event=%u\n",
+		who == NP_WAKE_YUERU ? "yueru" : "linger", *event);
 	return 1;
 }
 
