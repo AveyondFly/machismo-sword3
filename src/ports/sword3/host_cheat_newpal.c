@@ -52,6 +52,12 @@
 #define NP_YUERU_OBJECT 3
 #define NP_YUERU_COLD 1197
 #define NP_YUERU_WARM 1198
+/* Script opcodes 0x19 and 0x15/0x16 set and test story flags. The ending
+ * checks the flag each wake branch sets, not the swapped event. */
+#define NP_FLAG_TEST 0x100011438ull
+#define NP_FLAG_SET 0x100011264ull
+#define NP_LINGER_FLAG 1602
+#define NP_YUERU_FLAG 1601
 #define NP_LIST_LIMIT 32
 #define NP_MAP_OBJECT_SIZE 0x68
 /* The object array ends where NP_FIELD_SCRIPT begins. */
@@ -313,20 +319,37 @@ int host_cheat_newpal_wake_scene(void)
 	       newpal_wake_event(NP_WAKE_YUERU, 1);
 }
 
+static int newpal_wake_flag(int who)
+{
+	return who == NP_WAKE_YUERU ? NP_YUERU_FLAG : NP_LINGER_FLAG;
+}
+
+static int newpal_flag_set(int flag)
+{
+	return ((int (*)(int))(uintptr_t)NP_FLAG_TEST)(flag) & 1;
+}
+
 int host_cheat_newpal_can_wake(int who)
 {
-	return newpal_wake_event(who, 0) != NULL;
+	return newpal_wake_event(who, 0) ||
+	       (newpal_wake_event(who, 1) &&
+		!newpal_flag_set(newpal_wake_flag(who)));
 }
 
 int host_cheat_newpal_wake(int who)
 {
-	uint16_t *event = newpal_wake_event(who, 0);
+	uint16_t *event;
 
-	if (!event)
+	if (!host_cheat_newpal_can_wake(who))
 		return 0;
-	*event = who == NP_WAKE_YUERU ? NP_YUERU_WARM : NP_LINGER_SMILING;
-	fprintf(stderr, "sword3-sdl: NewPAL trainer wake %s event=%u\n",
-		who == NP_WAKE_YUERU ? "yueru" : "linger", *event);
+	event = newpal_wake_event(who, 0);
+	if (event)
+		*event = who == NP_WAKE_YUERU ? NP_YUERU_WARM :
+			NP_LINGER_SMILING;
+	((void (*)(int))(uintptr_t)NP_FLAG_SET)(newpal_wake_flag(who));
+	fprintf(stderr, "sword3-sdl: NewPAL trainer wake %s flag=%d set=%d\n",
+		who == NP_WAKE_YUERU ? "yueru" : "linger",
+		newpal_wake_flag(who), newpal_flag_set(newpal_wake_flag(who)));
 	return 1;
 }
 
