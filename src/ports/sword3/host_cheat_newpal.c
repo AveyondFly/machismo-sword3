@@ -32,6 +32,17 @@
 #define NP_CLEAR_MAP_COLLISION 0x10000ede8ull
 #define NP_UNLINK_MAP_OBJECT 0x100013dc0ull
 #define NP_MONEY_MAX 60000
+/* Item objects keep their count as property 20. The inventory array is only
+ * rebuilt from them when saving, so update both. */
+#define NP_ITEM_LIST 0x10023a0f0ull
+#define NP_ITEM_PROPERTY 0x100034088ull
+#define NP_INVENTORY_COUNT 0x100248c04ull
+#define NP_INVENTORY 0x100248c08ull
+#define NP_INVENTORY_ENTRY_SIZE 0x14
+#define NP_INVENTORY_LIMIT 300
+#define NP_ITEM_COUNT 20
+#define NP_ITEM_PUPPET 3902
+#define NP_ITEM_COUNT_MAX 99
 #define NP_LIST_LIMIT 32
 #define NP_MAP_OBJECT_SIZE 0x68
 /* The object array ends where NP_FIELD_SCRIPT begins. */
@@ -210,6 +221,59 @@ int host_cheat_newpal_heal(void)
 		fprintf(stderr, "sword3-sdl: NewPAL trainer filled %d party members\n",
 			filled);
 	return filled;
+}
+
+static void *newpal_find_item(int id)
+{
+	void *list = *(void **)(uintptr_t)NP_ITEM_LIST;
+	int count;
+	int i;
+
+	if (!list)
+		return NULL;
+	count = *(int *)((uint8_t *)list + 8);
+	if (count <= 0 || count > NP_INVENTORY_LIMIT)
+		return NULL;
+	for (i = 0; i < count; i++) {
+		void *item = newpal_list_role(list, i);
+
+		if (item && *(int *)item == id)
+			return item;
+	}
+	return NULL;
+}
+
+int host_cheat_newpal_has_puppet(void)
+{
+	return newpal_find_item(NP_ITEM_PUPPET) != NULL;
+}
+
+int host_cheat_newpal_fill_puppet(void)
+{
+	void *item = newpal_find_item(NP_ITEM_PUPPET);
+	int count = *(volatile int *)(uintptr_t)NP_INVENTORY_COUNT;
+	int *value;
+	int before;
+	int i;
+
+	if (!item)
+		return 0;
+	value = ((int *(*)(void *, int))(uintptr_t)NP_ITEM_PROPERTY)(
+		*(void **)((uint8_t *)item + 0x70), NP_ITEM_COUNT);
+	if (!value)
+		return 0;
+	before = *value;
+	*value = NP_ITEM_COUNT_MAX;
+	for (i = 0; i < count && i < NP_INVENTORY_LIMIT; i++) {
+		int *entry = (int *)((uint8_t *)(uintptr_t)NP_INVENTORY +
+				     (size_t)i * NP_INVENTORY_ENTRY_SIZE);
+
+		if (entry[0] == NP_ITEM_PUPPET)
+			entry[1] = NP_ITEM_COUNT_MAX;
+	}
+	fprintf(stderr, "sword3-sdl: NewPAL trainer puppet count %d->%d\n",
+		before, NP_ITEM_COUNT_MAX);
+	return 1;
 }
 
 static void newpal_apply_level_up(void)

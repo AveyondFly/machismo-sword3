@@ -62,6 +62,7 @@
 enum cheat_item {
 	CHEAT_MONEY = 0,
 	CHEAT_HP,
+	CHEAT_PUPPET,
 	CHEAT_NO_ENCOUNTER,
 	CHEAT_NOCLIP,
 	CHEAT_LEVEL_UP,
@@ -74,7 +75,7 @@ static const int g_pal2_items[] = {
 	CHEAT_ONE_HIT, CHEAT_CLOSE,
 };
 static const int g_newpal_items[] = {
-	CHEAT_MONEY, CHEAT_HP, CHEAT_NO_ENCOUNTER, CHEAT_NOCLIP,
+	CHEAT_MONEY, CHEAT_HP, CHEAT_PUPPET, CHEAT_NO_ENCOUNTER, CHEAT_NOCLIP,
 	CHEAT_LEVEL_UP, CHEAT_ONE_HIT, CHEAT_CLOSE,
 };
 
@@ -101,6 +102,11 @@ static int cheat_item_count(void)
 static int cheat_item(int index)
 {
 	return g_newpal_ui ? g_newpal_items[index] : g_pal2_items[index];
+}
+
+static int cheat_item_enabled(int item)
+{
+	return item != CHEAT_PUPPET || host_cheat_newpal_has_puppet();
 }
 
 static void cheat_move(int dir)
@@ -593,6 +599,10 @@ static void cheat_apply(void)
 			cheat_set_status(host_cheat_newpal_heal() ?
 				"全员已满血" : "找不到队伍数据");
 			break;
+		case CHEAT_PUPPET:
+			cheat_set_status(host_cheat_newpal_fill_puppet() ?
+				"傀儡虫已设为 99" : "物品中没有傀儡虫");
+			break;
 		case CHEAT_NO_ENCOUNTER:
 			g_no_encounter = !g_no_encounter;
 			host_cheat_newpal_no_encounter(g_no_encounter);
@@ -889,6 +899,8 @@ static const char *cheat_label(int item, char *buffer, size_t size)
 		return "金钱最大";
 	case CHEAT_HP:
 		return "人物满血";
+	case CHEAT_PUPPET:
+		return "傀儡虫加满";
 	case CHEAT_NO_ENCOUNTER:
 		snprintf(buffer, size, "不遇敌    %s",
 			 g_no_encounter ? "开" : "关");
@@ -921,6 +933,7 @@ void host_cheat_draw(SDL_Renderer *renderer, int logical_w, int logical_h)
 	SDL_Color title = {255, 220, 120, 255};
 	SDL_Color normal = {220, 210, 190, 255};
 	SDL_Color selected = {255, 255, 220, 255};
+	SDL_Color disabled = {110, 104, 94, 255};
 	SDL_Color hint = {170, 160, 140, 255};
 	SDL_Color status = {140, 230, 150, 255};
 	char buffer[40];
@@ -990,7 +1003,8 @@ void host_cheat_draw(SDL_Renderer *renderer, int logical_w, int logical_h)
 			SDL_RenderFillRect(renderer, &highlight);
 		}
 		cheat_text(renderer, panel_x + cheat_sx(28, logical_w), y,
-			   pt, i == g_selected ? selected : normal, label);
+			   pt, !cheat_item_enabled(cheat_item(i)) ? disabled :
+			   i == g_selected ? selected : normal, label);
 	}
 	cheat_text(renderer, panel_x + cheat_sx(24, logical_w),
 		   panel_y + panel_h - cheat_sy(48, logical_h), pt, hint,
