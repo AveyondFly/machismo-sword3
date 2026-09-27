@@ -289,6 +289,13 @@ static int newpal_damage_hook(void *source, void *target)
 	return damage;
 }
 
+/* Visible monsters use object ids 5000-5999 on most maps and 4000-4999 on
+ * some; the object class flags and battle scripts are the same. */
+static int newpal_monster_id(unsigned id)
+{
+	return id >= 4000 && id < 6000;
+}
+
 static int newpal_hide_encounter_object(int event_id, int index)
 {
 	int count = *(volatile int *)(uintptr_t)NP_MAP_OBJECT_COUNT;
@@ -305,7 +312,7 @@ static int newpal_hide_encounter_object(int event_id, int index)
 	object_id = *(uint16_t *)(object + 0x2c);
 	flags = *(uint32_t *)(object + 0x18);
 	/* Match the active event and the map's visible monster object class. */
-	if (event_id != object_id || object_id < 5000 || object_id >= 6000 ||
+	if (event_id != object_id || !newpal_monster_id(object_id) ||
 	    (flags & 0xf000u) != 0xf000u ||
 	    (flags & 0x10000000u) ||
 	    !*(void **)(object + 0x58))
@@ -342,14 +349,14 @@ static int newpal_bypass_visible_encounter(void *script, int state)
 		return 0;
 	object_id = *(uint16_t *)((uint8_t *)script + 0x2c);
 	offset = *(uint16_t *)((uint8_t *)script + 0x28);
-	if (object_id < 5000 || object_id >= 6000 || offset > 0xffd0)
+	if (!newpal_monster_id(object_id) || offset > 0xffd0)
 		return 0;
 	data = *(const uint8_t **)(uintptr_t)NP_SCRIPT_DATA;
 	if (!data)
 		return 0;
 	code = (const uint16_t *)(data + offset);
 	/* The observed monster scripts enter at this opcode sequence. */
-	if (code[0] != 0x43 || code[1] != 0x8320 ||
+	if (code[0] != 0x43 || (code[1] & 0x7fff) != 0x320 ||
 	    code[2] != 0x309 || !code[3] ||
 	    code[8] != 0x28 || code[9] != object_id)
 		return 0;
@@ -402,7 +409,7 @@ static int newpal_hide_script_encounter_object(int battle,
 			if (code[next_instruction] != 0x28)
 				continue;
 			object_id = code[next_instruction + 1];
-			if (object_id < 5000 || object_id >= 6000)
+			if (!newpal_monster_id(object_id))
 				continue;
 			object_index = -1;
 			if (!((int (*)(int, int *))(uintptr_t)
@@ -541,7 +548,7 @@ static int newpal_active_visible_encounter(void)
 	const uint8_t *object;
 	uint32_t flags;
 
-	if (object_id < 5000 || object_id >= 6000 || offset > 26) {
+	if (!newpal_monster_id(object_id) || offset > 26) {
 		g_active_monster_input = 0;
 		return 0;
 	}
