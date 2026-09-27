@@ -63,11 +63,25 @@ enum cheat_item {
 	CHEAT_MONEY = 0,
 	CHEAT_HP,
 	CHEAT_NO_ENCOUNTER,
+	CHEAT_NOCLIP,
 	CHEAT_LEVEL_UP,
 	CHEAT_ONE_HIT,
-	CHEAT_CLOSE,
-	CHEAT_ITEM_COUNT
+	CHEAT_CLOSE
 };
+
+static const int g_pal2_items[] = {
+	CHEAT_MONEY, CHEAT_HP, CHEAT_NO_ENCOUNTER, CHEAT_LEVEL_UP,
+	CHEAT_ONE_HIT, CHEAT_CLOSE,
+};
+static const int g_newpal_items[] = {
+	CHEAT_MONEY, CHEAT_HP, CHEAT_NO_ENCOUNTER, CHEAT_NOCLIP,
+	CHEAT_LEVEL_UP, CHEAT_ONE_HIT, CHEAT_CLOSE,
+};
+
+#define CHEAT_PAL2_ITEM_COUNT \
+	((int)(sizeof(g_pal2_items) / sizeof(g_pal2_items[0])))
+#define CHEAT_NEWPAL_ITEM_COUNT \
+	((int)(sizeof(g_newpal_items) / sizeof(g_newpal_items[0])))
 
 static int g_open;
 static int g_selected;
@@ -75,8 +89,26 @@ static int g_newpal_ui;
 static int g_newpal_axis_dir;
 static Uint8 g_newpal_consumed_buttons[SDL_CONTROLLER_BUTTON_MAX];
 static int g_no_encounter;
+static int g_noclip;
 static int g_level_up;
 static int g_one_hit;
+
+static int cheat_item_count(void)
+{
+	return g_newpal_ui ? CHEAT_NEWPAL_ITEM_COUNT : CHEAT_PAL2_ITEM_COUNT;
+}
+
+static int cheat_item(int index)
+{
+	return g_newpal_ui ? g_newpal_items[index] : g_pal2_items[index];
+}
+
+static void cheat_move(int dir)
+{
+	int count = cheat_item_count();
+
+	g_selected = (g_selected + count + dir) % count;
+}
 static char g_status[64];
 static Uint32 g_status_until;
 static struct {
@@ -552,7 +584,7 @@ static void cheat_close(void)
 static void cheat_apply(void)
 {
 	if (g_newpal_ui) {
-		switch (g_selected) {
+		switch (cheat_item(g_selected)) {
 		case CHEAT_MONEY:
 			cheat_set_status(host_cheat_newpal_money() ?
 				"金钱已拉满" : "请先进入游戏");
@@ -562,11 +594,16 @@ static void cheat_apply(void)
 				"全员已满血" : "找不到队伍数据");
 			break;
 		case CHEAT_NO_ENCOUNTER:
-			g_no_encounter = (g_no_encounter + 1) % 3;
+			g_no_encounter = !g_no_encounter;
 			host_cheat_newpal_no_encounter(g_no_encounter);
-			cheat_set_status(g_no_encounter == 2 ? "严格不遇敌已开" :
-					 g_no_encounter ? "不遇敌已开" :
-					 "不遇敌已关");
+			cheat_set_status(g_no_encounter ?
+				"不遇敌已开" : "不遇敌已关");
+			break;
+		case CHEAT_NOCLIP:
+			g_noclip = !g_noclip;
+			host_cheat_newpal_noclip(g_noclip);
+			cheat_set_status(g_noclip ?
+				"穿墙已开（含不遇敌）" : "穿墙已关");
 			break;
 		case CHEAT_LEVEL_UP:
 			g_level_up = !g_level_up;
@@ -588,7 +625,7 @@ static void cheat_apply(void)
 		}
 		return;
 	}
-	switch (g_selected) {
+	switch (cheat_item(g_selected)) {
 	case CHEAT_MONEY:
 		cheat_apply_money();
 		break;
@@ -637,11 +674,10 @@ int host_cheat_key(SDL_Scancode scancode, int down, int repeat)
 		return 1;
 	switch (scancode) {
 	case SDL_SCANCODE_UP:
-		g_selected = (g_selected + CHEAT_ITEM_COUNT - 1) %
-			CHEAT_ITEM_COUNT;
+		cheat_move(-1);
 		break;
 	case SDL_SCANCODE_DOWN:
-		g_selected = (g_selected + 1) % CHEAT_ITEM_COUNT;
+		cheat_move(1);
 		break;
 	case SDL_SCANCODE_SPACE:
 		cheat_apply();
@@ -690,11 +726,10 @@ int host_cheat_newpal_event(const SDL_Event *event)
 				cheat_open();
 			break;
 		case SDL_CONTROLLER_BUTTON_DPAD_UP:
-			g_selected = (g_selected + CHEAT_ITEM_COUNT - 1) %
-				CHEAT_ITEM_COUNT;
+			cheat_move(-1);
 			break;
 		case SDL_CONTROLLER_BUTTON_DPAD_DOWN:
-			g_selected = (g_selected + 1) % CHEAT_ITEM_COUNT;
+			cheat_move(1);
 			break;
 		case SDL_CONTROLLER_BUTTON_A:
 			cheat_apply();
@@ -713,8 +748,7 @@ int host_cheat_newpal_event(const SDL_Event *event)
 			int dir = event->caxis.value < -16000 ? -1 :
 				event->caxis.value > 16000 ? 1 : 0;
 			if (dir && dir != g_newpal_axis_dir)
-				g_selected = (g_selected + CHEAT_ITEM_COUNT +
-					      dir) % CHEAT_ITEM_COUNT;
+				cheat_move(dir);
 			g_newpal_axis_dir = dir;
 		}
 		return 1;
@@ -736,11 +770,10 @@ int host_cheat_newpal_event(const SDL_Event *event)
 		if (event->type == SDL_KEYDOWN && !event->key.repeat) {
 			switch (key) {
 			case SDL_SCANCODE_UP:
-				g_selected = (g_selected + CHEAT_ITEM_COUNT - 1) %
-					CHEAT_ITEM_COUNT;
+				cheat_move(-1);
 				break;
 			case SDL_SCANCODE_DOWN:
-				g_selected = (g_selected + 1) % CHEAT_ITEM_COUNT;
+				cheat_move(1);
 				break;
 			case SDL_SCANCODE_RETURN:
 			case SDL_SCANCODE_SPACE:
@@ -858,8 +891,11 @@ static const char *cheat_label(int item, char *buffer, size_t size)
 		return "人物满血";
 	case CHEAT_NO_ENCOUNTER:
 		snprintf(buffer, size, "不遇敌    %s",
-			 g_no_encounter == 2 ? "严格" :
 			 g_no_encounter ? "开" : "关");
+		return buffer;
+	case CHEAT_NOCLIP:
+		snprintf(buffer, size, "穿墙      %s",
+			 g_noclip ? "开" : "关");
 		return buffer;
 	case CHEAT_LEVEL_UP:
 		snprintf(buffer, size, "战后升级  %s",
@@ -905,7 +941,9 @@ void host_cheat_draw(SDL_Renderer *renderer, int logical_w, int logical_h)
 		g_text_renderer = renderer;
 	}
 	panel_w = cheat_sx(CHEAT_PANEL_W, logical_w);
-	panel_h = cheat_sy(CHEAT_PANEL_H, logical_h);
+	panel_h = cheat_sy(CHEAT_PANEL_H + (cheat_item_count() -
+					    CHEAT_PAL2_ITEM_COUNT) *
+				   CHEAT_ROW_H, logical_h);
 	panel_x = (logical_w - panel_w) / 2;
 	panel_y = (logical_h - panel_h) / 2;
 	row_h = cheat_sy(CHEAT_ROW_H, logical_h);
@@ -940,9 +978,9 @@ void host_cheat_draw(SDL_Renderer *renderer, int logical_w, int logical_h)
 	cheat_text(renderer, panel_x + cheat_sx(100, logical_w),
 		   panel_y + cheat_sy(18, logical_h), pt, hint,
 		   "mod by kk(k源机)");
-	for (i = 0; i < CHEAT_ITEM_COUNT; i++) {
+	for (i = 0; i < cheat_item_count(); i++) {
 		y = panel_y + cheat_sy(54, logical_h) + i * row_h;
-		label = cheat_label(i, buffer, sizeof(buffer));
+		label = cheat_label(cheat_item(i), buffer, sizeof(buffer));
 		if (i == g_selected) {
 			highlight.x = panel_x + cheat_sx(16, logical_w);
 			highlight.y = y - cheat_sy(4, logical_h);

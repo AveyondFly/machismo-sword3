@@ -39,7 +39,29 @@
 #define NP_MAP_ACTOR_SLOT_SIZE 0x21c
 #define NP_MAP_ACTOR_SLOT_COUNT 72
 #define NP_OP_BATTLE 0x309
-#define NP_NO_ENCOUNTER_STRICT 2
+/* Clears the requested field step when the tile map blocks it. */
+#define NP_FIELD_COLLISION 0x100073d60ull
+/* Party followers path-find to a point on the leader's trail. */
+#define NP_FOLLOWER_UPDATE 0x1000235ccull
+#define NP_PARTY_COUNT 0x1001f6b48ull
+#define NP_PARTY_OBJECTS 0x1001f6b4cull
+#define NP_FOLLOWER_PATHS 0x1001f5a68ull
+#define NP_FOLLOWER_PATH_SIZE 0x21c
+#define NP_PATH_STEP_INDEX 0x02
+#define NP_PATH_WAITING 0x8000
+#define NP_PATH_DELTA 0x16
+#define NP_PATH_STEPS 0x1c
+#define NP_TRAIL_X 0x1001f6b6cull
+#define NP_TRAIL_Y 0x1001f6becull
+#define NP_STEP_DX 0x100180a6cull
+#define NP_STEP_DY 0x100180a8cull
+#define NP_ACTOR_SPEED 0x08
+#define NP_ACTOR_FACING 0x34
+#define NP_WALK_SPEED 8
+#define NP_PACK_LOOKUP 0x100041564ull
+#define NP_PACK_CLOSE 0x100041880ull
+#define NP_PACK_HANDLES 0x10023e6e0ull
+#define NP_PACK_HANDLE_COUNT 250
 
 enum newpal_property {
 	NP_LEVEL_CAP = 4,
@@ -56,6 +78,7 @@ static int g_install_attempted;
 static int g_level_up;
 static int g_one_hit;
 static int g_no_encounter;
+static int g_noclip;
 static unsigned g_encounters_suppressed;
 static unsigned g_encounters_bypassed;
 static unsigned g_map_monsters_removed;
@@ -67,6 +90,15 @@ static int (*g_damage_orig)(void *source, void *target);
 static int (*g_script_step_orig)(void *script);
 static void (*g_scene_transition_orig)(int requested);
 static void (*g_scene_mode_orig)(int mode);
+static void (*g_field_collision_orig)(void *object, int *dx, int *dy);
+static void (*g_follower_update_orig)(int index);
+
+/* Walking through walls reaches monsters and penalty zones the player would
+ * otherwise route around, so it always skips their battles too. */
+static int newpal_skip_encounters(void)
+{
+	return g_no_encounter || g_noclip;
+}
 
 static int newpal_list_count(void *list)
 {
@@ -306,7 +338,7 @@ static int newpal_bypass_visible_encounter(void *script, int state)
 	const uint8_t *data;
 	const uint16_t *code;
 
-	if (!g_no_encounter || state != 0)
+	if (!newpal_skip_encounters() || state != 0)
 		return 0;
 	object_id = *(uint16_t *)((uint8_t *)script + 0x2c);
 	offset = *(uint16_t *)((uint8_t *)script + 0x28);
@@ -413,7 +445,8 @@ static int newpal_script_step_hook(void *script)
 	result = g_script_step_orig(script);
 	state_after = *(volatile int *)(uintptr_t)NP_SCENE_STATE;
 	request_after = *(volatile int *)(uintptr_t)NP_SCENE_REQUEST;
-	if (g_no_encounter && state_before == 0 && request_after > 0) {
+	if (newpal_skip_encounters() && state_before == 0 &&
+	    request_after > 0) {
 		int event = *(volatile int *)(uintptr_t)NP_CURRENT_OBJECT_ID;
 		int index = *(volatile int *)(uintptr_t)NP_CURRENT_OBJECT_INDEX;
 		int hidden;
@@ -440,11 +473,11 @@ static int newpal_script_step_hook(void *script)
 			const uint16_t *at = code && entry_offset <= 0xffc0 ?
 				code + entry_offset / 2 : NULL;
 
-			if (g_no_encounter == NP_NO_ENCOUNTER_STRICT &&
+			if (g_noclip &&
 			    newpal_penalty_battle(at, request_after,
 						  entry_offset)) {
 				fprintf(stderr,
-					"sword3-sdl: NewPAL trainer strict suppressed penalty battle request=%d offset=%u source=%u head=%04x %04x %04x %04x\n",
+					"sword3-sdl: NewPAL trainer noclip suppressed penalty battle request=%d offset=%u source=%u head=%04x %04x %04x %04x\n",
 					request_after, entry_offset,
 					*(uint16_t *)((uint8_t *)entry_script +
 						      0x2c),
@@ -484,7 +517,7 @@ static int newpal_script_step_hook(void *script)
 				*(uint16_t *)((uint8_t *)script + 0x2c));
 		return result;
 	}
-	if (g_no_encounter && state_before == 0 &&
+	if (newpal_skip_encounters() && state_before == 0 &&
 	    (state_after != state_before || request_after != request_before) &&
 	    samples++ < 32) {
 		const int *words = script;
@@ -543,7 +576,7 @@ static void newpal_scene_mode_hook(int mode)
 		    *(const uint16_t *)(script + 0x28) > 26)
 			g_active_monster_input = 0;
 	}
-	if (g_no_encounter && mode == 0 &&
+	if (newpal_skip_encounters() && mode == 0 &&
 	    newpal_active_visible_encounter()) {
 		mode = 7;
 		g_monster_input_kept++;
@@ -557,7 +590,7 @@ static void newpal_scene_transition_hook(int requested)
 	int state = *(volatile int *)(uintptr_t)NP_SCENE_STATE;
 	uintptr_t caller = (uintptr_t)__builtin_return_address(0);
 
-	if (g_no_encounter && state == 0 && samples++ < 32)
+	if (newpal_skip_encounters() && state == 0 && samples++ < 32)
 		fprintf(stderr,
 			"sword3-sdl: NewPAL trainer preserved transition request=%d caller=0x%llx suppressed=%u\n",
 			requested, (unsigned long long)caller,
@@ -577,22 +610,190 @@ void host_cheat_newpal_one_hit(int enabled)
 	fprintf(stderr, "sword3-sdl: NewPAL trainer one-hit=%d\n", enabled);
 }
 
-void host_cheat_newpal_no_encounter(int mode)
+static void newpal_set_encounter_modes(int no_encounter, int noclip)
 {
-	fprintf(stderr,
-		"sword3-sdl: NewPAL trainer no-encounter=%d suppressed=%u bypassed=%u removed=%u input-kept=%u\n",
-		mode, g_encounters_suppressed,
-		g_encounters_bypassed, g_map_monsters_removed,
-		g_monster_input_kept);
-	if (mode && !g_no_encounter) {
+	if ((no_encounter || noclip) && !newpal_skip_encounters()) {
 		g_encounters_suppressed = 0;
 		g_encounters_bypassed = 0;
 		g_map_monsters_removed = 0;
 		g_monster_input_kept = 0;
 	}
-	if (!mode)
+	if (!no_encounter && !noclip)
 		g_active_monster_input = 0;
-	g_no_encounter = mode;
+	g_no_encounter = no_encounter;
+	g_noclip = noclip;
+}
+
+void host_cheat_newpal_no_encounter(int enabled)
+{
+	fprintf(stderr,
+		"sword3-sdl: NewPAL trainer no-encounter=%d suppressed=%u bypassed=%u removed=%u input-kept=%u\n",
+		enabled, g_encounters_suppressed,
+		g_encounters_bypassed, g_map_monsters_removed,
+		g_monster_input_kept);
+	newpal_set_encounter_modes(enabled, g_noclip);
+}
+
+void host_cheat_newpal_noclip(int enabled)
+{
+	fprintf(stderr, "sword3-sdl: NewPAL trainer noclip=%d hooked=%d\n",
+		enabled, g_field_collision_orig != NULL);
+	newpal_set_encounter_modes(g_no_encounter, enabled);
+}
+
+static void newpal_field_collision_hook(void *object, int *dx, int *dy)
+{
+	if (g_noclip)
+		return;
+	g_field_collision_orig(object, dx, dy);
+}
+
+static int newpal_sign(int value)
+{
+	return (value > 0) - (value < 0);
+}
+
+/* With noclip the leader stands inside walls, so the follower's path search
+ * keeps failing. Step straight toward its trail point instead, using the
+ * same step state the original writes after a successful search. */
+static void newpal_follower_update_hook(int index)
+{
+	const int32_t *step_dx = (const int32_t *)(uintptr_t)NP_STEP_DX;
+	const int32_t *step_dy = (const int32_t *)(uintptr_t)NP_STEP_DY;
+	const int32_t *party = (const int32_t *)(uintptr_t)NP_PARTY_OBJECTS;
+	int count = *(volatile int *)(uintptr_t)NP_PARTY_COUNT;
+	uint8_t *object;
+	uint8_t *actor;
+	uint8_t *path;
+	uint8_t *leader_actor;
+	int x;
+	int y;
+	int dx;
+	int dy;
+	int slot;
+	int code;
+
+	if (!g_noclip || count < 2 || count > 16) {
+		g_follower_update_orig(index);
+		return;
+	}
+	for (slot = 1; slot < count && party[slot] != index; slot++)
+		;
+	object = (uint8_t *)(uintptr_t)NP_MAP_OBJECTS +
+		(size_t)index * NP_MAP_OBJECT_SIZE;
+	actor = *(uint8_t **)(object + 0x58);
+	if (slot >= count || !actor) {
+		g_follower_update_orig(index);
+		return;
+	}
+	x = *(uint16_t *)(object + 8);
+	y = *(uint16_t *)(object + 0xa);
+	if ((x | y) & 0xf)
+		return;
+	path = (uint8_t *)(uintptr_t)NP_FOLLOWER_PATHS +
+		(size_t)slot * NP_FOLLOWER_PATH_SIZE;
+	/* The per-frame party mover only advances a path owned by this object
+	 * whose step index is clear; the step list ends with 0xff, which also
+	 * makes the original search again once noclip is off. */
+	*(uint16_t *)path = (uint16_t)index;
+	*(uint32_t *)(path + NP_PATH_DELTA) = 0;
+	path[NP_PATH_STEPS + 1] = 0xff;
+	dx = newpal_sign(((const int32_t *)(uintptr_t)NP_TRAIL_X)[slot * 2] - x);
+	dy = newpal_sign(((const int32_t *)(uintptr_t)NP_TRAIL_Y)[slot * 2] - y);
+	if (!dx && !dy) {
+		*(uint16_t *)(path + NP_PATH_STEP_INDEX) = NP_PATH_WAITING;
+		path[NP_PATH_STEPS] = 0xff;
+		leader_actor = *(uint8_t **)((uint8_t *)(uintptr_t)NP_MAP_OBJECTS +
+			(size_t)*(volatile int *)(uintptr_t)NP_CURRENT_OBJECT_INDEX *
+			NP_MAP_OBJECT_SIZE + 0x58);
+		*(int32_t *)(actor + NP_ACTOR_SPEED) = 0;
+		if (leader_actor)
+			*(int32_t *)(actor + NP_ACTOR_FACING) =
+				*(int32_t *)(leader_actor + NP_ACTOR_FACING);
+		return;
+	}
+	for (code = 0; code < 8; code++)
+		if (newpal_sign(step_dx[code]) == dx &&
+		    newpal_sign(step_dy[code]) == dy)
+			break;
+	if (code == 8)
+		return;
+	*(uint16_t *)(path + NP_PATH_STEP_INDEX) = 0;
+	path[NP_PATH_STEPS] = (uint8_t)code;
+	*(int16_t *)(path + NP_PATH_DELTA) = (int16_t)(step_dx[code] * 2);
+	*(int16_t *)(path + NP_PATH_DELTA + 2) = (int16_t)(step_dy[code] * 2);
+	*(int32_t *)(actor + NP_ACTOR_SPEED) = NP_WALK_SPEED;
+}
+
+static void *newpal_trampoline(uintptr_t function);
+
+/* Opening a pack file that is already open returns the same FILE*, and every
+ * opener closes it. Darwin ignores the repeated fclose; glibc aborts with a
+ * double free. Keep the handle open until its last opener closes it. */
+static uint16_t g_pack_extra_refs[NP_PACK_HANDLE_COUNT];
+static void *(*g_pack_lookup_orig)(const char *path, int mode);
+static int (*g_pack_close_orig)(void *handle);
+
+static int newpal_pack_index(void *handle)
+{
+	void *const *handles = (void *const *)(uintptr_t)NP_PACK_HANDLES;
+	int i;
+
+	for (i = 0; i < NP_PACK_HANDLE_COUNT; i++)
+		if (handles[i] == handle)
+			return i;
+	return -1;
+}
+
+static void *newpal_pack_lookup_hook(const char *path, int mode)
+{
+	void *handle = g_pack_lookup_orig(path, mode);
+	int index = handle ? newpal_pack_index(handle) : -1;
+
+	if (index >= 0)
+		g_pack_extra_refs[index]++;
+	return handle;
+}
+
+static int newpal_pack_close_hook(void *handle)
+{
+	int index = newpal_pack_index(handle);
+
+	if (index >= 0 && g_pack_extra_refs[index]) {
+		g_pack_extra_refs[index]--;
+		return 1;
+	}
+	return g_pack_close_orig(handle);
+}
+
+void host_newpal_prepare(void)
+{
+	static const uint32_t lookup_expected[4] = {
+		0xa9bd57f6u, 0xa9014ff4u, 0xa9027bfdu, 0x910083fdu
+	};
+	static const uint32_t close_expected[4] = {
+		0xa9be4ff4u, 0xa9017bfdu, 0x910043fdu, 0xaa0003f3u
+	};
+
+	if (memcmp((const void *)(uintptr_t)NP_PACK_LOOKUP,
+		   lookup_expected, 16) ||
+	    memcmp((const void *)(uintptr_t)NP_PACK_CLOSE,
+		   close_expected, 16)) {
+		fprintf(stderr,
+			"sword3-sdl: NewPAL pack handle hook fingerprint mismatch\n");
+		return;
+	}
+	g_pack_lookup_orig = newpal_trampoline(NP_PACK_LOOKUP);
+	g_pack_close_orig = newpal_trampoline(NP_PACK_CLOSE);
+	if (!g_pack_lookup_orig || !g_pack_close_orig ||
+	    host_newpal_patch_jump(NP_PACK_LOOKUP, newpal_pack_lookup_hook,
+				   lookup_expected) != 0 ||
+	    host_newpal_patch_jump(NP_PACK_CLOSE, newpal_pack_close_hook,
+				   close_expected) != 0) {
+		fprintf(stderr, "sword3-sdl: NewPAL pack handle hooks failed\n");
+		return;
+	}
+	fprintf(stderr, "sword3-sdl: NewPAL pack handle refcount installed\n");
 }
 
 static void *newpal_trampoline(uintptr_t function)
@@ -670,6 +871,14 @@ void host_cheat_newpal_install(void)
 	static const uint32_t scene_mode_expected[4] = {
 		0xa9be4ff4u, 0xa9017bfdu, 0x910043fdu, 0x90001214u
 	};
+	static const uint32_t collision_expected[4] = {
+		0xd10443ffu, 0xa90d5ff8u, 0xa90e57f6u, 0xa90f4ff4u
+	};
+	static const uint32_t follower_expected[4] = {
+		0xd10303ffu, 0xa9066ffcu, 0xa90767fau, 0xa9085ff8u
+	};
+	void (*collision_orig)(void *, int *, int *);
+	void (*follower_orig)(int);
 
 	if (g_install_attempted)
 		return;
@@ -681,7 +890,11 @@ void host_cheat_newpal_install(void)
 	    memcmp((const void *)(uintptr_t)NP_SCENE_TRANSITION,
 		   transition_expected, 16) ||
 	    memcmp((const void *)(uintptr_t)NP_SCENE_MODE_SETTER,
-		   scene_mode_expected, 16)) {
+		   scene_mode_expected, 16) ||
+	    memcmp((const void *)(uintptr_t)NP_FIELD_COLLISION,
+		   collision_expected, 16) ||
+	    memcmp((const void *)(uintptr_t)NP_FOLLOWER_UPDATE,
+		   follower_expected, 16)) {
 		fprintf(stderr,
 			"sword3-sdl: NewPAL trainer executable hook fingerprint mismatch\n");
 		return;
@@ -691,8 +904,11 @@ void host_cheat_newpal_install(void)
 	g_script_step_orig = newpal_trampoline(NP_SCRIPT_STEP);
 	g_scene_transition_orig = newpal_trampoline(NP_SCENE_TRANSITION);
 	g_scene_mode_orig = newpal_trampoline(NP_SCENE_MODE_SETTER);
+	collision_orig = newpal_trampoline(NP_FIELD_COLLISION);
+	follower_orig = newpal_trampoline(NP_FOLLOWER_UPDATE);
 	if (!g_reward_orig || !g_damage_orig || !g_script_step_orig ||
-	    !g_scene_transition_orig || !g_scene_mode_orig)
+	    !g_scene_transition_orig || !g_scene_mode_orig || !collision_orig ||
+	    !follower_orig)
 		return;
 	if (host_newpal_patch_jump(NP_REWARD, newpal_reward_hook,
 			     reward_expected) != 0)
@@ -711,5 +927,19 @@ void host_cheat_newpal_install(void)
 			     newpal_scene_mode_hook,
 			     scene_mode_expected) != 0)
 		return;
+	g_field_collision_orig = collision_orig;
+	if (host_newpal_patch_jump(NP_FIELD_COLLISION,
+			     newpal_field_collision_hook,
+			     collision_expected) != 0) {
+		g_field_collision_orig = NULL;
+		return;
+	}
+	g_follower_update_orig = follower_orig;
+	if (host_newpal_patch_jump(NP_FOLLOWER_UPDATE,
+			     newpal_follower_update_hook,
+			     follower_expected) != 0) {
+		g_follower_update_orig = NULL;
+		return;
+	}
 	fprintf(stderr, "sword3-sdl: NewPAL trainer runtime hooks installed\n");
 }

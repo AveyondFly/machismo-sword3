@@ -1,7 +1,9 @@
 #include "host_prepare.h"
+#include "host_cheat_newpal.h"
 
 #include <SDL2/SDL.h>
 #include <stdio.h>
+#include <string.h>
 
 int sword3_host_prepare(void)
 {
@@ -47,5 +49,7 @@ int sword3_host_prepare(void)
 	        "sword3-host: WAYLAND_DISPLAY=%s XDG_RUNTIME_DIR=%s\n",
 	        getenv("WAYLAND_DISPLAY") ? getenv("WAYLAND_DISPLAY") : "(unset)",
 	        getenv("XDG_RUNTIME_DIR") ? getenv("XDG_RUNTIME_DIR") : "(unset)");
+	if (getenv("SWORD3_PORT") && strcmp(getenv("SWORD3_PORT"), "newpal") == 0)
+		host_newpal_prepare();
 	return 0;
 }

@@ -4,6 +4,8 @@
 #include <stdint.h>
 
 /* Entry points recovered from the pinned NewPAL Mach-O executable. */
+/* Runs before the game entry point; later hooks install on first frame. */
+void host_newpal_prepare(void);
 void host_cheat_newpal_install(void);
 int host_newpal_patch_jump(uintptr_t function, void *hook,
 			   const uint32_t expected[4]);
@@ -11,7 +13,8 @@ int host_cheat_newpal_money(void);
 int host_cheat_newpal_heal(void);
 void host_cheat_newpal_level_up(int enabled);
 void host_cheat_newpal_one_hit(int enabled);
-/* 0 off, 1 skip visible monsters, 2 also skip penalty-zone battles. */
-void host_cheat_newpal_no_encounter(int mode);
+void host_cheat_newpal_no_encounter(int enabled);
+/* Also skips encounters, including penalty-zone battles. */
+void host_cheat_newpal_noclip(int enabled);
 
 #endif
