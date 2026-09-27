@@ -64,6 +64,7 @@ enum cheat_item {
 	CHEAT_HP,
 	CHEAT_PUPPET,
 	CHEAT_WAKE,
+	CHEAT_ENDING,
 	CHEAT_NO_ENCOUNTER,
 	CHEAT_NOCLIP,
 	CHEAT_LEVEL_UP,
@@ -76,8 +77,9 @@ static const int g_pal2_items[] = {
 	CHEAT_ONE_HIT, CHEAT_CLOSE,
 };
 static const int g_newpal_items[] = {
-	CHEAT_MONEY, CHEAT_HP, CHEAT_PUPPET, CHEAT_WAKE, CHEAT_NO_ENCOUNTER,
-	CHEAT_NOCLIP, CHEAT_LEVEL_UP, CHEAT_ONE_HIT, CHEAT_CLOSE,
+	CHEAT_MONEY, CHEAT_HP, CHEAT_PUPPET, CHEAT_WAKE, CHEAT_ENDING,
+	CHEAT_NO_ENCOUNTER, CHEAT_NOCLIP, CHEAT_LEVEL_UP, CHEAT_ONE_HIT,
+	CHEAT_CLOSE,
 };
 
 #define CHEAT_PAL2_ITEM_COUNT \
@@ -95,6 +97,7 @@ static int g_noclip;
 static int g_level_up;
 static int g_one_hit;
 static int g_wake_target = NP_WAKE_LINGER;
+static int g_ending_target = NP_ENDING_NORMAL;
 static int g_newpal_axis_x_dir;
 
 static int cheat_item_count(void)
@@ -114,17 +117,27 @@ static int cheat_item_enabled(int item)
 		return host_cheat_newpal_has_puppet();
 	case CHEAT_WAKE:
 		return host_cheat_newpal_wake_scene();
+	case CHEAT_ENDING:
+		return host_cheat_newpal_in_game();
 	default:
 		return 1;
 	}
 }
 
-/* Left and right pick the target inside the wake row. */
-static void cheat_side(void)
+/* Left and right pick the target inside a choice row. */
+static void cheat_side(int dir)
 {
-	if (cheat_item(g_selected) == CHEAT_WAKE)
+	switch (cheat_item(g_selected)) {
+	case CHEAT_WAKE:
 		g_wake_target = g_wake_target == NP_WAKE_LINGER ?
 			NP_WAKE_YUERU : NP_WAKE_LINGER;
+		break;
+	case CHEAT_ENDING:
+		g_ending_target = (g_ending_target + 3 + dir) % 3;
+		break;
+	default:
+		break;
+	}
 }
 
 static void cheat_move(int dir)
@@ -588,6 +601,9 @@ static void cheat_open(void)
 	g_selected = 0;
 	g_newpal_axis_dir = 0;
 	g_newpal_axis_x_dir = 0;
+	if (g_newpal_ui && host_cheat_newpal_in_game() &&
+	    host_cheat_newpal_ending() >= 0)
+		g_ending_target = host_cheat_newpal_ending();
 	g_status[0] = 0;
 	fprintf(stderr, "sword3-sdl: %s trainer open\n",
 		g_newpal_ui ? "NewPAL" : "Pal2");
@@ -632,6 +648,17 @@ static void cheat_apply(void)
 			else
 				cheat_set_status(linger ? "灵儿已经唤醒" :
 						 "月如已经唤醒");
+			break;
+		}
+		case CHEAT_ENDING: {
+			static const char *const done[] = {
+				"结局已设为普通", "结局已设为灵儿",
+				"结局已设为月如",
+			};
+
+			cheat_set_status(host_cheat_newpal_set_ending(
+						 g_ending_target) ?
+					 done[g_ending_target] : "请先进入游戏");
 			break;
 		}
 		case CHEAT_NO_ENCOUNTER:
@@ -721,8 +748,10 @@ int host_cheat_key(SDL_Scancode scancode, int down, int repeat)
 		cheat_move(1);
 		break;
 	case SDL_SCANCODE_LEFT:
+		cheat_side(-1);
+		break;
 	case SDL_SCANCODE_RIGHT:
-		cheat_side();
+		cheat_side(1);
 		break;
 	case SDL_SCANCODE_SPACE:
 		cheat_apply();
@@ -777,8 +806,10 @@ int host_cheat_newpal_event(const SDL_Event *event)
 			cheat_move(1);
 			break;
 		case SDL_CONTROLLER_BUTTON_DPAD_LEFT:
+			cheat_side(-1);
+			break;
 		case SDL_CONTROLLER_BUTTON_DPAD_RIGHT:
-			cheat_side();
+			cheat_side(1);
 			break;
 		case SDL_CONTROLLER_BUTTON_A:
 			cheat_apply();
@@ -803,7 +834,7 @@ int host_cheat_newpal_event(const SDL_Event *event)
 			int dir = event->caxis.value < -16000 ? -1 :
 				event->caxis.value > 16000 ? 1 : 0;
 			if (dir && dir != g_newpal_axis_x_dir)
-				cheat_side();
+				cheat_side(dir);
 			g_newpal_axis_x_dir = dir;
 		}
 		return 1;
@@ -831,8 +862,10 @@ int host_cheat_newpal_event(const SDL_Event *event)
 				cheat_move(1);
 				break;
 			case SDL_SCANCODE_LEFT:
+				cheat_side(-1);
+				break;
 			case SDL_SCANCODE_RIGHT:
-				cheat_side();
+				cheat_side(1);
 				break;
 			case SDL_SCANCODE_RETURN:
 			case SDL_SCANCODE_SPACE:
@@ -953,6 +986,8 @@ static const char *cheat_label(int item, char *buffer, size_t size)
 		return "傀儡虫加满";
 	case CHEAT_WAKE:
 		return "唤醒";
+	case CHEAT_ENDING:
+		return "结局";
 	case CHEAT_NO_ENCOUNTER:
 		snprintf(buffer, size, "不遇敌    %s",
 			 g_no_encounter ? "开" : "关");
@@ -976,36 +1011,66 @@ static const char *cheat_label(int item, char *buffer, size_t size)
 	}
 }
 
-/* The wake row names both targets; the chosen one is bracketed and a target
- * that is already awake is greyed out, as is the whole row off-scene. */
-static void cheat_draw_wake(SDL_Renderer *renderer, int x, int y, int pt,
-			    int row_selected, SDL_Color normal,
-			    SDL_Color selected, SDL_Color disabled)
+struct cheat_row_colors {
+	SDL_Color normal;
+	SDL_Color selected;
+	SDL_Color disabled;
+};
+
+/* A choice row names every target after its label; the chosen one is
+ * bracketed, and disabled targets or a disabled row are greyed out. */
+static void cheat_draw_choices(SDL_Renderer *renderer, int x, int y, int pt,
+			       const char *label, const char *const *names,
+			       const int *names_enabled, int count, int target,
+			       int row_enabled, int row_selected,
+			       const struct cheat_row_colors *colors)
 {
-	static const struct {
-		int who;
-		const char *chosen;
-		const char *other;
-	} targets[] = {
-		{ NP_WAKE_LINGER, "[灵儿]", " 灵儿 " },
-		{ NP_WAKE_YUERU, "[月如]", " 月如 " },
-	};
-	int scene = host_cheat_newpal_wake_scene();
-	size_t i;
+	char buffer[16];
+	int i;
 
 	x += cheat_text(renderer, x, y, pt,
-			!scene ? disabled : row_selected ? selected : normal,
-			"唤醒      ");
-	for (i = 0; i < sizeof(targets) / sizeof(targets[0]); i++) {
-		int chosen = scene && targets[i].who == g_wake_target;
-		SDL_Color color = !scene ||
-			!host_cheat_newpal_can_wake(targets[i].who) ? disabled :
-			chosen && row_selected ? selected : normal;
+			!row_enabled ? colors->disabled :
+			row_selected ? colors->selected : colors->normal,
+			label);
+	for (i = 0; i < count; i++) {
+		int chosen = row_enabled && i == target;
+		SDL_Color color = !row_enabled || !names_enabled[i] ?
+			colors->disabled :
+			chosen && row_selected ? colors->selected :
+			colors->normal;
 
-		x += cheat_text(renderer, x, y, pt, color,
-				chosen ? targets[i].chosen : targets[i].other);
+		snprintf(buffer, sizeof(buffer), chosen ? "[%s]" : " %s ",
+			 names[i]);
+		x += cheat_text(renderer, x, y, pt, color, buffer);
 		x += cheat_text(renderer, x, y, pt, color, " ");
 	}
+}
+
+static void cheat_draw_wake(SDL_Renderer *renderer, int x, int y, int pt,
+			    int row_selected,
+			    const struct cheat_row_colors *colors)
+{
+	static const char *const names[] = { "灵儿", "月如" };
+	int enabled[] = {
+		host_cheat_newpal_can_wake(NP_WAKE_LINGER),
+		host_cheat_newpal_can_wake(NP_WAKE_YUERU),
+	};
+
+	cheat_draw_choices(renderer, x, y, pt, "唤醒      ", names, enabled, 2,
+			   g_wake_target, host_cheat_newpal_wake_scene(),
+			   row_selected, colors);
+}
+
+static void cheat_draw_ending(SDL_Renderer *renderer, int x, int y, int pt,
+			      int row_selected,
+			      const struct cheat_row_colors *colors)
+{
+	static const char *const names[] = { "普通", "灵儿", "月如" };
+	static const int enabled[] = { 1, 1, 1 };
+
+	cheat_draw_choices(renderer, x, y, pt, "结局      ", names, enabled, 3,
+			   g_ending_target, host_cheat_newpal_in_game(),
+			   row_selected, colors);
 }
 
 void host_cheat_draw(SDL_Renderer *renderer, int logical_w, int logical_h)
@@ -1019,6 +1084,7 @@ void host_cheat_draw(SDL_Renderer *renderer, int logical_w, int logical_h)
 	SDL_Color selected = {255, 255, 220, 255};
 	SDL_Color disabled = {110, 104, 94, 255};
 	SDL_Color hint = {170, 160, 140, 255};
+	struct cheat_row_colors row_colors = { normal, selected, disabled };
 	SDL_Color status = {140, 230, 150, 255};
 	char buffer[40];
 	const char *label;
@@ -1088,8 +1154,13 @@ void host_cheat_draw(SDL_Renderer *renderer, int logical_w, int logical_h)
 		}
 		if (cheat_item(i) == CHEAT_WAKE) {
 			cheat_draw_wake(renderer, panel_x + cheat_sx(28, logical_w),
-					y, pt, i == g_selected, normal, selected,
-					disabled);
+					y, pt, i == g_selected, &row_colors);
+			continue;
+		}
+		if (cheat_item(i) == CHEAT_ENDING) {
+			cheat_draw_ending(renderer,
+					  panel_x + cheat_sx(28, logical_w), y,
+					  pt, i == g_selected, &row_colors);
 			continue;
 		}
 		cheat_text(renderer, panel_x + cheat_sx(28, logical_w), y,

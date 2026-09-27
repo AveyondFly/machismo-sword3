@@ -18,6 +18,16 @@ enum {
 	NP_WAKE_LINGER,
 	NP_WAKE_YUERU
 };
+enum {
+	NP_ENDING_NORMAL,
+	NP_ENDING_LINGER,
+	NP_ENDING_YUERU
+};
+int host_cheat_newpal_in_game(void);
+/* Returns -1 when both wake flags are set. */
+int host_cheat_newpal_ending(void);
+int host_cheat_newpal_set_ending(int ending);
+
 int host_cheat_newpal_wake_scene(void);
 int host_cheat_newpal_can_wake(int who);
 int host_cheat_newpal_wake(int who);

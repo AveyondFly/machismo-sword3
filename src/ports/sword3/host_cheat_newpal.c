@@ -56,6 +56,7 @@
  * checks the flag each wake branch sets, not the swapped event. */
 #define NP_FLAG_TEST 0x100011438ull
 #define NP_FLAG_SET 0x100011264ull
+#define NP_FLAG_CLEAR 0x10001121cull
 #define NP_LINGER_FLAG 1602
 #define NP_YUERU_FLAG 1601
 #define NP_LIST_LIMIT 32
@@ -350,6 +351,39 @@ int host_cheat_newpal_wake(int who)
 	fprintf(stderr, "sword3-sdl: NewPAL trainer wake %s flag=%d set=%d\n",
 		who == NP_WAKE_YUERU ? "yueru" : "linger",
 		newpal_wake_flag(who), newpal_flag_set(newpal_wake_flag(who)));
+	return 1;
+}
+
+int host_cheat_newpal_in_game(void)
+{
+	return newpal_party() != NULL;
+}
+
+int host_cheat_newpal_ending(void)
+{
+	int linger = newpal_flag_set(NP_LINGER_FLAG);
+	int yueru = newpal_flag_set(NP_YUERU_FLAG);
+
+	if (linger && yueru)
+		return -1;
+	return linger ? NP_ENDING_LINGER : yueru ? NP_ENDING_YUERU :
+		NP_ENDING_NORMAL;
+}
+
+/* Only one wake flag may be set, so each ending clears the other one. */
+int host_cheat_newpal_set_ending(int ending)
+{
+	void (*set)(int) = (void (*)(int))(uintptr_t)NP_FLAG_SET;
+	void (*clear)(int) = (void (*)(int))(uintptr_t)NP_FLAG_CLEAR;
+
+	if (!host_cheat_newpal_in_game())
+		return 0;
+	(ending == NP_ENDING_LINGER ? set : clear)(NP_LINGER_FLAG);
+	(ending == NP_ENDING_YUERU ? set : clear)(NP_YUERU_FLAG);
+	fprintf(stderr,
+		"sword3-sdl: NewPAL trainer ending=%d linger=%d yueru=%d\n",
+		ending, newpal_flag_set(NP_LINGER_FLAG),
+		newpal_flag_set(NP_YUERU_FLAG));
 	return 1;
 }
 
