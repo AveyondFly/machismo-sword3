@@ -36,6 +36,7 @@ TTF_Font *host_cjk_font(int pt)
 	const char *paths[10] = {0};
 	char packaged[PATH_MAX];
 	char bundled[PATH_MAX];
+	char bundled_cs[PATH_MAX];
 	int empty = -1;
 	int i;
 	TTF_Font *font = NULL;
@@ -73,15 +74,21 @@ TTF_Font *host_cjk_font(int pt)
 			     "%s/../../../assets/host_menu/cjk.ttf", bundle) <
 		    (int)sizeof(packaged))
 			paths[1] = packaged;
+		/* The trainer strings are simplified Chinese and the test glyph
+		 * below is 钱: the bundled traditional-only CT.ttf fails that
+		 * check, so try the simplified CS.ttf first. */
+		if (snprintf(bundled_cs, sizeof(bundled_cs), "%s/Resource/CS.ttf",
+			     bundle) < (int)sizeof(bundled_cs))
+			paths[2] = bundled_cs;
 		if (snprintf(bundled, sizeof(bundled), "%s/Resource/CT.ttf",
 			     bundle) < (int)sizeof(bundled))
-			paths[2] = bundled;
+			paths[3] = bundled;
 	}
 	paths[0] = "/usr/share/fonts/TTF/DejaVuSansMono.ttf";
-	paths[3] = "/usr/share/fonts/truetype/droid/DroidSansFallbackFull.ttf";
-	paths[4] = "/usr/share/fonts/TTF/DroidSansFallback.ttf";
-	paths[5] = "/usr/share/fonts/truetype/droid/DroidSansFallback.ttf";
-	for (i = 0; i < 6 && !font; i++)
+	paths[4] = "/usr/share/fonts/truetype/droid/DroidSansFallbackFull.ttf";
+	paths[5] = "/usr/share/fonts/TTF/DroidSansFallback.ttf";
+	paths[6] = "/usr/share/fonts/truetype/droid/DroidSansFallback.ttf";
+	for (i = 0; i < 7 && !font; i++)
 		font = host_font_open(paths[i], pt);
 	if (!font) {
 		fprintf(stderr, "sword3-sdl: no CJK font available for trainer\n");
