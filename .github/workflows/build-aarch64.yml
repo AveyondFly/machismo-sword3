@@ -53,9 +53,27 @@ jobs:
           cp build-docker/lib*.so dist/
           file dist/machismo
 
-      - name: Upload artifacts
+      - name: Package PortMaster port
+        env:
+          BRANCH_NAME: ${{ matrix.branch }}
+        run: |
+          case "$BRANCH_NAME" in
+            newpal-ios) PORT=newpal ;;
+            paladin2-ios) PORT=paladin2 ;;
+            *) PORT=sword3 ;;
+          esac
+          bash scripts/package-portmaster.sh "$PORT"
+
+      - name: Upload binaries artifact
         uses: actions/upload-artifact@v4
         with:
           name: machismo-aarch64-${{ matrix.branch }}
-          path: dist/*
+          path: dist/*.so dist/machismo
+          retention-days: 7
+
+      - name: Upload PortMaster package
+        uses: actions/upload-artifact@v4
+        with:
+          name: machismo-portmaster-${{ matrix.branch }}
+          path: dist/*.zip
           retention-days: 7
