@@ -1,0 +1,44 @@
+name: Build machismo aarch64
+
+on:
+  push:
+    branches: [master, paladin2-ios, newpal-ios]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    name: Build ${{ matrix.branch }} (aarch64)
+    runs-on: ubuntu-24.04-arm
+    strategy:
+      fail-fast: false
+      matrix:
+        branch: [master, paladin2-ios, newpal-ios]
+    # push 事件只构建被推送的分支；手动触发时三个分支全量构建。
+    # 构建器为公开镜像 ghcr.io/monkeyx-net/portmaster-build-templates/portmaster-builder:aarch64-latest
+    # （arm64 Ubuntu 20.04，glibc 2.31 工具链），与本地 scripts/docker-build.sh 同一入口。
+    if: github.event_name == 'workflow_dispatch' || github.ref_name == matrix.branch
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ matrix.branch }}
+
+      - name: Build in portmaster-builder container
+        run: bash scripts/docker-build.sh
+
+      - name: Collect artifacts
+        run: |
+          mkdir -p dist
+          cp build-docker/machismo dist/
+          cp build-docker/lib*.so dist/
+          file dist/machismo
+
+      - name: Upload artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: machismo-aarch64-${{ matrix.branch }}
+          path: dist/*
+          retention-days: 7
