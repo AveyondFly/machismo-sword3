@@ -15,7 +15,7 @@ fail()
 [ -f "$BINARY" ] || fail "game executable not found: $BINARY"
 mkdir -p "$GAMEDIR/saves" "$GAMEDIR/logs"
 
-export LD_LIBRARY_PATH="$GAMEDIR${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
+export LD_LIBRARY_PATH="$GAMEDIR/libs.aarch64:$GAMEDIR/libs:$GAMEDIR${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
 export MACHISMO_CONFIG="${MACHISMO_CONFIG:-$GAMEDIR/machismo-partial-sdl.conf}"
 export MACHISMO_STRICT_BINDS=1
 export SWORD3_BUNDLE_DIR="$APPDIR"
