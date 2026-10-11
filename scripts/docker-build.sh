@@ -33,6 +33,14 @@ cmake -S /src -B /src/build-docker -G Ninja \
     -DBUILD_TESTS=OFF
 cmake --build /src/build-docker --parallel "$(nproc)"
 
+# Runtime libs bundled into the port libs.aarch64/ directory: a
+# dependency-free minimal FFmpeg matching the engine 4.x sonames (older
+# firmware ships no FFmpeg, and the Debian build cannot be bundled — see
+# build-ffmpeg-minimal.sh), plus the gcc 9.4 libstdc++ the loader needs
+# (GLIBCXX_3.4.28 floor).
+bash /src/scripts/build-ffmpeg-minimal.sh
+cp -L /usr/lib/aarch64-linux-gnu/libstdc++.so.6 /src/build-docker/bundled-libs/
+
 echo "== artifacts =="
 file /src/build-docker/machismo /src/build-docker/lib*.so
 echo "== glibc symbol floor (max GLIBC_ version per binary) =="
