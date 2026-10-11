@@ -194,7 +194,10 @@ def generate(manifest_path: Path, output_path: Path) -> ObjCImports:
     imports = read_imports(manifest)
     output = render(imports, hashlib.sha256(manifest_bytes).hexdigest())
     output_path.parent.mkdir(parents=True, exist_ok=True)
-    output_path.write_text(output, encoding="utf-8", newline="\n")
+    # write_text() grew its newline= argument only in Python 3.10; open()
+    # has had it since 3.x, so write through it to keep 3.8 build hosts working.
+    with open(output_path, "w", encoding="utf-8", newline="\n") as handle:
+        handle.write(output)
     return imports
 
 
