@@ -1,0 +1,4 @@
+# Shell scripts and gptk maps are consumed by device shells that die on CRLF
+# (bad interpreter / black screen); force LF on every checkout.
+*.sh text eol=lf
+*.gptk text eol=lf
