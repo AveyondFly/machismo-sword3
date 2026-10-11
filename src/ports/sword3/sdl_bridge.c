@@ -26,6 +26,8 @@
 #include <libavutil/channel_layout.h>
 #include <libavutil/samplefmt.h>
 
+#include "ffmpeg_compat.h"
+
 #ifndef SDL_WINDOW_METAL
 #define SDL_WINDOW_METAL 0x20000000u
 #endif
@@ -7526,9 +7528,9 @@ static int movie_audio_ensure_stream(const AVFrame *frame)
 
 	if (audio->stream)
 		return 0;
-	channels = frame->ch_layout.nb_channels;
+	channels = SWORD3_AV_CHANNELS(frame);
 	if (channels <= 0)
-		channels = audio->codec->ch_layout.nb_channels;
+		channels = SWORD3_AV_CHANNELS(audio->codec);
 	if (channels <= 0)
 		return -1;
 	packed = av_get_packed_sample_fmt((enum AVSampleFormat)frame->format);
@@ -7565,9 +7567,9 @@ static int movie_audio_put_frame(AVFrame *frame)
 
 	if (movie_audio_ensure_stream(frame) != 0)
 		return -1;
-	channels = frame->ch_layout.nb_channels;
+	channels = SWORD3_AV_CHANNELS(frame);
 	if (channels <= 0)
-		channels = audio->codec->ch_layout.nb_channels;
+		channels = SWORD3_AV_CHANNELS(audio->codec);
 	samples = frame->nb_samples;
 	if (channels <= 0 || samples <= 0)
 		return 0;

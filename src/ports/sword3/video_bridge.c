@@ -13,6 +13,8 @@
 #include <libavutil/pixfmt.h>
 #include <libswscale/swscale.h>
 
+#include "ffmpeg_compat.h"
+
 struct Sword3Video {
 	AVFormatContext *format;
 	AVCodecContext *codec;
@@ -172,8 +174,8 @@ fail:
 
 static double frame_duration_seconds(Sword3Video *video)
 {
-	if (video->decoded->duration > 0)
-		return (double)video->decoded->duration *
+	if (SWORD3_AV_FRAME_DURATION(video->decoded) > 0)
+		return (double)SWORD3_AV_FRAME_DURATION(video->decoded) *
 		       av_q2d(video->stream->time_base);
 	if (video->stream->avg_frame_rate.num > 0 &&
 	    video->stream->avg_frame_rate.den > 0)
