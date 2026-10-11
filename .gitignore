@@ -53,3 +53,5 @@ clang_cpp_major
 src/include/
 __pycache__/
 *.pyc
+# Docker build output (scripts/docker-build.sh)
+build-docker/

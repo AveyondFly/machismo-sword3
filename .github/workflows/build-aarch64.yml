@@ -1,0 +1,61 @@
+name: Build machismo aarch64
+
+on:
+  push:
+    branches: [master, paladin2-ios, newpal-ios]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  setup:
+    name: Resolve build branches
+    runs-on: ubuntu-latest
+    outputs:
+      branches: ${{ steps.matrix.outputs.branches }}
+    steps:
+      - id: matrix
+        # push 事件只构建被推送的分支；手动触发（workflow_dispatch）时三个分支全量构建。
+        env:
+          EVENT: ${{ github.event_name }}
+          BRANCH: ${{ github.ref_name }}
+        run: |
+          if [ "$EVENT" = "workflow_dispatch" ]; then
+            echo 'branches=["master","paladin2-ios","newpal-ios"]' >> "$GITHUB_OUTPUT"
+          else
+            printf 'branches=["%s"]\n' "$BRANCH" >> "$GITHUB_OUTPUT"
+          fi
+
+  build:
+    name: Build ${{ matrix.branch }} (aarch64)
+    needs: setup
+    runs-on: ubuntu-24.04-arm
+    strategy:
+      fail-fast: false
+      matrix:
+        branch: ${{ fromJSON(needs.setup.outputs.branches) }}
+    # 构建器为公开镜像 ghcr.io/monkeyx-net/portmaster-build-templates/portmaster-builder:aarch64-latest
+    # （arm64 Ubuntu 20.04，glibc 2.31 工具链），与本地 scripts/docker-build.sh 同一入口。
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ matrix.branch }}
+
+      - name: Build in portmaster-builder container
+        run: bash scripts/docker-build.sh
+
+      - name: Collect artifacts
+        run: |
+          mkdir -p dist
+          cp build-docker/machismo dist/
+          cp build-docker/lib*.so dist/
+          file dist/machismo
+
+      - name: Upload artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: machismo-aarch64-${{ matrix.branch }}
+          path: dist/*
+          retention-days: 7
