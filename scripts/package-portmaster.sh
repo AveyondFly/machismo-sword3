@@ -93,16 +93,35 @@ if [ -f "$ROOT/configs/$CFG/$PORT.gptk" ]; then
 fi
 
 mkdir -p "$PKG/libs.aarch64"
-cat > "$PKG/libs.aarch64/README.txt" <<'EOF'
-This directory ships EMPTY by design.
 
-PortMaster rule: only place libraries here after on-device ldd proves the
-firmware lacks them. Never bundle SDL2, libstdc++, glibc, EGL/GLES or driver
-libs from the build image — they shadow the firmware's patched versions and
-break input/display. Check with:
-    ldd $GAMEDIR/machismo && ldd $GAMEDIR/libsword3_host.so
-Copy only the reported missing .so files here (with any of THEIR missing
-deps), then re-test.
+# Bundle the runtime libs the engine needs that firmware does not guarantee:
+# a dependency-free minimal FFmpeg matching the engine's 4.x sonames plus the
+# gcc 9.4 libstdc++ (GLIBCXX_3.4.28 floor). Never add SDL2/glibc/EGL here —
+# they shadow the firmware's patched versions (device-specific breakage).
+LIBS_SRC="$BUILD_DIR/bundled-libs"
+if find "$LIBS_SRC" -maxdepth 1 -name '*.so*' 2>/dev/null | grep -q .; then
+    cp -L "$LIBS_SRC"/*.so* "$PKG/libs.aarch64/"
+else
+    echo "package-portmaster: warning: no bundled libs at $LIBS_SRC" >&2
+fi
+
+cat > "$PKG/libs.aarch64/README.txt" <<'EOF'
+Runtime libraries bundled with this port:
+
+- libavformat.so.58 / libavcodec.so.58 / libavutil.so.56 / libswscale.so.5 /
+  libswresample.so.3 — minimal FFmpeg 4.4 build (--disable-everything + the
+  decoders/demuxers iOS-era game media use; no external deps beyond libc).
+- libstdc++.so.6 — gcc 9.4 runtime (the loader needs GLIBCXX_3.4.28; some
+  older firmware ships an older libstdc++).
+
+Rules for touching this directory:
+
+- If on-device ldd reports a missing lib NOT covered here, copy it in from a
+  matching toolchain and re-test.
+- Never add SDL2, glibc, EGL/GLES or driver libs from a build image: they
+  shadow the firmware's patched versions and break input/display.
+- If the game's video uses a codec this minimal build lacks, either extend
+  scripts/build-ffmpeg-minimal.sh or drop in the firmware's full FFmpeg 4.x.
 EOF
 
 cat > "$PKG/port.json" <<EOF
@@ -121,7 +140,7 @@ cat > "$PKG/port.json" <<EOF
         ],
         "desc": "$DESC",
         "desc_md": null,
-        "inst": "将本包解压到 roms/ports/（或手动放入端口目录），把自备的 $IPA 放入 $PORT_DIR/ 目录，首次运行会自动提取 game/。固件需提供 FFmpeg 4.x 运行库（libavformat.so.58 等）；更新固件（ROCKNIX 等）请使用对应工具链构建的版本。",
+        "inst": "将本包解压到 roms/ports/（或手动放入端口目录），把自备的 $IPA 放入 $PORT_DIR/ 目录，首次运行会自动提取 game/。包内 libs.aarch64/ 已捆绑无外部依赖的最小 FFmpeg 4.x 与 libstdc++；若游戏视频缺解码器，替换为固件自带的 FFmpeg 4.x 或扩展 scripts/build-ffmpeg-minimal.sh。",
         "inst_md": null,
         "genres": [],
         "image": {},
@@ -153,10 +172,14 @@ place your own $IPA inside \`$PORT_DIR/\`, and launch.
 
 ## Libraries
 
-- \`libs.aarch64/\` is empty: add only libs proven missing via on-device \`ldd\`.
-- The engine needs FFmpeg 4.x sonames (libavformat.so.58, libavcodec.so.58,
-  libavutil.so.56, libswscale.so.5) from the firmware. Older CFWs ship them;
-  ROCKNIX (FFmpeg 6/7) does not — use the ROCKNIX-toolchain build there.
+- \`libs.aarch64/\` bundles a dependency-free minimal FFmpeg 4.4 (same 4.x
+  sonames the engine links) plus the gcc 9.4 libstdc++, so the package runs
+  on firmware that ships neither.
+- Do not add SDL2, glibc, EGL/GLES or driver libs: the firmware's patched
+  versions must stay in charge. Anything else missing shows up in on-device
+  \`ldd machismo\` / \`ldd libsword3_host.so\` — copy exactly those in.
+- If game video needs a codec the minimal build lacks, extend
+  \`scripts/build-ffmpeg-minimal.sh\` or drop in the firmware's FFmpeg 4.x.
 
 ## Files
 
