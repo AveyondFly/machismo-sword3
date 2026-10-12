@@ -45,11 +45,19 @@ cp "$ROOT/configs/paladin2/machismo.conf" \
    "$ROOT/configs/paladin2/sdl-hook-report.json" \
    "$ROOT/configs/paladin2/paladin2.gptk" \
    "$OUTPUT.new/"
-CJK_FONT=/usr/share/fonts/truetype/droid/DroidSansFallbackFull.ttf
-if [ -f "$CJK_FONT" ]; then
-    mkdir -p "$OUTPUT.new/assets/host_menu"
-    cp "$CJK_FONT" "$OUTPUT.new/assets/host_menu/cjk.ttf"
-fi
+# The host overlay strings are simplified Chinese *and* ASCII (digits in the
+# money line, the "A 确定 B/Y 关闭" hint), so the font must cover both.  The build
+# host's DroidSansFallbackFull.ttf is the CJK-only build of Droid Sans Fallback
+# (28601 cmap entries, no Latin range) and rendered every digit and letter as a
+# box, so the font is tracked in the repo rather than resolved from the host.
+CJK_FONT="$ROOT/assets/host_menu/cjk.ttf"
+[ -f "$CJK_FONT" ] || {
+    echo "Missing host overlay font: $CJK_FONT" >&2
+    exit 1
+}
+mkdir -p "$OUTPUT.new/assets/host_menu"
+cp "$CJK_FONT" "$OUTPUT.new/assets/host_menu/cjk.ttf"
+cp "$ROOT/assets/host_menu/LICENSE-cjk.txt" "$OUTPUT.new/assets/host_menu/"
 chmod +x "$OUTPUT.new/machismo"
 
 rm -rf "$OUTPUT"
