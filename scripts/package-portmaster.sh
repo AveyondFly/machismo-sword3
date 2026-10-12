@@ -49,12 +49,20 @@ esac
 
 ROOT=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)
 BUILD_DIR=${BUILD_DIR:-"$ROOT/build-docker"}
-# Apple-ABI libc++ (scripts/build-libcxx.sh → build-libcxx/lib). It must be built
-# against an old-glibc sysroot: the ROCKNIX cross-toolchain build needs
-# GLIBC_2.38 and is rejected by the floor gate below. lib/ must also carry a
-# 64-bit libatomic.so.1, which libc++.so.1 lists as NEEDED and older firmware
-# only ships in a 32-bit flavour.
-LIBCXX_BUILD_DIR=${LIBCXX_BUILD_DIR:-"$ROOT/build-libcxx"}
+# Apple-ABI libc++ plus a 64-bit libatomic.so.1, which libc++.so.1 lists as NEEDED
+# and older firmware only ships in a 32-bit flavour. A locally rebuilt set (see
+# scripts/build-libcxx.sh) wins when present; otherwise the tracked prebuilt pair
+# under prebuilt/aarch64-apple-libcxx/ is used, so a clone can package without an
+# LLVM checkout. Either way the floor gate below rejects a libc++ built against a
+# newer glibc than the engine — the ROCKNIX cross-toolchain build needs GLIBC_2.38
+# and is unusable on old firmware.
+if [ -n "${LIBCXX_BUILD_DIR:-}" ]; then
+    LIBCXX_LIB_DIR="$LIBCXX_BUILD_DIR/lib"
+elif [ -f "$ROOT/build-libcxx/lib/libc++.so.1" ]; then
+    LIBCXX_LIB_DIR="$ROOT/build-libcxx/lib"
+else
+    LIBCXX_LIB_DIR="$ROOT/prebuilt/aarch64-apple-libcxx"
+fi
 DIST=${DIST:-"$ROOT/dist"}
 STAGE="$DIST/.stage-$PORT_DIR"
 
@@ -65,9 +73,9 @@ for path in \
     "$BUILD_DIR/libsword3_objc_shim.so" \
     "$BUILD_DIR/libsword3_gl_bridge.so" \
     "$BUILD_DIR/libsword3_host.so" \
-    "$LIBCXX_BUILD_DIR/lib/libc++.so.1" \
-    "$LIBCXX_BUILD_DIR/lib/libc++abi.so.1" \
-    "$LIBCXX_BUILD_DIR/lib/libatomic.so.1" \
+    "$LIBCXX_LIB_DIR/libc++.so.1" \
+    "$LIBCXX_LIB_DIR/libc++abi.so.1" \
+    "$LIBCXX_LIB_DIR/libatomic.so.1" \
     "$ROOT/$LAUNCHER" \
     "$ROOT/assets/host_menu/cjk.ttf" \
     "$ROOT/configs/$CFG/machismo-partial-sdl.conf"; do
@@ -117,10 +125,10 @@ mkdir -p "$PKG/libs.aarch64"
 # rather than in libs.aarch64/. libatomic.so.1 is a DT_NEEDED of libc++.so.1 and old
 # firmware has only a 32-bit build of it, so it goes into libs.aarch64/ — the
 # launcher orders that directory ahead of the /usr/lib32 control.txt appends.
-cp -L "$LIBCXX_BUILD_DIR/lib/libc++.so.1" \
-      "$LIBCXX_BUILD_DIR/lib/libc++abi.so.1" \
+cp -L "$LIBCXX_LIB_DIR/libc++.so.1" \
+      "$LIBCXX_LIB_DIR/libc++abi.so.1" \
       "$PKG/"
-cp -L "$LIBCXX_BUILD_DIR/lib/libatomic.so.1" "$PKG/libs.aarch64/"
+cp -L "$LIBCXX_LIB_DIR/libatomic.so.1" "$PKG/libs.aarch64/"
 
 # A bundled libc++ that needs a newer glibc than the engine itself is precisely what
 # made this port unbootable on an EmuELEC 4.7 unit (glibc 2.36): the dlopen failed and
@@ -233,9 +241,11 @@ place your own $IPA inside \`$PORT_DIR/\`, and launch.
   libatomic.so.1, so the package runs on firmware that ships none of them.
 - \`libc++.so.1\` / \`libc++abi.so.1\` sit at the port root because
   \`dylib_map.conf\` maps \`libc++.1\` to \`./libc++.so.1\` and the launcher cds
-  there before starting the loader. They are the Apple-ABI build of
-  \`scripts/build-libcxx.sh\` done against an old-glibc sysroot; a libc++ from a
-  newer toolchain loads on ROCKNIX but fails on glibc 2.36 firmware.
+  there before starting the loader. They are the Apple-ABI build of libc++
+  (\`scripts/build-libcxx.sh\` against an old-glibc sysroot, tracked under
+  \`prebuilt/aarch64-apple-libcxx/\` so a clone can package without an LLVM
+  checkout); a libc++ from a newer toolchain loads on ROCKNIX but fails on glibc
+  2.36 firmware.
 - Do not add SDL2, glibc, EGL/GLES or driver libs: the firmware's patched
   versions must stay in charge. Anything else missing shows up in on-device
   \`ldd machismo\` / \`ldd libsword3_host.so\` — copy exactly those in.
