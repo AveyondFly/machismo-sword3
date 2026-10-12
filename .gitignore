@@ -55,3 +55,6 @@ __pycache__/
 *.pyc
 # Docker build output (scripts/docker-build.sh)
 build-docker/
+
+# Qoder local tool output (credits inspector reports)
+.qoder-credits/
