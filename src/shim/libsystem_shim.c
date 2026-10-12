@@ -519,6 +519,17 @@ size_t strlcat(char *dst, const char *src, size_t size)
 
 #endif
 
+/* __strlcpy_chk — what -FORTIFY_SOURCE rewrites strlcpy() into: the compiler
+ * appends a fourth argument carrying a compile-time object size. It is only a
+ * hardening bound, and the sizes Apple's headers baked into the guest are not
+ * meaningful here, so the bound is ignored rather than turned into abort().
+ * The destination is still never written past `size`. */
+size_t __strlcpy_chk(char *dst, const char *src, size_t size, size_t bos)
+{
+	(void)bos;
+	return strlcpy(dst, src, size);
+}
+
 /* ===== memset_pattern ===== */
 
 void memset_pattern4(void *dst, const void *pattern, size_t len)
