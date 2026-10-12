@@ -14,7 +14,13 @@ static struct {
 	TTF_Font *font;
 } g_fonts[HOST_FONT_SLOTS];
 
-static TTF_Font *host_font_open(const char *path, int pt)
+static int host_font_has_ascii(TTF_Font *font)
+{
+	return font && TTF_GlyphIsProvided(font, '0') &&
+	       TTF_GlyphIsProvided(font, 'A');
+}
+
+static TTF_Font *host_font_open(const char *path, int pt, int need_ascii)
 {
 	TTF_Font *font;
 
@@ -23,7 +29,10 @@ static TTF_Font *host_font_open(const char *path, int pt)
 	font = TTF_OpenFont(path, pt);
 	if (!font)
 		return NULL;
-	if (!TTF_GlyphIsProvided(font, HOST_FONT_TEST)) {
+	/* A CJK-only font passes the 钱 test but has no Latin range at all, which is
+	 * how the trainer drew Chinese correctly and every digit as a box. */
+	if (!TTF_GlyphIsProvided(font, HOST_FONT_TEST) ||
+	    (need_ascii && !host_font_has_ascii(font))) {
 		TTF_CloseFont(font);
 		return NULL;
 	}
@@ -39,6 +48,7 @@ TTF_Font *host_cjk_font(int pt)
 	char bundled_cs[PATH_MAX];
 	int empty = -1;
 	int i;
+	int t;
 	TTF_Font *font = NULL;
 
 	if (pt < 11)
@@ -88,14 +98,27 @@ TTF_Font *host_cjk_font(int pt)
 	paths[4] = "/usr/share/fonts/truetype/droid/DroidSansFallbackFull.ttf";
 	paths[5] = "/usr/share/fonts/TTF/DroidSansFallback.ttf";
 	paths[6] = "/usr/share/fonts/truetype/droid/DroidSansFallback.ttf";
-	for (i = 0; i < 7 && !font; i++)
-		font = host_font_open(paths[i], pt);
+	paths[7] = "/usr/share/fonts/source-han-sans-cn/SourceHanSansCN-Regular.otf";
+	/* Two passes: Latin coverage is mandatory while any such font exists; a
+	 * CJK-only face is only accepted as a last resort so the overlay still shows
+	 * Chinese, and then it is named in the log as the cause of box glyphs. */
+	for (t = 0; t < 2 && !font; t++) {
+		int need_ascii = !t;
+
+		for (i = 0; i < 8 && !font; i++) {
+			font = host_font_open(paths[i], pt, need_ascii);
+			if (font)
+				fprintf(stderr,
+					"sword3-sdl: trainer font %s pt=%d%s\n",
+					paths[i], pt,
+					need_ascii ? ""
+						   : " (no ASCII: digits and letters will be boxes)");
+		}
+	}
 	if (!font) {
 		fprintf(stderr, "sword3-sdl: no CJK font available for trainer\n");
 		return NULL;
 	}
-	fprintf(stderr, "sword3-sdl: trainer font %s pt=%d\n", paths[i - 1],
-		pt);
 	g_fonts[empty].pt = pt;
 	g_fonts[empty].font = font;
 	return font;

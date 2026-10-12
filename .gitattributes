@@ -2,3 +2,7 @@
 # (bad interpreter / black screen); force LF on every checkout.
 *.sh text eol=lf
 *.gptk text eol=lf
+# Bundled fonts must keep their exact bytes: a text filter would corrupt the
+# sfnt table offsets and the runtime would reject the font as having no glyphs.
+*.ttf binary
+*.otf binary

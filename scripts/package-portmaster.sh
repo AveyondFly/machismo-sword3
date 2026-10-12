@@ -59,6 +59,7 @@ for path in \
     "$BUILD_DIR/libsword3_gl_bridge.so" \
     "$BUILD_DIR/libsword3_host.so" \
     "$ROOT/$LAUNCHER" \
+    "$ROOT/assets/host_menu/cjk.ttf" \
     "$ROOT/configs/$CFG/machismo-partial-sdl.conf"; do
     [ -f "$path" ] || {
         echo "package-portmaster: missing $path" >&2
@@ -91,6 +92,13 @@ done
 if [ -f "$ROOT/configs/$CFG/$PORT.gptk" ]; then
     cp "$ROOT/configs/$CFG/$PORT.gptk" "$PKG/"
 fi
+
+# The trainer/menu overlay needs ASCII next to its simplified Chinese strings, so
+# the font ships with the package instead of being resolved from the build host or
+# from firmware (most of which have no CJK face at all). See assets/host_menu/.
+mkdir -p "$PKG/assets/host_menu"
+cp "$ROOT/assets/host_menu/cjk.ttf" "$PKG/assets/host_menu/"
+cp "$ROOT/assets/host_menu/LICENSE-cjk.txt" "$PKG/assets/host_menu/"
 
 mkdir -p "$PKG/libs.aarch64"
 
