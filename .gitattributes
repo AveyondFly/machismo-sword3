@@ -6,3 +6,7 @@
 # sfnt table offsets and the runtime would reject the font as having no glyphs.
 *.ttf binary
 *.otf binary
+# Same for the tracked prebuilt runtime libraries (prebuilt/aarch64-apple-libcxx/):
+# a text filter would corrupt the ELF and the loader would reject them.
+*.so binary
+*.so.[0-9] binary
