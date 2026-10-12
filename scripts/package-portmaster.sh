@@ -6,10 +6,11 @@
 #   sword3 (master):   run-rocknix.sh sits INSIDE sword3-ios/
 # The zip unpacks straight into roms/ports/.
 #
-# libs.aarch64/ ships empty on purpose — PortMaster rule: only bundle libs
-# proven missing on the target firmware with on-device ldd. Never ship
-# SDL2/libstdc++/glibc from the build image (device-specific breakage), and
-# this build needs FFmpeg 4.x sonames from the firmware.
+# Bundled libraries are limited to what on-device ldd proved the firmware lacks:
+# a minimal FFmpeg 4.x, the gcc 9.4 libstdc++, and the Apple-ABI libc++ pair plus a
+# 64-bit libatomic.so.1 (old firmware only ships a 32-bit one). Never ship
+# SDL2/glibc/EGL/driver libs from the build image — they shadow the firmware's
+# patched versions and break input/display per device.
 #
 # Usage: package-portmaster.sh <newpal|paladin2|sword3>
 set -eu
@@ -48,6 +49,12 @@ esac
 
 ROOT=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)
 BUILD_DIR=${BUILD_DIR:-"$ROOT/build-docker"}
+# Apple-ABI libc++ (scripts/build-libcxx.sh → build-libcxx/lib). It must be built
+# against an old-glibc sysroot: the ROCKNIX cross-toolchain build needs
+# GLIBC_2.38 and is rejected by the floor gate below. lib/ must also carry a
+# 64-bit libatomic.so.1, which libc++.so.1 lists as NEEDED and older firmware
+# only ships in a 32-bit flavour.
+LIBCXX_BUILD_DIR=${LIBCXX_BUILD_DIR:-"$ROOT/build-libcxx"}
 DIST=${DIST:-"$ROOT/dist"}
 STAGE="$DIST/.stage-$PORT_DIR"
 
@@ -58,6 +65,9 @@ for path in \
     "$BUILD_DIR/libsword3_objc_shim.so" \
     "$BUILD_DIR/libsword3_gl_bridge.so" \
     "$BUILD_DIR/libsword3_host.so" \
+    "$LIBCXX_BUILD_DIR/lib/libc++.so.1" \
+    "$LIBCXX_BUILD_DIR/lib/libc++abi.so.1" \
+    "$LIBCXX_BUILD_DIR/lib/libatomic.so.1" \
     "$ROOT/$LAUNCHER" \
     "$ROOT/configs/$CFG/machismo-partial-sdl.conf"; do
     [ -f "$path" ] || {
@@ -94,6 +104,41 @@ fi
 
 mkdir -p "$PKG/libs.aarch64"
 
+# Apple-ABI libc++: dylib_map.conf maps 'libc++.1 = ./libc++.so.1', and the launcher
+# cds to $GAMEDIR before starting the loader, so the pair belongs at the package root
+# rather than in libs.aarch64/. libatomic.so.1 is a DT_NEEDED of libc++.so.1 and old
+# firmware has only a 32-bit build of it, so it goes into libs.aarch64/ — the
+# launcher orders that directory ahead of the /usr/lib32 control.txt appends.
+cp -L "$LIBCXX_BUILD_DIR/lib/libc++.so.1" \
+      "$LIBCXX_BUILD_DIR/lib/libc++abi.so.1" \
+      "$PKG/"
+cp -L "$LIBCXX_BUILD_DIR/lib/libatomic.so.1" "$PKG/libs.aarch64/"
+
+# A bundled libc++ that needs a newer glibc than the engine itself is precisely what
+# made this port unbootable on an EmuELEC 4.7 unit (glibc 2.36): the dlopen failed and
+# strict binds then rejected every libc++ symbol. Gate it where objdump is available.
+if command -v objdump >/dev/null 2>&1; then
+    glibc_floor()
+    {
+        objdump -T "$1" 2>/dev/null | grep -oE 'GLIBC_[0-9.]+' | sort -uV | tail -1
+    }
+    engine_floor=$( { glibc_floor "$PKG/machismo"
+        for shim in "$PKG"/lib*.so; do glibc_floor "$shim"; done; } | sort -uV | tail -1)
+    for bin in "$PKG/libc++.so.1" "$PKG/libc++abi.so.1" "$PKG/libs.aarch64/libatomic.so.1"; do
+        bin_floor=$(glibc_floor "$bin")
+        [ -n "$bin_floor" ] || {
+            echo "package-portmaster: objdump found but no GLIBC floor readable from $bin" >&2
+            exit 1
+        }
+        [ "$(printf '%s\n%s\n' "$bin_floor" "$engine_floor" | sort -V | tail -1)" = "$engine_floor" ] || {
+            echo "package-portmaster: $(basename "$bin") needs $bin_floor but the engine only needs $engine_floor — rebuild it with an old-glibc sysroot via scripts/build-libcxx.sh" >&2
+            exit 1
+        }
+    done
+else
+    echo "package-portmaster: warning: no objdump on PATH, the bundled libc++ GLIBC floor is NOT checked" >&2
+fi
+
 # Bundle the runtime libs the engine needs that firmware does not guarantee:
 # a dependency-free minimal FFmpeg matching the engine's 4.x sonames plus the
 # gcc 9.4 libstdc++ (GLIBCXX_3.4.28 floor). Never add SDL2/glibc/EGL here —
@@ -113,6 +158,9 @@ Runtime libraries bundled with this port:
   decoders/demuxers iOS-era game media use; no external deps beyond libc).
 - libstdc++.so.6 — gcc 9.4 runtime (the loader needs GLIBCXX_3.4.28; some
   older firmware ships an older libstdc++).
+- libatomic.so.1 — 64-bit gcc atomic helpers. Older firmware only has the 32-bit
+  build under /usr/lib32, and libc++.so.1 (which sits at the port root) needs a
+  64-bit one; the launcher therefore keeps this directory ahead of /usr/lib32.
 
 Rules for touching this directory:
 
@@ -140,7 +188,7 @@ cat > "$PKG/port.json" <<EOF
         ],
         "desc": "$DESC",
         "desc_md": null,
-        "inst": "将本包解压到 roms/ports/（或手动放入端口目录），把自备的 $IPA 放入 $PORT_DIR/ 目录，首次运行会自动提取 game/。包内 libs.aarch64/ 已捆绑无外部依赖的最小 FFmpeg 4.x 与 libstdc++；若游戏视频缺解码器，替换为固件自带的 FFmpeg 4.x 或扩展 scripts/build-ffmpeg-minimal.sh。",
+        "inst": "将本包解压到 roms/ports/（或手动放入端口目录），把自备的 $IPA 放入 $PORT_DIR/ 目录，首次运行会自动提取 game/。包内已自带 Apple-ABI libc++（旧 glibc 构建）与 64 位 libatomic.so.1，libs.aarch64/ 另捆绑无外部依赖的最小 FFmpeg 4.x 与 libstdc++，无需再手动补库；若游戏视频缺解码器，替换为固件自带的 FFmpeg 4.x 或扩展 scripts/build-ffmpeg-minimal.sh。",
         "inst_md": null,
         "genres": [],
         "image": {},
@@ -173,8 +221,13 @@ place your own $IPA inside \`$PORT_DIR/\`, and launch.
 ## Libraries
 
 - \`libs.aarch64/\` bundles a dependency-free minimal FFmpeg 4.4 (same 4.x
-  sonames the engine links) plus the gcc 9.4 libstdc++, so the package runs
-  on firmware that ships neither.
+  sonames the engine links) plus the gcc 9.4 libstdc++ and a 64-bit
+  libatomic.so.1, so the package runs on firmware that ships none of them.
+- \`libc++.so.1\` / \`libc++abi.so.1\` sit at the port root because
+  \`dylib_map.conf\` maps \`libc++.1\` to \`./libc++.so.1\` and the launcher cds
+  there before starting the loader. They are the Apple-ABI build of
+  \`scripts/build-libcxx.sh\` done against an old-glibc sysroot; a libc++ from a
+  newer toolchain loads on ROCKNIX but fails on glibc 2.36 firmware.
 - Do not add SDL2, glibc, EGL/GLES or driver libs: the firmware's patched
   versions must stay in charge. Anything else missing shows up in on-device
   \`ldd machismo\` / \`ldd libsword3_host.so\` — copy exactly those in.
