@@ -68,5 +68,14 @@ pattern = (ctypes.c_uint8 * 4)(0xDE, 0xAD, 0xBE, 0xEF)
 lib.memset_pattern4(buf, pattern, 16)
 assert buf.raw == b'\\xDE\\xAD\\xBE\\xEF' * 4, f'memset_pattern4 failed: {buf.raw.hex()}'
 
-print('All libsystem_shim symbol tests passed')
-"
+# __strlcpy_chk: fortified strlcpy takes a trailing bound-size argument that
+# the shim ignores; the return value is still the full source length.
+lib.__strlcpy_chk.restype = ctypes.c_size_t
+lib.__strlcpy_chk.argtypes = [ctypes.c_char_p, ctypes.c_char_p,
+                              ctypes.c_size_t, ctypes.c_size_t]
+buf = ctypes.create_string_buffer(8)
+ret = lib.__strlcpy_chk(buf, b'abcdefghij', 8, 10)
+assert buf.raw[:8] == b'abcdefg\x00', f'__strlcpy_chk wrote {buf.raw!r}'
+assert ret == 10, f'__strlcpy_chk returned {ret}, expected 10'
+
+print('All libsystem_shim symbol tests passed')"
