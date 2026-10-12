@@ -3,7 +3,16 @@ set -eu
 
 ROOT=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)
 BUILD_DIR=${BUILD_DIR:-"$ROOT/build-rocknix"}
-LIBCXX_BUILD_DIR=${LIBCXX_BUILD_DIR:-"$ROOT/build-libcxx-rocknix"}
+# Apple-ABI libc++: a locally rebuilt set wins, otherwise the tracked prebuilt
+# pair under prebuilt/aarch64-apple-libcxx/ is used (see the README there).
+# Only the pair goes in — ROCKNIX firmware has a 64-bit libatomic of its own.
+if [ -n "${LIBCXX_BUILD_DIR:-}" ]; then
+    LIBCXX_LIB_DIR="$LIBCXX_BUILD_DIR/lib"
+elif [ -f "$ROOT/build-libcxx-rocknix/lib/libc++.so.1" ]; then
+    LIBCXX_LIB_DIR="$ROOT/build-libcxx-rocknix/lib"
+else
+    LIBCXX_LIB_DIR="$ROOT/prebuilt/aarch64-apple-libcxx"
+fi
 OUTPUT=${OUTPUT:-"$ROOT/dist/sword3-ios"}
 
 required="
@@ -13,8 +22,8 @@ $BUILD_DIR/libsword3_ios_shim.so
 $BUILD_DIR/libsword3_objc_shim.so
 $BUILD_DIR/libsword3_gl_bridge.so
 $BUILD_DIR/libsword3_host.so
-$LIBCXX_BUILD_DIR/lib/libc++.so.1
-$LIBCXX_BUILD_DIR/lib/libc++abi.so.1
+$LIBCXX_LIB_DIR/libc++.so.1
+$LIBCXX_LIB_DIR/libc++abi.so.1
 "
 for path in $required; do
     [ -f "$path" ] || {
@@ -32,8 +41,8 @@ cp "$BUILD_DIR/machismo" \
    "$BUILD_DIR/libsword3_gl_bridge.so" \
    "$BUILD_DIR/libsword3_host.so" \
    "$OUTPUT.new/"
-cp -L "$LIBCXX_BUILD_DIR/lib/libc++.so.1" \
-      "$LIBCXX_BUILD_DIR/lib/libc++abi.so.1" \
+cp -L "$LIBCXX_LIB_DIR/libc++.so.1" \
+      "$LIBCXX_LIB_DIR/libc++abi.so.1" \
       "$OUTPUT.new/"
 cp "$ROOT/configs/sword3/machismo.conf" \
    "$ROOT/configs/sword3/machismo-partial-sdl.conf" \
