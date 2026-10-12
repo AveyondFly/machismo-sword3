@@ -19,7 +19,17 @@ static int host_font_has_cjk(TTF_Font *font)
 	return font && TTF_GlyphIsProvided(font, HOST_FONT_TEST);
 }
 
-static TTF_Font *host_font_open(const char *path, int pt)
+/* A font can carry every Han glyph and still have an empty Latin range: the
+ * CJK-only build of Droid Sans Fallback shipped as assets/host_menu/cjk.ttf has
+ * 28601 cmap entries and none of them for 0-9 or A-Z, which is how the trainer
+ * drew Chinese correctly and every digit or letter as a box. */
+static int host_font_has_ascii(TTF_Font *font)
+{
+	return font && TTF_GlyphIsProvided(font, '0') &&
+	       TTF_GlyphIsProvided(font, 'A');
+}
+
+static TTF_Font *host_font_open(const char *path, int pt, int need_ascii)
 {
 	TTF_Font *font;
 
@@ -28,7 +38,8 @@ static TTF_Font *host_font_open(const char *path, int pt)
 	font = TTF_OpenFont(path, pt);
 	if (!font)
 		return NULL;
-	if (!host_font_has_cjk(font)) {
+	if (!host_font_has_cjk(font) ||
+	    (need_ascii && !host_font_has_ascii(font))) {
 		TTF_CloseFont(font);
 		return NULL;
 	}
@@ -103,18 +114,29 @@ TTF_Font *host_cjk_font(int pt)
 			     bundle) < (int)sizeof(path5))
 			try_path[6] = path5;
 	}
-	try_path[7] = "/usr/share/fonts/truetype/droid/DroidSansFallbackFull.ttf";
-	try_path[8] = "/usr/share/fonts/TTF/DroidSansFallback.ttf";
-	try_path[9] = "/usr/share/fonts/truetype/droid/DroidSansFallback.ttf";
-	try_path[10] = "/usr/share/fonts/TTF/DejaVuSansMono.ttf";
+	try_path[7] = "/usr/share/fonts/source-han-sans-cn/SourceHanSansCN-Regular.otf";
+	try_path[8] = "/usr/share/fonts/truetype/droid/DroidSansFallbackFull.ttf";
+	try_path[9] = "/usr/share/fonts/TTF/DroidSansFallback.ttf";
+	try_path[10] = "/usr/share/fonts/truetype/droid/DroidSansFallback.ttf";
+	try_path[11] = "/usr/share/fonts/TTF/DejaVuSansMono.ttf";
 	font = NULL;
-	for (t = 0; t < 11 && !font; t++) {
-		if (!try_path[t])
-			continue;
-		font = host_font_open(try_path[t], pt);
-		if (font)
-			fprintf(stderr, "sword3-sdl: cjk font %s pt=%d\n",
-				try_path[t], pt);
+	/* Two passes: Latin coverage is mandatory while any such font exists, and a
+	 * CJK-only face is only accepted as a last resort so the overlay still shows
+	 * Chinese — with a warning, because the digits will be boxes. */
+	for (t = 0; t < 2 && !font; t++) {
+		int need_ascii = !t;
+
+		for (i = 0; i < 12 && !font; i++) {
+			if (!try_path[i])
+				continue;
+			font = host_font_open(try_path[i], pt, need_ascii);
+			if (font)
+				fprintf(stderr,
+					"sword3-sdl: cjk font %s pt=%d%s\n",
+					try_path[i], pt,
+					need_ascii ? ""
+						   : " (no ASCII: digits and letters will be boxes)");
+		}
 	}
 	if (!font)
 		return NULL;
